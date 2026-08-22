@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+.venv/
+
+# ── 프로젝트 데이터 (아진산업 생산 데이터 — 공개 저장소에 올리지 않는다) ──
+data/raw/*
+data/intermediate/*
+data/output/*
+!data/raw/.gitkeep
+!data/intermediate/.gitkeep
+!data/output/.gitkeep
+
+# 합성 샘플은 용량이 크므로 생성해서 쓴다 (make_sample.py)
+data/sample/*.png
+data/sample/*.npy
+!data/sample/.gitkeep
