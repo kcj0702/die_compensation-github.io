@@ -11,4 +11,12 @@ data/output/*
 __pycache__/
 *.py[cod]
 .venv/
+AJ_ENV/
 .pytest_cache/
+
+# Company scan inputs and generated label-removal results
+label_removal/input/*
+label_removal/output/*
+
+!label_removal/input/.gitkeep
+!label_removal/output/.gitkeep
