@@ -12,8 +12,9 @@ import numpy as np
 
 
 ZERO_COLOR = (255, 0, 200)      # 0 영역 채움 (마젠타 — 히트맵에 없는 색)
-LINE_COLOR = (0, 0, 0)          # 0-Line 외곽선
+LINE_COLOR = (120, 0, 90)       # 0 영역 외곽선 (어두운 마젠타)
 CENTER_COLOR = (255, 255, 255)  # 중심선
+CROSSING_COLOR = (0, 0, 0)      # 부호 경계 = 진짜 0-Line (검정, 가장 진하게)
 
 
 def make_overlay(
@@ -22,8 +23,15 @@ def make_overlay(
     centerline: np.ndarray | None = None,
     alpha: float = 0.45,
     draw_contour: bool = True,
+    zero_crossing: np.ndarray | None = None,
 ) -> np.ndarray:
-    """원본 + 0-Line 오버레이 이미지를 만든다."""
+    """원본 + 0-Line 오버레이 이미지를 만든다.
+
+    zero_crossing 을 주면 부호가 바뀌는 경계선을 함께 그린다.
+    이 선은 허용오차와 무관하게 결정되므로, 색칠된 '영역' 이 허용오차에 따라
+    넓어지고 좁아져도 선 자체는 그대로다. 둘을 같이 보면
+    어디까지가 계산된 사실이고 어디부터가 판단인지 구분된다.
+    """
     out = rgb.copy()
     m = mask > 0
 
@@ -39,6 +47,12 @@ def make_overlay(
 
     if centerline is not None:
         out[centerline > 0] = CENTER_COLOR
+
+    if zero_crossing is not None:
+        thick = cv2.dilate(
+            (zero_crossing > 0).astype(np.uint8), np.ones((3, 3), np.uint8)
+        )
+        out[thick > 0] = CROSSING_COLOR
 
     return out
 

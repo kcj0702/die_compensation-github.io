@@ -14,7 +14,9 @@
     3. data/intermediate/deviation_map.png         (원본)
 
 출력 (data/intermediate/)
-    zero_line_mask.png        [필수] 0-Line 이진 마스크 — 파트 간 공통 규격
+    zero_line_mask.png        [필수] 0 영역 이진 마스크 — 파트 간 공통 규격
+    zero_line_crossing.png    부호 경계선 (허용오차 없이 결정되는 0-Line)
+    zero_line_tolerance_sweep.csv  허용오차별 면적 변화 (민감도)
     zero_line_overlay.png     원본 위에 얹은 검증용 이미지
     zero_line_centerline.png  0 밴드 중심선
     zero_line_regions.csv     영역별 면적·중심·평균편차
@@ -95,10 +97,17 @@ def process(src: Path, cfg: ZeroLineConfig, outdir: Path, prefix: str = "") -> d
     p = lambda name: outdir / f"{prefix}{name}"  # noqa: E731
 
     imwrite(p(C.ZERO_LINE_MASK), out.mask)
+    imwrite(p(C.ZERO_LINE_CROSSING), out.zero_crossing)
     write_rgb(p(C.ZERO_LINE_OVERLAY),
-              make_overlay(rgb, out.mask, out.centerline))
+              make_overlay(rgb, out.mask, out.centerline,
+                           zero_crossing=out.zero_crossing))
     if out.centerline is not None:
         imwrite(p("zero_line_centerline.png"), out.centerline)
+
+    # 허용오차 민감도 — "왜 하필 그 값이냐" 에 숫자로 답하기 위한 표
+    pd.DataFrame(r.params.get("tolerance_sweep", [])).to_csv(
+        p(C.ZERO_LINE_SWEEP), index=False, encoding="utf-8-sig"
+    )
 
     pd.DataFrame([x.to_dict() for x in r.regions]).to_csv(
         p(C.ZERO_LINE_REGIONS), index=False, encoding="utf-8-sig"
@@ -125,8 +134,10 @@ def process(src: Path, cfg: ZeroLineConfig, outdir: Path, prefix: str = "") -> d
              cbi["x0"], cbi["x1"], "위" if cbi["vmin_at"] == "top" else "아래")
     log.info("허용오차  : ±%.3f %s", r.tolerance, r.tolerance_unit)
     log.info("부품 영역 : %d px", r.part_px)
-    log.info("0-Line    : %d px (부품의 %.1f%%), 영역 %d 개",
+    log.info("0 영역    : %d px (부품의 %.1f%%), 영역 %d 개  ← 허용오차에 좌우됨",
              r.total_zero_px, r.zero_ratio * 100, len(r.regions))
+    log.info("0-Line 선 : %d px  ← 부호 경계, 허용오차 무관",
+             r.params.get("zero_crossing_px", 0))
     for w in out.warnings:
         log.warning("%s", w)
     if r.regions:

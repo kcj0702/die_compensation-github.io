@@ -50,9 +50,12 @@
 - **컬러바는 남길 것**
 
 ### `zero_line_mask.png` — [2] 산출
-0-Line 이진 마스크. 8bit 흑백, 원본과 같은 크기.
-- `255` = 편차 0 영역
+0 **영역** 이진 마스크. 8bit 흑백, 원본과 같은 크기.
+- `255` = `|편차| ≤ 허용오차` 인 영역
 - `0` = 그 외
+
+허용오차에 따라 넓이가 달라진다. 임계값과 무관한 결과가 필요하면
+`zero_line_crossing.png`(부호 경계선)를 쓴다.
 
 ### `deviation_points.csv` — [3] 산출
 
@@ -114,6 +117,8 @@
 
 | 파일 | 내용 |
 |---|---|
+| `zero_line_crossing.png` | 부호 경계선. 허용오차와 무관하게 결정되는 진짜 0-Line |
+| `zero_line_tolerance_sweep.csv` | 허용오차별 0 영역 면적 (민감도 분석) |
 | `zero_line_overlay.png` | 원본 위에 0-Line 을 얹은 이미지. 발표 화면용 |
 | `zero_line_centerline.png` | 0 밴드의 중심선 (세선화 결과) |
 | `zero_line_regions.csv` | 영역별 면적·중심좌표·외접사각형·평균편차 |

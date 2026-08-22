@@ -26,6 +26,8 @@ RESULT_JSON = "result.json"                      # [1] UI 표시용 통합 결�
 
 # ── [2] 0-Line 파트의 부가 산출물 ────────────────────────────────
 ZERO_LINE_OVERLAY = "zero_line_overlay.png"      # 육안 검증용 오버레이
+ZERO_LINE_CROSSING = "zero_line_crossing.png"    # 부호 경계선 (임계값 무관)
+ZERO_LINE_SWEEP = "zero_line_tolerance_sweep.csv"  # 허용오차 민감도
 ZERO_LINE_REGIONS = "zero_line_regions.csv"      # 영역별 면적·중심
 ZERO_LINE_CONTOURS = "zero_line_contours.json"   # 0-Line 폴리라인 좌표
 ZERO_LINE_REPORT = "zero_line_report.json"       # 처리 파라미터·통계
@@ -34,6 +36,7 @@ __all__ = [
     "ROOT", "DATA", "RAW", "SAMPLE", "INTERMEDIATE", "OUTPUT",
     "DEVIATION_MAP", "CLEAN_DEVIATION_MAP", "ZERO_LINE_MASK",
     "DEVIATION_POINTS", "DEPTH_MEASUREMENTS", "RESULT_JSON",
-    "ZERO_LINE_OVERLAY", "ZERO_LINE_REGIONS",
+    "ZERO_LINE_OVERLAY", "ZERO_LINE_CROSSING", "ZERO_LINE_SWEEP",
+    "ZERO_LINE_REGIONS",
     "ZERO_LINE_CONTOURS", "ZERO_LINE_REPORT",
 ]

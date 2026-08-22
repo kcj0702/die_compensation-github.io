@@ -53,6 +53,10 @@ python pipeline/run_demo.py --input data/sample/sample_deviation_map.png
 
 합성 정답 대비 **IoU 0.914 / 정밀도 0.998** 이다.
 
+출력은 두 가지로 나뉜다. **부호가 바뀌는 경계선**은 임계값을 쓰지 않으므로 누가 계산해도
+같은 결과가 나오고, **0 영역(면)**은 허용오차가 필요해 그 값에 따라 8.8%~68.6% 까지
+달라진다. 후자는 현장이 정할 문제라 민감도 표를 함께 낸다.
+
 자세한 내용은 [`zero_line_detection/README.md`](zero_line_detection/README.md).
 
 ---

@@ -62,7 +62,8 @@ class ZeroLineOutput:
     """검출 결과 묶음."""
 
     result: ZeroLineResult
-    mask: np.ndarray                    # (H,W) uint8  0/255
+    mask: np.ndarray                    # (H,W) uint8  0/255  (허용오차 기반 0 '영역')
+    zero_crossing: np.ndarray           # (H,W) uint8  0/255  (부호 경계 = 임계값 없는 0 '선')
     centerline: np.ndarray | None       # (H,W) uint8  0/255
     values: np.ndarray                  # (H,W) float32 편차값
     part_mask: np.ndarray               # (H,W) bool   히트맵 영역
@@ -113,6 +114,59 @@ def _keep_main_parts(mask: np.ndarray, min_area: int, ratio: float) -> np.ndarra
         if stats[i, cv2.CC_STAT_AREA] >= threshold:
             keep[labels == i] = True
     return keep
+
+
+def zero_crossing_line(
+    values: np.ndarray, part: np.ndarray, min_len: int = 25
+) -> np.ndarray:
+    """부호가 바뀌는 경계를 찾는다 — 허용오차가 필요 없는 진짜 0-Line.
+
+    [왜 이게 필요한가]
+    |편차| <= tol 로 뽑는 0 '영역' 은 tol 을 얼마로 잡느냐에 따라 넓어지고 좁아진다.
+    그 값을 우리가 정하면 결과도 우리가 정한 것이 되어 근거를 대기 어렵다.
+
+    반면 편차가 +에서 - 로 바뀌는 지점은 **정의상 편차가 정확히 0인 곳**이다.
+    임계값을 하나도 쓰지 않으므로 "임의로 그었다" 는 지적을 받지 않는다.
+
+    구현은 단순하다. 양수 영역과 음수 영역을 각각 한 픽셀씩 부풀려
+    겹치는 곳이 곧 두 영역이 만나는 경계다. 부품 안쪽으로 한정하므로
+    부품 외곽선은 잡히지 않는다.
+    """
+    pos = ((values > 0) & part).astype(np.uint8)
+    neg = ((values < 0) & part).astype(np.uint8)
+    k = np.ones((3, 3), np.uint8)
+    crossing = (cv2.dilate(pos, k) > 0) & (cv2.dilate(neg, k) > 0) & part
+
+    # 잡음으로 생긴 짧은 조각은 버린다
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(
+        crossing.astype(np.uint8), connectivity=8
+    )
+    keep = np.zeros(crossing.shape, dtype=bool)
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        if area >= min_len or max(w, h) >= min_len:
+            keep[labels == i] = True
+    return (keep.astype(np.uint8)) * 255
+
+
+def tolerance_sweep(
+    values: np.ndarray, part: np.ndarray, tolerances: list
+) -> list:
+    """허용오차를 바꿔가며 0 영역 면적이 어떻게 변하는지 표로 만든다.
+
+    "왜 하필 그 값이냐" 는 질문에 숫자로 답하기 위한 것이다.
+    민감도를 보여주면 임계값 선택이 결과를 얼마나 좌우하는지 드러난다.
+    """
+    part_px = int(part.sum())
+    rows = []
+    for t in tolerances:
+        area = int((part & (np.abs(values) <= t)).sum())
+        rows.append({
+            "tolerance": float(t),
+            "area_px": area,
+            "ratio_of_part": (area / part_px) if part_px else 0.0,
+        })
+    return rows
 
 
 def skeletonize(mask: np.ndarray) -> np.ndarray:
@@ -238,6 +292,7 @@ def detect_zero_line(
         zero.astype(np.uint8), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
     )
 
+    crossing = zero_crossing_line(values, part)
     centerline = skeletonize(zero) if (cfg.emit_centerline and zero.any()) else None
 
     total = int(zero.sum())
@@ -254,12 +309,20 @@ def detect_zero_line(
         colorbar=cb.to_dict(),
         params=cfg.to_dict(),
     )
+    result.params["tolerance_sweep"] = tolerance_sweep(
+        values, part,
+        [round(cb.half_span * r, 4) for r in (0.02, 0.05, 0.10, 0.15, 0.20, 0.30)],
+    )
+    result.params["zero_crossing_px"] = int((crossing > 0).sum())
 
     return ZeroLineOutput(
-        result=result, mask=mask_u8, centerline=centerline,
+        result=result, mask=mask_u8, zero_crossing=crossing, centerline=centerline,
         values=values, part_mask=part, contours=list(contours),
         colorbar=cb, warnings=warnings,
     )
 
 
-__all__ = ["ZeroLineConfig", "ZeroLineOutput", "detect_zero_line", "skeletonize"]
+__all__ = [
+    "ZeroLineConfig", "ZeroLineOutput", "detect_zero_line",
+    "skeletonize", "zero_crossing_line", "tolerance_sweep",
+]
