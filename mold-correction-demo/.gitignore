@@ -1,0 +1,14 @@
+data/raw/*
+data/sample/*
+data/intermediate/*
+data/output/*
+
+!data/raw/.gitkeep
+!data/sample/.gitkeep
+!data/intermediate/.gitkeep
+!data/output/.gitkeep
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
