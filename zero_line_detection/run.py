@@ -18,7 +18,7 @@
     zero_line_crossing.png    부호 경계선 (허용오차 없이 결정되는 0-Line)
     zero_line_tolerance_sweep.csv  허용오차별 면적 변화 (민감도)
     zero_line_overlay.png     원본 위에 얹은 검증용 이미지
-    zero_line_centerline.png  0 밴드 중심선
+    zero_line_centerline.png  0 밴드 중심선 (--centerline 지정 시에만)
     zero_line_regions.csv     영역별 면적·중심·평균편차
     zero_line_contours.json   영역 윤곽 폴리라인
     zero_line_report.json     처리 파라미터·통계·경고
@@ -83,7 +83,7 @@ def build_config(args: argparse.Namespace) -> ZeroLineConfig:
         use_annotation_mask=not args.no_annotation_mask,
         vmin=args.vmin,
         vmax=args.vmax,
-        emit_centerline=not args.no_centerline,
+        emit_centerline=args.centerline,
     )
 
 
@@ -173,7 +173,9 @@ def main(argv: list | None = None) -> int:
     g2.add_argument("--min-region-area", type=int, default=80)
     g2.add_argument("--no-annotation-mask", action="store_true",
                     help="라벨·지시선 제거를 끈다 (파트 4 결과를 쓸 때)")
-    g2.add_argument("--no-centerline", action="store_true", help="중심선 생성 생략")
+    g2.add_argument("--centerline", action="store_true",
+                   help="0 밴드 중심선(세선화) 생성. 느리므로 기본은 끔. "
+                        "선이 필요하면 zero_line_crossing.png 를 먼저 확인할 것")
 
     args = ap.parse_args(argv)
     cfg = build_config(args)

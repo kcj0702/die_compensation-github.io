@@ -51,7 +51,7 @@ class ZeroLineConfig:
     use_annotation_mask: bool = True
     vmin: float | None = None
     vmax: float | None = None
-    emit_centerline: bool = True
+    emit_centerline: bool = False   # 세선화는 느리다. 선이 필요하면 zero_crossing 을 쓴다
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -175,7 +175,17 @@ def skeletonize(mask: np.ndarray) -> np.ndarray:
     0-Line 은 이름 그대로 '선' 이므로, 폭을 가진 밴드보다
     중심선 쪽이 보정시트에 옮겨 적기 쉽다.
     """
-    img = (mask > 0).astype(np.uint8)
+    full = (mask > 0).astype(np.uint8)
+    ys, xs = np.nonzero(full)
+    if len(xs) == 0:
+        return np.zeros(full.shape, dtype=np.uint8)
+
+    # 마스크가 없는 영역까지 매 반복 훑으면 낭비가 크다.
+    # 외접 사각형으로 잘라 계산하고 원래 자리에 되돌린다.
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+    img = full[y0:y1 + 1, x0:x1 + 1].copy()
+
     for _ in range(200):                      # 안전 상한
         changed = False
         for step in (0, 1):
@@ -208,7 +218,10 @@ def skeletonize(mask: np.ndarray) -> np.ndarray:
                 changed = True
         if not changed:
             break
-    return (img * 255).astype(np.uint8)
+
+    out = np.zeros(full.shape, dtype=np.uint8)
+    out[y0:y1 + 1, x0:x1 + 1] = img * 255
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────

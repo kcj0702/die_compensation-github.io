@@ -136,6 +136,27 @@ python -m zero_line_detection.make_sample --evaluate
 재현율이 0.92 인 것은 라벨 박스·지시선에 가려진 부분을 제외하기 때문이며,
 파트 4의 `clean_deviation_map.png` 가 들어오면 올라간다.
 
+### 자체 점검
+
+한 장짜리 IoU 하나로는 부족하다. 현실적인 변형을 넣어 13가지를 확인한다.
+
+```bash
+python -m zero_line_detection.selftest
+```
+
+| 항목 | 결과 |
+|---|---|
+| 여러 시드 5장 | 평균 0.910, 최저 0.876 |
+| 크기 0.5 ~ 2.0배 | 0.874 ~ 0.932 |
+| JPEG 품질 95 ~ 40 | 0.901 ~ 0.943 |
+| 180° 회전 | 0.914, 컬러바 방향 자동 판별 |
+| 부호 경계선 불변성 | 허용오차 0.1↔0.4 에서 선 동일, 면만 4배 변화 |
+| 잘린 컬러바 감지 | 감지 후 경고 |
+
+크기 변경 항목은 실제로 버그를 잡아낸 검사다. 컬러바 가장자리가 배경과 섞이면
+(축소·확대·화면 캡처에서 반드시 생긴다) 균일도 검사에 걸려 컬러바를 통째로
+놓쳤다. 양옆을 잘라내고 안쪽만 보도록 고쳤다.
+
 ---
 
 ## 처리 단계
@@ -170,6 +191,7 @@ python -m zero_line_detection.make_sample --evaluate
 | `--min-region-area` | `80` | 이보다 작은 조각은 버린다 |
 | `--morph-close` | `4` | 끊긴 영역 연결 강도 |
 | `--no-annotation-mask` | — | 자체 라벨 제거 끄기 (파트 4 결과 사용 시) |
+| `--centerline` | 꺼짐 | 0 밴드 중심선 생성. 느리므로 기본은 끔 |
 | `--all-samples` | — | `data/sample` 일괄 처리 |
 
 전체 목록은 `python -m zero_line_detection.run --help`.
@@ -184,7 +206,7 @@ python -m zero_line_detection.make_sample --evaluate
 | `zero_line_crossing.png` | 부호 경계선 — 허용오차 없이 결정되는 진짜 0-Line |
 | `zero_line_tolerance_sweep.csv` | 허용오차별 면적 변화 (민감도) |
 | `zero_line_overlay.png` | 원본 위에 얹은 검증·발표용 이미지 |
-| `zero_line_centerline.png` | 0 밴드 중심선 (세선화) |
+| `zero_line_centerline.png` | 0 밴드 중심선 (세선화). `--centerline` 지정 시에만 |
 | `zero_line_regions.csv` | 영역별 면적·중심·평균편차 |
 | `zero_line_contours.json` | 영역 윤곽 폴리라인 |
 | `zero_line_report.json` | 파라미터·컬러바 정보·통계·경고 |
@@ -220,10 +242,23 @@ python -m zero_line_detection.make_sample --evaluate
 픽셀↔mm 변환이 없다. 영역 면적은 `px` 단위로만 낸다.
 CAD 파일이 확보되면 축척을 넣어 `mm²` 로 바꿀 수 있다.
 
-### 4. 컬러바가 없는 이미지는 처리 불가
+### 4. 세선화(`--centerline`)는 느리다
+
+Zhang-Suen 세선화는 순수 파이썬 반복이라 2400x1520 이미지에서 21초쯤 걸린다.
+기본값은 꺼져 있고, 선 형태가 필요하면 거의 공짜인 `zero_line_crossing.png`
+(부호 경계선)를 먼저 쓴다. 중심선이 꼭 필요하면 `--centerline` 을 준다.
+
+### 5. 컬러바가 없는 이미지는 처리 불가
 
 `detect_colorbar` 가 실패하면 에러를 낸다. 색→값 대응의 유일한 근거이므로,
 컬러바가 잘린 이미지를 만들지 말 것을 파트 4에 요청해 두었다.
+
+---
+
+## 성능
+
+1688x1016 실제 스캔 기준 약 1.2초, 합성 1200x760 기준 약 0.5초.
+`--centerline` 을 켜면 이미지 크기에 따라 2~20초가 추가된다.
 
 ---
 

@@ -287,15 +287,22 @@ def detect_colorbar(
         if (x1 - x0 + 1) > w * max_width_frac:
             continue
 
-        strip = rgb[:, x0:x1 + 1, :]
         rows_ok = colorful[:, x0:x1 + 1].mean(axis=1) > 0.6
         ys = np.where(rows_ok)[0]
         if len(ys) < h * min_height_frac:
             continue
         y0, y1 = int(ys.min()), int(ys.max())
 
-        band = strip[y0:y1 + 1]
-        # 3) 행 내부 색 균일도 — 표준편차가 작아야 컬러바
+        # 가장자리 열은 흰 배경과 섞여(안티앨리어싱) 색이 흐려진다.
+        # 이미지를 축소·확대하거나 화면 캡처로 만든 이미지에는 반드시 생기며,
+        # 그대로 두면 아래 균일도 검사에 걸려 컬러바를 놓친다.
+        # 따라서 양옆을 잘라내고 안쪽만 보고 판단한다.
+        width = x1 - x0 + 1
+        pad = min(max(1, int(width * 0.2)), max((width - 1) // 2, 0))
+        xa, xb = x0 + pad, x1 - pad
+        band = rgb[y0:y1 + 1, xa:xb + 1, :]
+
+        # 3) 행 내부 색 균일도 — 컬러바는 행마다 단색이라 표준편차가 작다
         row_std = band.reshape(band.shape[0], -1, 3).std(axis=1).mean()
         if row_std > 18:
             continue
