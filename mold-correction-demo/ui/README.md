@@ -9,6 +9,8 @@
 Node.js 22 이상과 pnpm이 필요합니다.
 
 Windows에서는 `run-ui.cmd`를 더블클릭하는 것이 가장 간단합니다.
+종료할 때는 같은 폴더의 `stop-ui.cmd`를 더블클릭하면 UI와 로컬 엔진 서버가
+함께 종료됩니다.
 
 ```bash
 pnpm install
