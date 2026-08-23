@@ -230,3 +230,7 @@ data/output/*
 data/sample/*.png
 data/sample/*.npy
 !data/sample/.gitkeep
+
+# 검증용 정답 CSV — 실제 부품의 편차 실측값이라 올리지 않는다
+data/*.csv
+data/truth_*.csv
