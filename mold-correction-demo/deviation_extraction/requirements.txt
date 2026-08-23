@@ -4,6 +4,8 @@ pandas
 matplotlib
 pillow
 torch
+torchvision
 transformers>=4.49.0,<5.0.0
 accelerate
 qwen-vl-utils
+bitsandbytes>=0.50.0
