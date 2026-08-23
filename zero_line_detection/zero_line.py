@@ -240,11 +240,13 @@ def detect_zero_line(
 
     if cb.is_clipped and (cfg.vmin is None or cfg.vmax is None):
         lo, hi = cb.endpoint_gaps
+        pct = cb.zero_index / max(len(cb.colors_rgb) - 1, 1) * 100
         warnings.append(
             f"컬러바가 이미지 경계에서 잘렸습니다 (끝점 색 오차 {lo:.0f}/{hi:.0f}). "
-            "보이는 구간이 전체 범위가 아니므로 '중앙 = 편차 0' 가정이 성립하지 "
-            "않습니다. 컬러바에 적힌 최소·최대값을 --vmin / --vmax 로 지정하세요. "
-            "(예: JD_64XX2 는 --vmin -1.5 --vmax 2.0)"
+            f"보이는 색이 정식 무지개 램프의 {cb.t_lo * 100:.0f}~{cb.t_hi * 100:.0f}% "
+            f"구간이므로, 편차 0 을 컬러바 중앙이 아닌 {pct:.1f}% 지점으로 자동 보정했습니다. "
+            "mm 단위 수치가 필요하거나 보정이 미덥지 않으면 컬러바에 적힌 값을 "
+            "--vmin / --vmax 로 지정하세요."
         )
 
     # 2) 주석 마스크 --------------------------------------------------

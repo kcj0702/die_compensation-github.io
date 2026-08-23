@@ -38,6 +38,38 @@ CANONICAL_VMIN_RGB = (255, 0, 255)   # 마젠타 = 최솟값
 CANONICAL_VMAX_RGB = (255, 0, 0)     # 빨강   = 최댓값
 ENDPOINT_TOL = 70.0                  # RGB 유클리드 거리 허용치
 
+# 무지개 램프의 제어점 (최솟값 -> 최댓값).
+# 잘린 컬러바가 정식 램프의 어느 구간인지 되짚는 기준이 된다.
+CANONICAL_CONTROL = [
+    (255, 0, 255),    # 마젠타
+    (0, 0, 255),      # 파랑
+    (0, 255, 255),    # 시안
+    (0, 255, 0),      # 초록
+    (255, 255, 0),    # 노랑
+    (255, 0, 0),      # 빨강
+]
+_CANON_CACHE: dict = {}
+
+
+def canonical_ramp(n: int = 1024) -> np.ndarray:
+    """제어점을 선형 보간한 (n,3) uint8 정식 램프."""
+    if n not in _CANON_CACHE:
+        ctrl = np.array(CANONICAL_CONTROL, dtype=np.float32)
+        xs = np.linspace(0, len(ctrl) - 1, n)
+        lo = np.floor(xs).astype(int)
+        hi = np.clip(lo + 1, 0, len(ctrl) - 1)
+        t = (xs - lo)[:, None]
+        _CANON_CACHE[n] = (ctrl[lo] * (1 - t) + ctrl[hi] * t).astype(np.uint8)
+    return _CANON_CACHE[n]
+
+
+def _canonical_position(rgb_color: np.ndarray) -> float:
+    """색이 정식 램프의 몇 % 지점인지 (0=마젠타, 1=빨강)."""
+    ramp = canonical_ramp()
+    lab = _rgb_to_lab(np.asarray([rgb_color], dtype=np.uint8))
+    d = np.linalg.norm(_rgb_to_lab(ramp) - lab, axis=1)
+    return float(np.argmin(d)) / (len(ramp) - 1)
+
 
 @dataclass
 class Colorbar:
@@ -46,6 +78,8 @@ class Colorbar:
     info: ColorbarInfo
     colors_rgb: np.ndarray      # (N,3) uint8, 최솟값 -> 최댓값 순서
     lab: np.ndarray             # (N,3) float32, CIELAB (색 거리 계산용)
+    t_lo: float = 0.0           # 보이는 구간이 정식 램프의 어디서 시작하는지
+    t_hi: float = 1.0           # 어디서 끝나는지
 
     # ── 값 축 ────────────────────────────────────────────────────
     @property
@@ -63,8 +97,17 @@ class Colorbar:
         어느 쪽이든 편차 0 은 zero_index 위치에 놓인다.
         """
         n = max(len(self.colors_rgb) - 1, 1)
-        t = idx.astype(np.float32) / n
-        return (self.vmin + t * (self.vmax - self.vmin)).astype(np.float32)
+        frac = idx.astype(np.float32) / n
+
+        if self.info.vmin is not None and self.info.vmax is not None:
+            # 사용자가 컬러바 눈금을 직접 알려준 경우 — 그대로 따른다
+            return (self.info.vmin
+                    + frac * (self.info.vmax - self.info.vmin)).astype(np.float32)
+
+        # 정규화 모드. 보이는 구간이 정식 램프의 [t_lo, t_hi] 라는 것을 반영한다.
+        # 잘리지 않았으면 t_lo=0, t_hi=1 이라 기존과 동일하게 -1~+1 이 된다.
+        t = self.t_lo + frac * (self.t_hi - self.t_lo)
+        return (-1.0 + 2.0 * t).astype(np.float32)
 
     # ── 잘림 판정 및 0 위치 ──────────────────────────────────────
     @property
@@ -97,7 +140,12 @@ class Colorbar:
             if abs(span) < 1e-9:
                 raise ValueError("vmin 과 vmax 가 같습니다.")
             return n * (0.0 - self.info.vmin) / span
-        return n / 2.0                      # 대칭 범위 가정
+        # 정식 램프 전체가 대칭 범위라고 보면 편차 0 은 램프의 정중앙(t=0.5)이다.
+        # 잘린 컬러바에서는 그 지점이 보이는 구간의 정중앙이 아니다.
+        span = self.t_hi - self.t_lo
+        if span < 1e-6:
+            return n / 2.0
+        return n * (0.5 - self.t_lo) / span
 
     @property
     def half_span(self) -> float:
@@ -184,6 +232,9 @@ class Colorbar:
 
     def to_dict(self) -> dict:
         d = self.info.to_dict()
+        d["visible_range_t"] = [round(self.t_lo, 4), round(self.t_hi, 4)]
+        d["zero_at_percent"] = round(
+            self.zero_index / max(len(self.colors_rgb) - 1, 1) * 100, 2)
         d["colors_preview"] = {
             "vmin_end": self.colors_rgb[0].tolist(),
             "mid": self.colors_rgb[len(self.colors_rgb) // 2].tolist(),
@@ -330,7 +381,11 @@ def detect_colorbar(
             symmetric=(vmin is None or vmax is None or abs(vmin + vmax) < 1e-6),
         )
         score = (y1 - y0) * abs(rho)
-        cb = Colorbar(info=info, colors_rgb=colors, lab=_rgb_to_lab(colors))
+        cb = Colorbar(
+            info=info, colors_rgb=colors, lab=_rgb_to_lab(colors),
+            t_lo=_canonical_position(colors[0]),
+            t_hi=_canonical_position(colors[-1]),
+        )
         if best is None or score > best[0]:
             best = (score, cb)
 
