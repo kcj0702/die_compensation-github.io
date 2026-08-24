@@ -39,6 +39,9 @@ from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
 from zero_line_detection.polygonize import draw_polygons, polygonize  # noqa: E402
+from zero_line_detection.zero_polyline import (  # noqa: E402
+    draw_zero_polylines, extract_zero_polylines,
+)
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -147,6 +150,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_overlay: np.ndarray | None = None
     zero_candidates: list = []
     zero_datum_mask: np.ndarray | None = None
+    zero_lines: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
@@ -164,9 +168,14 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         )
         zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
 
-        if zero_datum_mask is not None and zero_datum_mask.any():
-            # 다각형으로 정리해서 그린다. 픽셀 마스크 그대로 그리면
-            # 경계가 너덜너덜해 어디가 기준인지 눈에 안 들어온다.
+        # 보정시트의 제로라인은 면이 아니라 선이다. 편차 부호가 바뀌는
+        # 경계를 순서 있는 폴리라인으로 뽑아 시트와 같은 형태로 그린다.
+        zero_lines = extract_zero_polylines(
+            zero_output.values, zero_output.part_mask
+        )
+        if zero_lines:
+            zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
+        elif zero_datum_mask is not None and zero_datum_mask.any():
             zero_overlay = draw_polygons(
                 overlay_base, polygonize(zero_datum_mask, preset="balanced")
             )
@@ -242,6 +251,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             else (_png_data_url(zero_output.mask) if zero_output is not None else None)
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
+        "zeroLines": [l.to_dict() for l in zero_lines],
         "points": points,
         "stats": {
             "labelsRemoved": label_count,

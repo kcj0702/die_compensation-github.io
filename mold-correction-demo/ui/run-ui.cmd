@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 setlocal EnableDelayedExpansion
 pushd "%~dp0"
 
@@ -28,15 +29,18 @@ if not defined AJIN_NODE (
 
 REM ── pnpm 찾기 ─────────────────────────────────────────────────
 set "AJIN_PNPM="
-where pnpm >nul 2>nul && set "AJIN_PNPM=pnpm"
-if not defined AJIN_PNPM (
-  if exist "%APPDATA%\npm\pnpm.cmd" (
-    set "PATH=%APPDATA%\npm;%PATH%"
-    set "AJIN_PNPM=pnpm"
-  )
+if exist "%APPDATA%\npm\pnpm.cmd" (
+  set "PATH=%APPDATA%\npm;%PATH%"
+  set "AJIN_PNPM=%APPDATA%\npm\pnpm.cmd"
 )
 if not defined AJIN_PNPM (
-  echo pnpm 이 없어 설치합니다...
+  where pnpm >nul 2>nul && set "AJIN_PNPM=pnpm"
+)
+if not defined AJIN_PNPM (
+  echo pnpm 을 찾지 못해 설치합니다...
+  echo   방금 Node.js/pnpm 을 설치했다면 탐색기가 새 PATH 를 아직
+  echo   모르는 상태일 수 있습니다. 로그아웃 후 재로그인하거나 PC 를
+  echo   재시작한 뒤 다시 실행해 보세요.
   call npm install -g pnpm
   if errorlevel 1 (
     echo [ERROR] pnpm 설치에 실패했습니다.
@@ -44,7 +48,7 @@ if not defined AJIN_PNPM (
     exit /b 1
   )
   set "PATH=%APPDATA%\npm;%PATH%"
-  set "AJIN_PNPM=pnpm"
+  set "AJIN_PNPM=%APPDATA%\npm\pnpm.cmd"
 )
 
 REM ── Python 가상환경 찾기 ──────────────────────────────────────
