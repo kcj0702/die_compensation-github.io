@@ -12,9 +12,29 @@ OUTPUT_CSV_PATH = INTERMEDIATE_DIR / "deviation_points.csv"
 DEBUG_IMAGE_PATH = INTERMEDIATE_DIR / "deviation_points_debug.png"
 
 VLM_MODEL_ID = "Qwen/Qwen2.5-VL-3B-Instruct"
-VLM_BATCH_SIZE = 8
+VLM_BATCH_SIZE = 16
 VLM_MIN_CROP_HEIGHT = 96
 VLM_MAX_CROP_SCALE = 4.0
+VLM_MAX_NEW_TOKENS = 16
+# 1차 판독 실패 라벨은 동일 Qwen에 내용이 서로 다른 전처리 이미지를 다시
+# 보여 준다. 작은 부호와 소수점이 vision patch 안에서 뭉개지지 않도록 재시도
+# 이미지만 더 크게 만든다.
+VLM_RETRY_MIN_CROP_HEIGHT = 192
+VLM_RETRY_MAX_CROP_SCALE = 10.0
+VLM_RETRY_TRIM_RATIO = 0.06
+VLM_RETRY_BORDER = 8
+VLM_RETRY_VARIANTS = (
+    "color_sharp",
+    "grayscale",
+    "binary",
+    "binary_inverted",
+)
+# Retry views are packed together so a few unread labels do not trigger one
+# separate model generation per preprocessing variant.  Two agreeing Qwen
+# views are enough to stop before preparing the second retry stage.
+VLM_RETRY_STAGE_SIZE = 2
+VLM_RETRY_EARLY_CONSENSUS = 2
+VLM_RETRY_BATCH_SIZE = 8
 
 # remove_labels.py와 같은 export 형식을 기준으로 한 라벨 박스 검출값이다.
 # 짧은 변이 REFERENCE_SHORT_SIDE보다 큰 이미지는 상한과 거리만 비례 확대한다.
@@ -32,6 +52,10 @@ LABEL_MIN_COMPONENT_AREA = 100
 LABEL_RED_MIN_FILL_RATIO = 0.40
 LABEL_OUTLINE_MIN_EXTENT = 0.62
 LABEL_DUPLICATE_IOU = 0.70
+# 가까이 배치된 두 라벨의 회색 테두리가 closing에서 하나로 합쳐져 생긴 큰
+# 사각형은 내부의 서로 겹치지 않는 실제 라벨 둘이 확인될 때만 제거한다.
+LABEL_COMPOSITE_CHILD_MAX_AREA_RATIO = 0.65
+LABEL_COMPOSITE_CHILD_MAX_IOU = 0.15
 
 # 빨간 채움과 중간 회색 외곽선이 주 검출 신호다. 검은 외곽선은 기존 입력과
 # 합성 테스트를 위한 보조 신호로만 사용한다.
@@ -45,6 +69,7 @@ LABEL_GRAY_MAX_CHANNEL_DELTA = 4
 LABEL_NEUTRAL_MIN = 105
 LABEL_NEUTRAL_MAX = 225
 LABEL_NEUTRAL_MAX_CHANNEL_DELTA = 16
+LABEL_NEUTRAL_CLOSE_KERNEL = 5
 LABEL_NEUTRAL_OUTLINE_MIN_EXTENT = 0.55
 LABEL_NEUTRAL_MIN_TEXT_PIXELS = 6
 # 테두리가 잘리거나 끊긴 흰 라벨은 밝은 내부+숫자+실제 리더의 조합으로 보완한다.
@@ -77,9 +102,47 @@ LEADER_BOX_REACH_MIN = 8
 LEADER_MAX_BOX_GAP = 4
 LEADER_MIN_COMPONENT_AREA = 5
 LEADER_MIN_COMPONENT_SPAN = 6
+# 스캔과 라벨에 모두 직접 닿은 짧은 리더만 일반 span 제한보다 작게 허용한다.
+# 배경에서 떨어진 장식선에는 이 완화를 적용하지 않는다.
+LEADER_DIRECT_COMPONENT_MIN_SPAN = 3
+LEADER_DIRECT_COMPONENT_MIN_THICKNESS = 2
+LEADER_DIRECT_MAX_BOX_GAP = 1
+# 완화 색/밀도 마스크는 파란 스캔 표면 가장자리도 포함할 수 있으므로 스캔
+# 내부에만 있는 성분은 라벨에 직접 닿아야 한다. 배경을 지나는 AA 리더는 1px
+# 틈을 허용하고 엄격 마스크의 기존 4px 규칙은 유지한다.
+LEADER_RELAXED_MAX_BOX_GAP = 1
+LEADER_RELAXED_INSIDE_SCAN_MAX_BOX_GAP = 0
 LEADER_MAX_AREA_RATIO = 0.006
+# 2차 완화 마스크가 1차 리더와 교차했다는 이유만으로 성분 전체를 버리지 않는다.
+# 거의 전부가 이미 사용된 성분일 때만 재사용을 막아 인접 라벨 오탐은 유지한다.
+LEADER_BLOCKED_OVERLAP_RATIO = 0.85
+# 안티앨리어싱이나 비파란 점 마커 때문에 리더가 경계 직전에 끊기는 경우만
+# 스캔으로 복구한다. 이 범위를 벗어나 흰 배경에서 끝난 선은 포인트가 아니다.
+LEADER_SCAN_SNAP_MIN = 12
+LEADER_SCAN_SNAP_RATIO = 0.006
+LEADER_SCAN_SNAP_MAX = 14
+LEADER_SCAN_BOUNDARY_INSET_MIN = 4
+LEADER_DIRECTION_SAMPLE_MIN = 14
+LEADER_DIRECTION_SAMPLE_RATIO = 0.025
+LEADER_CONTACT_ALIGNMENT_MARGIN = 0.08
 MEASUREMENT_POINT_RADIUS_RATIO = 0.004
 MEASUREMENT_POINT_RADIUS_MIN = 3
+
+# 내부 구멍 경계의 흰 라벨은 리더가 박스 뒤에 가려지고 상단 중앙의 짧은
+# 점 마커만 보일 수 있다. 주변 표면보다 어두운 좁은 마커가 실제 스캔 픽셀과
+# 겹칠 때만 연결을 복구한다.
+LEADER_MARKER_SEARCH_DEPTH = 8
+LEADER_MARKER_CENTER_RATIO = 0.34
+LEADER_MARKER_BASELINE_RATIO = 0.20
+LEADER_MARKER_MIN_CONTRAST = 15
+LEADER_MARKER_MIN_PIXELS = 12
+LEADER_MARKER_REQUIRED_ROWS = 3
+LEADER_MARKER_MIN_ROW_PIXELS = 5
+LEADER_MARKER_MAX_ROW_RATIO = 0.75
+LEADER_MARKER_MAX_CENTER_SHIFT = 1.0
+LEADER_MARKER_MAX_CENTER_ERROR_RATIO = 0.10
+LEADER_MARKER_PERIMETER_DEPTH = 4
+LEADER_MARKER_MIN_PERIMETER_SCAN_RATIO = 0.60
 
 # 아래 Hough 값은 기존 보조 함수 호출과 테스트를 위한 하위 호환용이다.
 LEADER_LINE_HSV_LOWER = (100, 60, 60)

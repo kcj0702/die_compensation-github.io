@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import cv2
 import numpy as np
+from PIL import Image as PILImage
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_DIR = PROJECT_ROOT / "deviation_extraction"
@@ -38,7 +39,8 @@ class FakeReader:
 def _synthetic_map() -> tuple[np.ndarray, tuple[int, int]]:
     image = np.full((180, 260, 3), 255, dtype=np.uint8)
     cv2.rectangle(image, (20, 40), (90, 70), (0, 0, 0), 2)
-    endpoint = (210, 125)
+    cv2.rectangle(image, (180, 100), (245, 165), (20, 180, 120), -1)
+    endpoint = (180, 125)
     cv2.line(image, (90, 55), endpoint, (255, 0, 0), 2)
     return image, endpoint
 
@@ -53,7 +55,7 @@ class LabelDetectorTest(unittest.TestCase):
         self.assertTrue(candidates[0].traced)
         self.assertIsNotNone(candidates[0].point_xy)
         error = math.dist(candidates[0].point_xy, endpoint)
-        self.assertLessEqual(error, 3.0)
+        self.assertLessEqual(error, 5.0)
 
     def test_red_labels_are_detected_in_stable_order(self) -> None:
         image = np.full((180, 240, 3), 255, dtype=np.uint8)
@@ -96,6 +98,13 @@ class LabelDetectorTest(unittest.TestCase):
 
 
 class PointExtractorTest(unittest.TestCase):
+    def test_dense_label_crop_uses_only_one_pixel_padding(self) -> None:
+        image = np.zeros((30, 40, 3), dtype=np.uint8)
+
+        crop = point_extractor._crop_label(image, (8, 6, 20, 12))
+
+        self.assertEqual(crop.shape, (14, 22, 3))
+
     def test_value_coordinate_and_resized_mask_are_combined(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -200,6 +209,277 @@ class ValueReaderTest(unittest.TestCase):
         self.assertEqual(LabelValueReader._parse_number("result: -1.25 mm"), -1.25)
         self.assertEqual(LabelValueReader._parse_number("+3"), 3.0)
         self.assertIsNone(LabelValueReader._parse_number("판독 실패"))
+        self.assertIsNone(LabelValueReader._parse_number("NONE, maybe -1.2"))
+        self.assertIsNone(LabelValueReader._parse_number("-1.2 or -1.7"))
+
+    def test_unread_label_is_retried_with_same_qwen_reader(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                [None, -0.2],
+                [0.4, 0.4],
+            ]
+        )
+        crops = [
+            PILImage.new("RGB", (40, 20), "white"),
+            PILImage.new("RGB", (40, 20), "red"),
+        ]
+
+        values = reader.read_values(crops, batch_size=8)
+
+        self.assertEqual(values, [0.4, -0.2])
+        self.assertEqual(reader._read_batch.call_count, 2)
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [2, 2],
+        )
+        retry_crop = reader._read_batch.call_args_list[1].args[0][0]
+        self.assertGreaterEqual(
+            retry_crop.height,
+            vlm_reader.config.VLM_RETRY_MIN_CROP_HEIGHT,
+        )
+
+    def test_qwen_retry_does_not_make_up_an_unread_value(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[[None], [None, None], [None, None]]
+        )
+        crop = PILImage.new("RGB", (40, 20), "white")
+
+        values = reader.read_values([crop], batch_size=8)
+
+        self.assertEqual(values, [None])
+        self.assertEqual(reader._read_batch.call_count, 3)
+
+    def test_retry_keeps_original_indices_when_only_some_labels_are_read(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                [None, 0.2, None],
+                [0.1, None, 0.1, -0.3],
+                [-0.3, -0.3],
+            ]
+        )
+        crops = [
+            PILImage.new("RGB", (40, 20), color)
+            for color in ("white", "red", "gray")
+        ]
+
+        values = reader.read_values(crops, batch_size=8)
+
+        self.assertEqual(values, [0.1, 0.2, -0.3])
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [3, 4, 2],
+        )
+
+    def test_conflicting_single_retry_values_are_rejected(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[[None], [-1.2, 1.2], [None, None]]
+        )
+
+        values = reader.read_values(
+            [PILImage.new("RGB", (40, 20), "red")],
+            batch_size=8,
+        )
+
+        self.assertEqual(values, [None])
+
+    def test_retry_views_for_small_unread_set_are_packed_by_stage(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                [None, None, None],
+                [None] * 6,
+                [None] * 6,
+            ]
+        )
+        crops = [
+            PILImage.new("RGB", (40, 20), color)
+            for color in ("white", "red", "gray")
+        ]
+
+        values = reader.read_values(crops, batch_size=8)
+
+        self.assertEqual(values, [None, None, None])
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [3, 6, 6],
+        )
+
+    def test_default_initial_batch_is_sixteen_and_retry_batch_is_eight(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                [None] * 16,
+                [0.1] * 8,
+                [0.1] * 8,
+                [0.1] * 8,
+                [0.1] * 8,
+            ]
+        )
+        crops = [
+            PILImage.new("RGB", (40, 20), (level, level, level))
+            for level in range(16)
+        ]
+
+        values = reader.read_values(crops)
+
+        self.assertEqual(values, [0.1] * 16)
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [16, 8, 8, 8, 8],
+        )
+
+    def test_focused_read_returns_first_singleton_qwen_value(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(return_value=[-1.2])
+
+        value = reader.read_value_focused(
+            PILImage.new("RGB", (40, 20), "red")
+        )
+
+        self.assertEqual(value, -1.2)
+        self.assertEqual(reader._read_batch.call_count, 1)
+        self.assertEqual(len(reader._read_batch.call_args.args[0]), 1)
+        self.assertEqual(
+            reader._read_batch.call_args.kwargs["prompt"],
+            vlm_reader._FOCUSED_PROMPT,
+        )
+
+    def test_focused_read_preserves_an_actual_zero_value(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(return_value=[0.0])
+
+        value = reader.read_value_focused(
+            PILImage.new("RGB", (40, 20), "white")
+        )
+
+        self.assertEqual(value, 0.0)
+        self.assertEqual(reader._read_batch.call_count, 1)
+
+    def test_focused_read_is_limited_to_two_qwen_generations(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(side_effect=[[None], [0.6]])
+
+        value = reader.read_value_focused(
+            PILImage.new("RGB", (40, 20), "white")
+        )
+
+        self.assertEqual(value, 0.6)
+        self.assertEqual(reader._read_batch.call_count, 2)
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [1, 1],
+        )
+
+    def test_focused_read_keeps_unread_value_as_none_after_failures(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[RuntimeError("inference failed"), []]
+        )
+
+        value = reader.read_value_focused(
+            PILImage.new("RGB", (40, 20), "white")
+        )
+
+        self.assertIsNone(value)
+        self.assertEqual(reader._read_batch.call_count, 2)
+
+    def test_generation_is_limited_to_short_numeric_response(self) -> None:
+        class _Inputs(dict):
+            def to(self, _device):
+                return self
+
+        reader = object.__new__(LabelValueReader)
+        reader.device = "cpu"
+        reader._inference_lock = MagicMock()
+        reader.processor = MagicMock()
+        reader.processor.apply_chat_template.return_value = "prompt"
+        reader.processor.return_value = _Inputs(
+            input_ids=vlm_reader.torch.tensor([[1, 2]])
+        )
+        reader.processor.batch_decode.return_value = ["-0.7"]
+        reader.model = MagicMock()
+        reader.model.generate.return_value = vlm_reader.torch.tensor([[1, 2, 3]])
+
+        values = reader._read_batch([PILImage.new("RGB", (40, 20), "white")])
+
+        self.assertEqual(values, [-0.7])
+        self.assertEqual(
+            reader.model.generate.call_args.kwargs["max_new_tokens"],
+            vlm_reader.config.VLM_MAX_NEW_TOKENS,
+        )
+
+    def test_cuda_oom_batch_is_split_without_changing_result_order(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                RuntimeError("CUDA out of memory"),
+                [0.1, -0.2],
+                [0.3, -0.4],
+            ]
+        )
+        crops = [
+            PILImage.new("RGB", (40, 20), (level, level, level))
+            for level in (40, 80, 120, 160)
+        ]
+
+        values = reader.read_values(crops, batch_size=4)
+
+        self.assertEqual(values, [0.1, -0.2, 0.3, -0.4])
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [4, 2, 2],
+        )
+
+    def test_cuda_oom_split_rejects_malformed_half_without_index_shift(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._read_batch = MagicMock(
+            side_effect=[
+                RuntimeError("CUDA out of memory"),
+                [0.1],
+            ]
+        )
+        crops = [PILImage.new("RGB", (40, 20), "white") for _ in range(4)]
+
+        with self.assertRaisesRegex(ValueError, "crop"):
+            reader.read_values(crops, batch_size=4)
+
+        self.assertEqual(
+            [len(call.args[0]) for call in reader._read_batch.call_args_list],
+            [4, 2],
+        )
+
+    def test_retry_views_preserve_small_red_and_white_label_content(self) -> None:
+        for background, foreground in (("red", "white"), ("white", "black")):
+            crop = PILImage.new("RGB", (42, 20), background)
+            foreground_pixel = PILImage.new(
+                "RGB", (1, 1), foreground
+            ).getpixel((0, 0))
+            for x in range(17, 25):
+                for y in range(7, 13):
+                    crop.putpixel((x, y), foreground_pixel)
+
+            variants = [
+                LabelValueReader._prepare_retry_crop(crop, variant=variant)
+                for variant in vlm_reader.config.VLM_RETRY_VARIANTS
+            ]
+
+            self.assertTrue(all(image.mode == "RGB" for image in variants))
+            self.assertTrue(
+                all(
+                    image.height >= vlm_reader.config.VLM_RETRY_MIN_CROP_HEIGHT
+                    for image in variants
+                )
+            )
+            self.assertTrue(
+                any(low < high for low, high in variants[2].getextrema())
+            )
+            self.assertTrue(
+                any(low < high for low, high in variants[3].getextrema())
+            )
 
     def test_offline_mode_is_forwarded_to_model_loaders(self) -> None:
         processor = MagicMock()
@@ -225,6 +505,7 @@ class ValueReaderTest(unittest.TestCase):
 
         self.assertTrue(processor_loader.call_args.kwargs["local_files_only"])
         self.assertTrue(model_loader.call_args.kwargs["local_files_only"])
+        self.assertEqual(processor.tokenizer.padding_side, "left")
 
 
 class RunCliTest(unittest.TestCase):

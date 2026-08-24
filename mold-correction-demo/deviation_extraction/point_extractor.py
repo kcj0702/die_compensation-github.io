@@ -33,7 +33,9 @@ else:  # pragma: no cover - 직접 스크립트 실행 경로
         detect_labels,
     )
 
-CROP_PADDING = 4
+# 밀집 라벨에서는 큰 여백이 이웃 라벨과 파란 리더선을 함께 잘라 Qwen
+# 판독률을 떨어뜨린다. 외곽선 안쪽 글자는 보존하면서 1px만 안전 여백으로 둔다.
+CROP_PADDING = 1
 CSV_COLUMNS = (
     "point_id",
     "x_px",
