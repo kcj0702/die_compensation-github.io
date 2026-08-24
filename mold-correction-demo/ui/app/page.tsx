@@ -342,7 +342,7 @@ function engineSummary(engine: Engine, result: AnalysisResult) {
   return { stat: `${result.stats.zeroRegions}개`, detail: `부품 면적의 ${(result.stats.zeroRatio * 100).toFixed(1)}% · 실제 검출 결과` };
 }
 
-function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsToggle }: { scan: ScanItem; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void }) {
+function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsToggle, valleyLines, setValleyLines }: { scan: ScanItem; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void; valleyLines: ValleyLine[]; setValleyLines: (updater: ValleyLine[] | ((current: ValleyLine[]) => ValleyLine[])) => void }) {
   const [engine, setEngine] = useState<Engine>('label');
   const result = scan.result!; const meta = engineMeta[engine]; const summary = engineSummary(engine, result);
   const engineWarnings = result.warningsByEngine?.[engine] ?? (engine === 'zero' ? result.warnings : []);
@@ -353,24 +353,9 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
 
   const zeroAnchors = result.zeroAnchors || [];
   const [selectedAnchors, setSelectedAnchors] = useState<number[]>([]);
-  const [valleyLines, setValleyLines] = useState<ValleyLine[]>([]);
   const [valleyStatus, setValleyStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [valleyError, setValleyError] = useState<string | null>(null);
-  useEffect(() => {
-    setSelectedAnchors([]); setValleyStatus('idle'); setValleyError(null);
-    const advance = result.advanceLine;
-    setValleyLines(
-      advance && advance.points.length >= 2
-        ? [{
-            id: 'ai-suggestion',
-            anchorStartId: null, anchorEndId: null,
-            points: advance.points, length_px: 0, mean_abs_deviation: 0,
-            source: 'ai',
-          }]
-        : []
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scan.id]);
+  useEffect(() => { setSelectedAnchors([]); setValleyStatus('idle'); setValleyError(null); }, [scan.id]);
   const toggleAnchor = (id: number) => setSelectedAnchors((current) => {
     if (current.includes(id)) return current.filter((value) => value !== id);
     if (current.length >= 2) return [id];
@@ -390,7 +375,10 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
         if (cancelled) return;
         if (!ok) { setValleyStatus('error'); setValleyError(data.error || '선을 잇지 못했습니다.'); setSelectedAnchors([]); return; }
         const line = data.line;
-        setValleyLines((current) => [...current, {
+        // 사람이 직접 이은 선은 AI 1차 제안을 대체한다 — 신뢰도 낮은 AI
+        // 추천선과 사람이 고친 선이 동시에 겹쳐 그려져 화면이 지저분해지는
+        // 걸 막는다(AI 추천선이 틀렸을 때 특히 두드러졌던 문제).
+        setValleyLines((current) => [...current.filter((item) => item.source !== 'ai'), {
           id: `${line.anchor_start_id}-${line.anchor_end_id}-${current.length}`,
           anchorStartId: line.anchor_start_id, anchorEndId: line.anchor_end_id,
           points: line.points, length_px: line.length_px, mean_abs_deviation: line.mean_abs_deviation,
@@ -485,22 +473,40 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void }) {
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, valleyLines }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; valleyLines: ValleyLine[] }) {
   const result = scan.result!; const points = result.points; const visiblePointIds = new Set(points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id)); const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(point.value * coefficient))) : 0, [coefficient, points]);
-  const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
-  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button></div></div><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div></div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div><div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div></div></aside></div>{folderAvailable && <Explorer />}</section>;
+  const baseImage = result.zeroOverlay || result.cleanImage || scan.url;
+  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!valleyLines.length}><i /> 제로라인</button></div></div><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-service`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} />}{showZero && <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div></div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div><div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{valleyLines.length ? `선 ${valleyLines.length}개` : '없음'}</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div></div></aside></div>{folderAvailable && <Explorer />}</section>;
 }
 
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({});
+  const [valleyLinesByScan, setValleyLinesByScan] = useState<Record<string, ValleyLine[]>>({});
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json()).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
+  // 스캔이 새로 분석되면 AI 추천선(advanceLine)으로 제로라인을 미리 채워둔다.
+  // 사람이 직접 앵커를 이어야만 선이 생기는 게 아니라, AI가 먼저 만든 걸
+  // 보여주고 필요하면 지우거나 더하는 방향(회의록 "AI 제안 → 작업자 수정").
+  useEffect(() => {
+    if (!completedScan || valleyLinesByScan[completedScan.id] !== undefined) return;
+    const advance = completedScan.result?.advanceLine;
+    const initial: ValleyLine[] = advance && advance.points.length >= 2
+      ? [{ id: 'ai-suggestion', anchorStartId: null, anchorEndId: null, points: advance.points, length_px: 0, mean_abs_deviation: 0, source: 'ai' }]
+      : [];
+    setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: initial }));
+  }, [completedScan, valleyLinesByScan]);
+  const valleyLines = completedScan ? valleyLinesByScan[completedScan.id] || [] : [];
+  const setValleyLines = (updater: ValleyLine[] | ((current: ValleyLine[]) => ValleyLine[])) => completedScan && setValleyLinesByScan((current) => {
+    const previous = current[completedScan.id] || [];
+    const next = typeof updater === 'function' ? (updater as (value: ValleyLine[]) => ValleyLine[])(previous) : updater;
+    return { ...current, [completedScan.id]: next };
+  });
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} valleyLines={valleyLines} />}</div></main>;
 }
