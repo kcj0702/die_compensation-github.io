@@ -123,4 +123,29 @@ def calibrate_with_points(
     return corrected.astype(values.dtype), stats
 
 
-__all__ = ["calibrate_with_points"]
+def calibrate_vmin_vmax(
+    raw_values: np.ndarray,
+    calibration_stats: dict | None,
+) -> tuple[float, float] | None:
+    """calibrate_with_points() 의 스케일·오프셋으로 실제 vmin/vmax 를 구한다.
+
+    zero_line_advance/advance.py 는 --vmin/--vmax 를 부품마다 손으로 지정해야
+    했다(run.py 의 infer_value_range, JD_64XX2 는 -1.5/2.0 하드코딩). 같은
+    부품에서 raw_values(보정 전 컬러바 값)의 관측된 최소·최대에 스케일·
+    오프셋을 적용하면 같은 값을 자동으로 구할 수 있다 — 실측 검증:
+    -1.64/2.00 (하드코딩했던 -1.5/2.0과 근접).
+    """
+    if calibration_stats is None:
+        return None
+    finite = raw_values[np.isfinite(raw_values)]
+    if finite.size == 0:
+        return None
+    scale = float(calibration_stats["scale"])
+    offset = float(calibration_stats["offset"])
+    raw_min, raw_max = float(finite.min()), float(finite.max())
+    a = scale * raw_min + offset
+    b = scale * raw_max + offset
+    return (a, b) if a <= b else (b, a)
+
+
+__all__ = ["calibrate_with_points", "calibrate_vmin_vmax"]

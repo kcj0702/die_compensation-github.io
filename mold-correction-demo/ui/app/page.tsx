@@ -18,7 +18,8 @@ type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string };
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number };
-type ValleyLine = { id: string; anchorStartId: number; anchorEndId: number; points: [number, number][]; length_px: number; mean_abs_deviation: number };
+type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: number | null; points: [number, number][]; length_px: number; mean_abs_deviation: number; source: 'ai' | 'manual' };
+type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
 type AnalysisResult = {
   analysisId: string | null;
   source: { name: string; width: number; height: number };
@@ -26,6 +27,7 @@ type AnalysisResult = {
   zeroOverlay: string | null;
   zeroMask: string | null;
   zeroAnchors: ZeroAnchor[];
+  advanceLine: AdvanceLine | null;
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -354,7 +356,21 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   const [valleyLines, setValleyLines] = useState<ValleyLine[]>([]);
   const [valleyStatus, setValleyStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [valleyError, setValleyError] = useState<string | null>(null);
-  useEffect(() => { setSelectedAnchors([]); setValleyLines([]); setValleyStatus('idle'); setValleyError(null); }, [scan.id]);
+  useEffect(() => {
+    setSelectedAnchors([]); setValleyStatus('idle'); setValleyError(null);
+    const advance = result.advanceLine;
+    setValleyLines(
+      advance && advance.points.length >= 2
+        ? [{
+            id: 'ai-suggestion',
+            anchorStartId: null, anchorEndId: null,
+            points: advance.points, length_px: 0, mean_abs_deviation: 0,
+            source: 'ai',
+          }]
+        : []
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan.id]);
   const toggleAnchor = (id: number) => setSelectedAnchors((current) => {
     if (current.includes(id)) return current.filter((value) => value !== id);
     if (current.length >= 2) return [id];
@@ -378,6 +394,7 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
           id: `${line.anchor_start_id}-${line.anchor_end_id}-${current.length}`,
           anchorStartId: line.anchor_start_id, anchorEndId: line.anchor_end_id,
           points: line.points, length_px: line.length_px, mean_abs_deviation: line.mean_abs_deviation,
+          source: 'manual',
         }]);
         setValleyStatus('idle'); setSelectedAnchors([]);
       })
@@ -393,11 +410,21 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
-        <div className="card-title"><h3>제로라인 잇기</h3><span>앵커 {zeroAnchors.length}개</span></div>
-        <p className="anchor-panel__hint">이미지 위 초록 점(앵커) 2개를 순서대로 클릭하면, 그 사이를 실측 보정시트 수준 정확도로 잇습니다 (검증: 대각선 대비 오차 약 3.68%). 어떤 두 점을 이을지는 사람이 직접 골라야 합니다 — 자동으로는 정답 쌍을 못 찾았습니다.</p>
+        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개</span></div>
+        {result.advanceLine && (
+          result.advanceLine.confidence === 'high'
+            ? <p className="anchor-panel__status">AI가 "0.0" 표시점 기준으로 자동 제안한 선입니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
+            : <p className="anchor-panel__status anchor-panel__status--error">AI 추천선의 신뢰도가 낮습니다{result.advanceLine.warnings[0] ? `: ${result.advanceLine.warnings[0]}` : ''}. 아래에서 AI 추천선을 지우고 앵커 2개를 직접 골라 이으세요.</p>
+        )}
+        <p className="anchor-panel__hint">이미지 위 초록 점(앵커) 2개를 순서대로 클릭하면, 그 사이를 실측 보정시트 수준 정확도로 잇습니다 (검증: 대각선 대비 오차 약 3.68%).</p>
         {selectedAnchors.length > 0 && valleyStatus !== 'error' && <p className="anchor-panel__status">선택됨: {selectedAnchors.join(', ')} {valleyStatus === 'loading' && '· 잇는 중…'}</p>}
         {valleyStatus === 'error' && valleyError && <p className="anchor-panel__status anchor-panel__status--error">{valleyError}</p>}
-        {valleyLines.map((line) => <div className="point-list-row" key={line.id}><span>{line.anchorStartId}↔{line.anchorEndId}</span><b className="positive">{Math.round(line.length_px)}px</b><small>평균|편차| {line.mean_abs_deviation.toFixed(3)}</small><button type="button" className="label-visibility" onClick={() => setValleyLines((current) => current.filter((item) => item.id !== line.id))} aria-label="이 선 지우기" title="이 선 지우기"><X size={14} /></button></div>)}
+        {valleyLines.map((line) => <div className="point-list-row" key={line.id}>
+          <span>{line.source === 'ai' ? 'AI 추천' : `${line.anchorStartId}↔${line.anchorEndId}`}</span>
+          <b className="positive">{line.source === 'ai' ? `점 ${line.points.length}개` : `${Math.round(line.length_px)}px`}</b>
+          <small>{line.source === 'ai' ? '' : `평균|편차| ${line.mean_abs_deviation.toFixed(3)}`}</small>
+          <button type="button" className="label-visibility" onClick={() => setValleyLines((current) => current.filter((item) => item.id !== line.id))} aria-label="이 선 지우기" title="이 선 지우기"><X size={14} /></button>
+        </div>)}
         {valleyLines.length > 0 && <button type="button" className="text-button anchor-panel__reset" onClick={() => { setValleyLines([]); setSelectedAnchors([]); }}>전체 초기화</button>}
         {!zeroAnchors.length && <p className="empty-mini">검출된 앵커가 없습니다.</p>}
       </div>}</aside>

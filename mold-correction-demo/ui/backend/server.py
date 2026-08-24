@@ -50,8 +50,13 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
 from zero_line_detection.zero_boundary import (  # noqa: E402
     draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
-from zero_line_detection.calibration import calibrate_with_points  # noqa: E402
+from zero_line_detection.calibration import (  # noqa: E402
+    calibrate_vmin_vmax, calibrate_with_points,
+)
 from zero_line_detection.zero_valley import find_valley_lines  # noqa: E402
+from zero_line_advance.advance import (  # noqa: E402
+    AdvanceConfig, detect_advanced_zero_line,
+)
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -419,6 +424,38 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         except Exception as exc:
             errors["zero"] = str(exc)
 
+    # AI 1차 제안(zero_line_advance): 라벨 숫자를 컬러바가 아니라 직접
+    # 읽어서(폰트 템플릿 매칭) "0.0" 표시점과 부호가 바뀌는 지점을 찾고,
+    # 그 사이를 꼭짓점 몇 개짜리 깔끔한 직선으로 잇는다. 컬러바 클리핑에
+    # 영향받지 않아 사람이 앵커를 고르지 않아도 자동으로 선을 만든다.
+    # "0.0" 표시점이 2개 이상이면 신뢰도가 높고, 1개 이하이면 반대쪽
+    # 끝점을 추정해야 해서 신뢰도가 낮다 — 후자는 warnings 로 표시하고
+    # 사람이 위 앵커-클릭 방식으로 직접 고쳐야 한다(회의록 "AI 제안 →
+    # 작업자 수정" 방향).
+    advance_line: dict[str, Any] | None = None
+    if zero_output is not None and calibration_stats is not None:
+        try:
+            advance_vmin_vmax = calibrate_vmin_vmax(zero_output.values, calibration_stats)
+            if advance_vmin_vmax is not None:
+                advance_vmin, advance_vmax = advance_vmin_vmax
+                advance_result = detect_advanced_zero_line(
+                    image,
+                    clean_image if clean_image is not None else image,
+                    vmin=advance_vmin,
+                    vmax=advance_vmax,
+                    config=AdvanceConfig(),
+                )
+                advance_line = {
+                    "points": [
+                        [round(float(x), 1), round(float(y), 1)]
+                        for x, y in advance_result.smooth_path
+                    ],
+                    "warnings": advance_result.warnings,
+                    "confidence": "low" if advance_result.warnings else "high",
+                }
+        except Exception as exc:
+            errors["zeroAdvance"] = str(exc)
+
     zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
     zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
     zero_warnings = list(zero_output.warnings) if zero_output is not None else []
@@ -455,6 +492,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroLines": [l.to_dict() for l in zero_lines],
         "zeroAnchors": [a.to_dict() for a in zero_anchors],
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
+        "advanceLine": advance_line,
         "points": points,
         "stats": {
             "labelsRemoved": label_count,
