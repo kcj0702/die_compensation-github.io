@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import sys
 import threading
@@ -32,7 +33,7 @@ DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
 
-from label_detector import detect_labels  # noqa: E402
+from label_detector import build_scan_mask, detect_labels  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
 from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
@@ -126,6 +127,47 @@ def _get_qwen_reader() -> LabelValueReader:
     return _reader
 
 
+def _read_qwen_values(
+    reader: LabelValueReader,
+    crops: list[Any],
+) -> tuple[list[float | None], str | None]:
+    """Read crops without inferring a mapping from malformed batch output.
+
+    A complete batch result has an unambiguous positional mapping and can be
+    used directly. If the batch raises or returns the wrong number of values,
+    discard it and ask the same Qwen reader about each exact crop separately.
+    A failed singleton remains ``None`` so it cannot discard other valid reads.
+    """
+    try:
+        batch_values = list(reader.read_values(crops))
+        if len(batch_values) == len(crops):
+            return batch_values, None
+        batch_problem = (
+            "Qwen 일괄 판독 결과 수가 라벨 수와 일치하지 않았습니다 "
+            f"({len(batch_values)}/{len(crops)})."
+        )
+    except Exception as exc:
+        batch_problem = f"Qwen 일괄 판독에 실패했습니다: {exc}"
+
+    values: list[float | None] = [None] * len(crops)
+    singleton_failures = 0
+    for index, crop in enumerate(crops):
+        try:
+            singleton_values = list(reader.read_values([crop]))
+        except Exception:
+            singleton_failures += 1
+            continue
+        if len(singleton_values) != 1:
+            singleton_failures += 1
+            continue
+        values[index] = singleton_values[0]
+
+    warning = f"{batch_problem} 동일 Qwen으로 각 라벨을 개별 재판독했습니다."
+    if singleton_failures:
+        warning += f" 개별 판독 실패 {singleton_failures}개는 제외했습니다."
+    return values, warning
+
+
 def _png_data_url(image: np.ndarray, *, rgb: bool = False) -> str:
     source = cv2.cvtColor(image, cv2.COLOR_RGB2BGR) if rgb else image
     ok, encoded = cv2.imencode(".png", source)
@@ -144,23 +186,6 @@ def _decode_image(payload: bytes) -> np.ndarray:
     if image is None:
         raise ValueError("지원되는 이미지 파일이 아니거나 파일이 손상되었습니다.")
     return image
-
-
-def _point_value(values: np.ndarray | None, image: np.ndarray, x: int, y: int) -> float:
-    """Read a robust local value around a detected leader endpoint."""
-    h, w = image.shape[:2]
-    x0, x1 = max(0, x - 3), min(w, x + 4)
-    y0, y1 = max(0, y - 3), min(h, y + 4)
-    if values is not None:
-        patch = values[y0:y1, x0:x1]
-        finite = patch[np.isfinite(patch)]
-        if finite.size:
-            return round(float(np.median(finite)), 3)
-
-    # This fallback is used only when zero-line colorbar detection fails.
-    # It preserves a useful sign/magnitude estimate without any network model.
-    b, g, r = image[y, x].astype(float)
-    return round(float(np.clip((r - b) / 255.0 * 3.0, -3.0, 3.0)), 3)
 
 
 def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
@@ -214,22 +239,36 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     points: list[dict[str, Any]] = []
     qwen_reads = 0
-    fallback_reads = 0
+    unread_labels = 0
+    detected_candidates = 0
+    valid_candidates_count = 0
     deviation_warnings: list[str] = []
     try:
         candidates = detect_labels(image)
-        values = zero_output.values if zero_output is not None else None
+        detected_candidates = len(candidates)
+        deviation_scan_mask = build_scan_mask(image)
+        scan_present = bool(np.any(deviation_scan_mask))
         valid_candidates = [
             candidate
             for candidate in candidates
-            if candidate.point_xy is not None
+            if scan_present
+            and candidate.traced
+            and candidate.point_xy is not None
             and 0 <= candidate.point_xy[0] < width
             and 0 <= candidate.point_xy[1] < height
+            and deviation_scan_mask[candidate.point_xy[1], candidate.point_xy[0]] > 0
         ]
+        valid_candidates_count = len(valid_candidates)
+        if candidates and not scan_present:
+            deviation_warnings.append(
+                "3D 스캔 본체를 확인하지 못해 편차값을 추출하지 않았습니다."
+            )
         crops = []
         for candidate in valid_candidates:
             box_x, box_y, box_w, box_h = candidate.box
-            pad = 4
+            # Keep dense neighbouring labels and their blue leaders out of the
+            # OCR crop while retaining one pixel around the detected pill box.
+            pad = 1
             crop = image[
                 max(0, box_y - pad):min(height, box_y + box_h + pad),
                 max(0, box_x - pad):min(width, box_x + box_w + pad),
@@ -243,48 +282,44 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         if crops:
             try:
                 reader = _get_qwen_reader()
-                read_values = list(reader.read_values(crops))
-                qwen_values[: min(len(read_values), len(crops))] = read_values[: len(crops)]
-                if len(read_values) != len(crops):
-                    qwen_failure = (
-                        f"Qwen 판독 결과 수가 후보 수와 다릅니다 "
-                        f"({len(read_values)}/{len(crops)})."
-                    )
+                qwen_values, qwen_failure = _read_qwen_values(reader, crops)
             except Exception as exc:
                 qwen_failure = str(exc)
 
-        if qwen_failure:
-            deviation_warnings.append(
-                f"{qwen_failure} 판독하지 못한 포인트는 컬러바 값으로 대체했습니다."
-            )
-
-        for index, (candidate, qwen_value) in enumerate(
-            zip(valid_candidates, qwen_values), start=1
-        ):
+        for candidate, qwen_value in zip(valid_candidates, qwen_values):
             x, y = candidate.point_xy
             if qwen_value is None:
-                value = _point_value(values, image, x, y)
-                confidence = (
-                    "qwen_unavailable|colorbar_fallback"
-                    if qwen_failure
-                    else "qwen_not_read|colorbar_fallback"
-                )
-                fallback_reads += 1
-            else:
-                value = round(float(qwen_value), 3)
-                confidence = "ok"
-                qwen_reads += 1
+                unread_labels += 1
+                continue
+            try:
+                numeric_value = float(qwen_value)
+            except (TypeError, ValueError, OverflowError):
+                unread_labels += 1
+                continue
+            if not math.isfinite(numeric_value):
+                unread_labels += 1
+                continue
+            value = round(numeric_value, 3)
+            qwen_reads += 1
+            point_id = f"P-{qwen_reads:02d}"
             points.append(
                 {
-                    "id": f"P-{index:02d}",
+                    "id": point_id,
                     "xPx": x,
                     "yPx": y,
                     "x": round(x / width * 100, 3),
                     "y": round(y / height * 100, 3),
                     "value": value,
                     "labelColor": candidate.label_color,
-                    "confidence": confidence,
+                    "confidence": "ok",
                 }
+            )
+        if qwen_failure:
+            deviation_warnings.append(qwen_failure)
+        if unread_labels:
+            deviation_warnings.append(
+                f"Qwen이 숫자를 판독하지 못한 라벨 {unread_labels}개는 "
+                "결과에서 제외했습니다."
             )
     except Exception as exc:
         errors["deviation"] = str(exc)
@@ -294,12 +329,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_warnings = list(zero_output.warnings) if zero_output is not None else []
     warnings = zero_warnings + deviation_warnings
 
-    if qwen_reads and fallback_reads:
-        value_mode = "Qwen2.5-VL-3B + 컬러바 대체 판독"
-    elif qwen_reads:
+    if qwen_reads:
         value_mode = "Qwen2.5-VL-3B 로컬 판독"
-    elif fallback_reads:
-        value_mode = "컬러바 기반 대체 판독"
     else:
         value_mode = "판독 결과 없음"
 
@@ -317,6 +348,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "stats": {
             "labelsRemoved": label_count,
             "pointsDetected": len(points),
+            "detectedCandidates": detected_candidates,
+            "validCandidates": valid_candidates_count,
             "zeroRegions": zero_regions,
             "zeroRatio": round(zero_ratio, 4),
             "zeroTolerance": (
@@ -325,7 +358,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                 else None
             ),
             "qwenReads": qwen_reads,
-            "fallbackReads": fallback_reads,
+            "qwenUnread": unread_labels,
         },
         "warnings": warnings,
         "warningsByEngine": {
