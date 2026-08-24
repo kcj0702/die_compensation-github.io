@@ -6,6 +6,8 @@ import base64
 import os
 import sys
 import threading
+import uuid
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +47,8 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
 from zero_line_detection.zero_boundary import (  # noqa: E402
     draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
+from zero_line_detection.calibration import calibrate_with_points  # noqa: E402
+from zero_line_detection.zero_valley import find_valley_lines  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -62,6 +66,21 @@ QWEN_CACHE_DIR = (
 )
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
+
+# 분석 1회분(값장·부품마스크·앵커·허용오차)을 잠깐 들고 있는 캐시.
+# 로컬 1인용 데모라 세션 관리 없이 메모리 dict 로 충분하다 — 사람이
+# 앵커 2개를 클릭해서 "선 잇기" 를 요청할 때 이미지를 다시 안 올리고,
+# VLM 라벨 판독도 다시 안 돌리려는 목적.
+_analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_ANALYSIS_CACHE_MAX = 5
+
+
+def _cache_analysis(entry: dict[str, Any]) -> str:
+    analysis_id = uuid.uuid4().hex
+    _analysis_cache[analysis_id] = entry
+    while len(_analysis_cache) > _ANALYSIS_CACHE_MAX:
+        _analysis_cache.popitem(last=False)
+    return analysis_id
 
 
 def _find_qwen_model() -> Path | None:
@@ -149,60 +168,15 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:  # engine errors must be shown per engine
         errors["label"] = str(exc)
 
+    # clean_image(라벨 제거·복원본)를 값 추출 소스로 써보려 했으나,
+    # label_removal 엔진이 컬러바 범례의 눈금 숫자까지 "라벨"로 오인해
+    # 범례 전체를 흰색으로 지워버려서 컬러바 검출 자체가 깨진다(확인함).
+    # 그래서 원본 이미지를 그대로 쓰고, 주석 제거는 zero_line_detection
+    # 자체 마스킹(annotations.py, 컬러바 영역은 건드리지 않음)에 맡긴다.
     zero_output = None
-    zero_overlay: np.ndarray | None = None
-    zero_candidates: list = []
-    zero_datum_mask: np.ndarray | None = None
-    zero_lines: list = []
-    zero_anchors: list = []
-    zero_patches: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
-        overlay_base = cv2.cvtColor(
-            clean_image if clean_image is not None else image,
-            cv2.COLOR_BGR2RGB,
-        )
-
-        # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
-        # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
-        zero_candidates, flat, _ = find_zero_candidates(
-            zero_output.values,
-            zero_output.part_mask,
-            float(zero_output.result.tolerance),
-        )
-        zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
-
-        # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
-        # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
-        # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
-        # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
-        # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
-        zero_anchors = find_boundary_anchors(
-            zero_output.values, zero_output.part_mask
-        )
-        zero_patches = grow_patches(
-            zero_output.values, zero_output.part_mask, zero_anchors,
-            tolerance=float(zero_output.result.tolerance),
-        )
-        zero_lines = extract_zero_polylines(
-            zero_output.values, zero_output.part_mask
-        )
-        if zero_patches:
-            zero_overlay = draw_zero_boundary(overlay_base, zero_anchors, zero_patches)
-        elif zero_lines:
-            zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
-        elif zero_datum_mask is not None and zero_datum_mask.any():
-            zero_overlay = draw_polygons(
-                overlay_base, polygonize(zero_datum_mask, preset="balanced")
-            )
-        else:
-            zero_overlay = make_overlay(
-                overlay_base,
-                zero_output.mask,
-                zero_output.centerline,
-                zero_crossing=zero_output.zero_crossing,
-            )
     except Exception as exc:
         errors["zero"] = str(exc)
 
@@ -254,11 +228,86 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:
         errors["deviation"] = str(exc)
 
+    zero_overlay: np.ndarray | None = None
+    zero_candidates: list = []
+    zero_datum_mask: np.ndarray | None = None
+    zero_lines: list = []
+    zero_anchors: list = []
+    zero_patches: list = []
+    calibration_stats: dict | None = None
+    calibrated_values: np.ndarray | None = None
+    if zero_output is not None:
+        try:
+            overlay_base = cv2.cvtColor(
+                clean_image if clean_image is not None else image,
+                cv2.COLOR_BGR2RGB,
+            )
+
+            # VLM이 라벨에서 직접 읽은 실측값(points)으로 컬러바 추정치를
+            # 보정한다. 부품마다 --vmin/--vmax 를 손으로 넣던 걸 대신한다.
+            calibrated_values, calibration_stats = calibrate_with_points(
+                zero_output.values, points
+            )
+
+            # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
+            # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
+            calibration_scale = abs(float((calibration_stats or {}).get("scale", 1.0)))
+            calibrated_tolerance = float(zero_output.result.tolerance) * calibration_scale
+
+            zero_candidates, flat, _ = find_zero_candidates(
+                calibrated_values,
+                zero_output.part_mask,
+                calibrated_tolerance,
+            )
+            zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
+
+            # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
+            # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
+            # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
+            # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
+            # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
+            zero_anchors = find_boundary_anchors(
+                calibrated_values, zero_output.part_mask
+            )
+            zero_patches = grow_patches(
+                calibrated_values, zero_output.part_mask, zero_anchors,
+                tolerance=calibrated_tolerance,
+            )
+            zero_lines = extract_zero_polylines(
+                calibrated_values, zero_output.part_mask
+            )
+            # 기본 화면에는 검증된 것만 보여준다. zero_lines(전체 내부
+            # 스켈레톤 추적)와 zero_datum_mask(평탄도 기반 후보)는 실측
+            # 시트 대비 검증에서 지저분하고 신뢰도가 낮았던 예전 방식이라
+            # 자동 오버레이에서는 뺐다 — 대신 사람이 앵커 2개를 골라
+            # /api/zero-valley-line 으로 선을 그리는 방식(검증됨, 오차
+            # 대각선의 3.68%)을 쓴다.
+            # 자동 후보 패치의 붉은 외곽선은 보정시트의 기준선처럼 보이지만
+            # 실제로는 후보일 뿐이라 화면을 지저분하게 만들었다. 기본 화면은
+            # 원본 스캔만 보여주고, 사용자가 앵커 두 개를 고르면 그 사이의
+            # 단일 골짜기 경로만 프런트엔드에서 붉은 선으로 표시한다.
+            zero_overlay = overlay_base
+        except Exception as exc:
+            errors["zero"] = str(exc)
+
     zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
     zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
     warnings = zero_output.warnings if zero_output is not None else []
 
+    analysis_id = None
+    if zero_output is not None and zero_anchors and calibrated_values is not None:
+        analysis_id = _cache_analysis({
+            "values": calibrated_values,
+            "part_mask": zero_output.part_mask,
+            "tolerance": calibrated_tolerance,
+            "anchors": zero_anchors,
+            "overlay_base": cv2.cvtColor(
+                clean_image if clean_image is not None else image, cv2.COLOR_BGR2RGB
+            ),
+        })
+
     return {
+        "analysisId": analysis_id,
         "source": {"name": filename, "width": width, "height": height},
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
@@ -284,6 +333,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             ),
             "qwenReads": qwen_reads,
             "fallbackReads": fallback_reads,
+            "calibration": calibration_stats,
         },
         "warnings": warnings,
         "errors": errors,
@@ -320,6 +370,49 @@ async def analyze(request: Request) -> JSONResponse:
             analyze_image, image, getattr(upload, "filename", "scan.png")
         )
         return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+def zero_valley_line_for(analysis_id: str, anchor_id_a: int, anchor_id_b: int) -> dict[str, Any]:
+    entry = _analysis_cache.get(analysis_id)
+    if entry is None:
+        raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
+    anchors = entry["anchors"]
+    by_id = {a.anchor_id: a for a in anchors}
+    if anchor_id_a not in by_id or anchor_id_b not in by_id:
+        raise ValueError("존재하지 않는 앵커 ID 입니다.")
+    if anchor_id_a == anchor_id_b:
+        raise ValueError("서로 다른 앵커 2개를 선택하세요.")
+
+    pair = [by_id[anchor_id_a], by_id[anchor_id_b]]
+    lines = find_valley_lines(
+        entry["values"], entry["part_mask"], pair, entry["tolerance"],
+        max_quality_ratio=100.0,   # 사람이 직접 고른 쌍이므로 비용으로 거르지 않는다
+        min_length_px=0.0,
+        max_uses_per_anchor=2,
+    )
+    if not lines:
+        raise ValueError("두 앵커를 잇는 경로를 찾지 못했습니다 (부품 영역 밖일 수 있음).")
+    line = lines[0]
+    return {"line": line.to_dict()}
+
+
+async def zero_valley_line(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        analysis_id = body.get("analysisId")
+        anchor_ids = body.get("anchorIds")
+        if not analysis_id or not isinstance(anchor_ids, list) or len(anchor_ids) != 2:
+            return JSONResponse(
+                {"error": "analysisId 와 anchorIds(길이 2) 가 필요합니다."}, status_code=400
+            )
+        result = await run_in_threadpool(
+            zero_valley_line_for, analysis_id, int(anchor_ids[0]), int(anchor_ids[1])
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
@@ -370,6 +463,7 @@ app = Starlette(
     routes=[
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
+        Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]
 )
