@@ -85,6 +85,137 @@ def _build_graph(values: np.ndarray, part_mask: np.ndarray, smooth_sigma: float)
     return graph, idx, xs, ys, vs
 
 
+@dataclass
+class ZeroLineCandidate:
+    """앵커 쌍 하나로 만든 제로라인 후보와 그 근거 점수."""
+
+    rank: int
+    anchor_start_id: int
+    anchor_end_id: int
+    points: list
+    length_px: float
+    mean_abs_deviation: float
+    separation: float      # 선 양쪽 영역의 평균 편차 차이 (클수록 진짜 경계다움)
+    balance: float         # 양쪽 영역 크기 비 (작으면 얇게 잘라낸 가짜)
+    score: float
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def rank_zero_line_candidates(
+    values: np.ndarray,
+    part_mask: np.ndarray,
+    anchors: list,
+    top_n: int = 4,
+    min_balance: float = 0.30,
+    smooth_sigma: float = 15.0,
+    simplify_eps: float = 2.0,
+) -> list:
+    """모든 앵커 쌍의 경로를 만들고 "진짜 보정 경계다움"으로 순위를 매긴다.
+
+    [왜 이렇게 하나 — 2026-08-24 실측으로 알아낸 것]
+    실제 보정시트의 정답선 위에서 스캔 편차값을 직접 재봤다:
+      - |편차| 평균 0.273 (허용오차 0.15가 아니다), 90%가 ±0.5 안
+      - 선 위 양수 비율 47.7% -> 부호가 균형을 이루는 경계가 맞다
+      - 최단경로가 아니다. 개구부 위로 일부러 크게 우회한다
+    즉 "편차가 정확히 0인 등고선"이 아니라 "±0.5 밴드 안에서 부품을
+    의미 있게 둘로 가르는 경계"다. 그래서 경로 자체의 |편차|만 보지 않고,
+    그 선으로 부품을 잘랐을 때 양쪽이 실제로 갈리는지(separation)를 본다.
+
+    [점수 — balance 는 곱하지 말고 걸러내는 데만 쓴다]
+    separation(양쪽 평균 편차 차이)에 balance(양쪽 크기 비)를 곱해봤더니
+    오히려 나빠졌다(실측: 정답이 16개 중 9위). balance 를 곱하면 "부품을
+    반반으로 가르기만 하면 점수가 오르는" 쏠림이 생긴다. balance 는
+    min_balance 로 얇은 가짜만 걸러내고, 순위는 separation 으로만 매긴다
+    (같은 실측에서 정답이 3·4위로 올라옴).
+
+    [한계 — 정직하게]
+    이 점수로도 정답 쌍이 1등은 아니다. 실측(JD_64XX2, 앵커 8개 = 28쌍):
+    얇은 가짜를 거른 16개 중 정답 후보 두 개가 3위·4위였다. 스캔만으로는
+    여러 후보가 물리적으로 똑같이 그럴듯하다 — 실제로 그 부품 시트의 한쪽
+    "0" 표시는 작업자가 판단으로 추가한 것이라 스캔에 아예 없는 정보다.
+    그래서 하나로 확정하지 않고 상위 후보를 순위대로 내보내 사람이 고르게
+    한다(회의록 "AI 제안 -> 작업자 수정" 방향).
+    """
+    if len(anchors) < 2:
+        return []
+
+    graph, idx, xs, ys, vs = _build_graph(values, part_mask, smooth_sigma)
+    h, w = values.shape
+    part_area = float(part_mask.sum())
+    scored: list = []
+
+    for i, a in enumerate(anchors):
+        start = idx[a.y, a.x]
+        if start < 0:
+            continue
+        dist, pred = dijkstra(graph, indices=start, return_predecessors=True)
+        for b in anchors[i + 1:]:
+            end = idx[b.y, b.x]
+            if end < 0 or not np.isfinite(dist[end]):
+                continue
+            path = []
+            cur = end
+            while cur != -9999 and cur != start:
+                path.append(cur)
+                cur = pred[cur]
+            if cur != start:
+                continue
+            path.append(start)
+            path.reverse()
+            pts = np.array([(int(xs[k]), int(ys[k])) for k in path])
+            if len(pts) < 2:
+                continue
+
+            # 이 선으로 부품을 자르면 양쪽이 실제로 갈리는가
+            cut = np.zeros((h, w), np.uint8)
+            cv2.polylines(cut, [pts.reshape(-1, 1, 2)], False, 255, 7)
+            split = part_mask.copy()
+            split[cut > 0] = False
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                split.astype(np.uint8), connectivity=8
+            )
+            biggest = sorted(range(1, count), key=lambda k: -stats[k, cv2.CC_STAT_AREA])[:2]
+            if len(biggest) < 2:
+                continue
+            area_a = float(stats[biggest[0], cv2.CC_STAT_AREA])
+            area_b = float(stats[biggest[1], cv2.CC_STAT_AREA])
+            if area_b < part_area * 0.03:
+                continue
+            balance = area_b / area_a
+            if balance < min_balance:
+                # 얇게 귀퉁이만 잘라낸 가짜 경계
+                continue
+            side_a = values[labels == biggest[0]]
+            side_b = values[labels == biggest[1]]
+            separation = abs(float(side_a.mean()) - float(side_b.mean()))
+
+            path_vals = np.abs(vs[pts[:, 1], pts[:, 0]])
+            length_px = float(np.hypot(*np.diff(pts, axis=0).T).sum())
+            simplified = cv2.approxPolyDP(
+                pts.reshape(-1, 1, 2).astype(np.int32), simplify_eps, False
+            ).reshape(-1, 2)
+
+            scored.append(ZeroLineCandidate(
+                rank=0,
+                anchor_start_id=a.anchor_id,
+                anchor_end_id=b.anchor_id,
+                points=simplified.tolist(),
+                length_px=round(length_px, 1),
+                mean_abs_deviation=round(float(path_vals.mean()), 4),
+                separation=round(separation, 4),
+                balance=round(balance, 3),
+                score=round(separation, 4),
+            ))
+
+    scored.sort(key=lambda c: -c.score)
+    top = scored[:top_n]
+    for rank, c in enumerate(top, start=1):
+        c.rank = rank
+    return top
+
+
 def find_valley_lines(
     values: np.ndarray,
     part_mask: np.ndarray,
@@ -193,4 +324,7 @@ def draw_zero_valley(
     return out
 
 
-__all__ = ["ZeroValleyLine", "find_valley_lines", "draw_zero_valley"]
+__all__ = [
+    "ZeroValleyLine", "ZeroLineCandidate",
+    "find_valley_lines", "rank_zero_line_candidates", "draw_zero_valley",
+]

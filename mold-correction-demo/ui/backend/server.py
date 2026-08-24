@@ -53,7 +53,9 @@ from zero_line_detection.zero_boundary import (  # noqa: E402
 from zero_line_detection.calibration import (  # noqa: E402
     calibrate_vmin_vmax, calibrate_with_points,
 )
-from zero_line_detection.zero_valley import find_valley_lines  # noqa: E402
+from zero_line_detection.zero_valley import (  # noqa: E402
+    find_valley_lines, rank_zero_line_candidates,
+)
 from zero_line_advance.advance import (  # noqa: E402
     AdvanceConfig, detect_advanced_zero_line,
 )
@@ -368,6 +370,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_lines: list = []
     zero_anchors: list = []
     zero_patches: list = []
+    zero_line_candidates: list = []
     calibration_stats: dict | None = None
     calibrated_values: np.ndarray | None = None
     if zero_output is not None:
@@ -413,6 +416,13 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             )
             zero_lines = extract_zero_polylines(
                 calibrated_values, zero_output.part_mask
+            )
+            # 앵커 쌍을 사람이 고르지 않아도 되도록, 모든 쌍의 경로를
+            # "부품을 실제로 둘로 가르는 정도"로 순위 매겨 상위 4개만
+            # 내보낸다. 1등이 항상 정답은 아니라서(실측: 정답이 3·4위)
+            # 하나로 확정하지 않고 후보 목록으로 준다.
+            zero_line_candidates = rank_zero_line_candidates(
+                calibrated_values, zero_output.part_mask, zero_anchors, top_n=4
             )
             # 기본 화면에는 검증된 것만 보여준다. zero_lines(전체 내부
             # 스켈레톤 추적)와 zero_datum_mask(평탄도 기반 후보)는 실측
@@ -497,6 +507,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroAnchors": [a.to_dict() for a in zero_anchors],
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "advanceLine": advance_line,
+        "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
         "points": points,
         "stats": {
             "labelsRemoved": label_count,

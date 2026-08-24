@@ -20,6 +20,7 @@ type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number;
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number };
 type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: number | null; points: [number, number][]; length_px: number; mean_abs_deviation: number; source: 'ai' | 'manual' };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
+type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
   source: { name: string; width: number; height: number };
@@ -28,6 +29,7 @@ type AnalysisResult = {
   zeroMask: string | null;
   zeroAnchors: ZeroAnchor[];
   advanceLine: AdvanceLine | null;
+  zeroLineCandidates: ZeroLineCandidate[];
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -404,7 +406,23 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
             ? <p className="anchor-panel__status">AI가 "0.0" 표시점 기준으로 자동 제안한 선입니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
             : <p className="anchor-panel__status anchor-panel__status--error">AI 추천선의 신뢰도가 낮습니다{result.advanceLine.warnings[0] ? `: ${result.advanceLine.warnings[0]}` : ''}. 아래에서 AI 추천선을 지우고 앵커 2개를 직접 골라 이으세요.</p>
         )}
-        <p className="anchor-panel__hint">이미지 위 초록 점(앵커) 2개를 순서대로 클릭하면, 그 사이를 실측 보정시트 수준 정확도로 잇습니다 (검증: 대각선 대비 오차 약 3.68%).</p>
+        {(result.zeroLineCandidates || []).length > 0 && <div className="candidate-list">
+          <p className="anchor-panel__hint">AI가 모든 앵커 조합을 &quot;부품을 실제로 둘로 가르는 정도&quot;로 채점해 상위 {result.zeroLineCandidates.length}개를 추렸습니다. 1등을 기본으로 그렸으니, 실제와 다르면 아래에서 다른 후보를 눌러 바꾸세요. (실측 검증: 정답이 이 목록 안에는 들어오지만 1등은 아닐 수 있습니다.)</p>
+          {result.zeroLineCandidates.map((cand) => {
+            const active = valleyLines.some((line) => line.id === `cand-${cand.rank}`);
+            return <button type="button" key={cand.rank} className={`candidate-chip ${active ? 'candidate-chip--active' : ''}`}
+              onClick={() => setValleyLines((current) => {
+                const others = current.filter((line) => !line.id.startsWith('cand-') && line.source !== 'ai');
+                if (active) return others;
+                return [...others, { id: `cand-${cand.rank}`, anchorStartId: cand.anchor_start_id, anchorEndId: cand.anchor_end_id, points: cand.points, length_px: cand.length_px, mean_abs_deviation: cand.mean_abs_deviation, source: 'ai' as const }];
+              })}>
+              <b>{cand.rank}위</b>
+              <span>앵커 {cand.anchor_start_id}↔{cand.anchor_end_id}</span>
+              <small>분리도 {cand.separation.toFixed(2)}</small>
+            </button>;
+          })}
+        </div>}
+        <p className="anchor-panel__hint">목록에 정답이 없으면, 이미지 위 초록 점(앵커) 2개를 순서대로 클릭해 직접 이으세요 (경로 정확도 검증: 대각선 대비 오차 약 3.68%).</p>
         {selectedAnchors.length > 0 && valleyStatus !== 'error' && <p className="anchor-panel__status">선택됨: {selectedAnchors.join(', ')} {valleyStatus === 'loading' && '· 잇는 중…'}</p>}
         {valleyStatus === 'error' && valleyError && <p className="anchor-panel__status anchor-panel__status--error">{valleyError}</p>}
         {valleyLines.map((line) => <div className="point-list-row" key={line.id}>
@@ -494,10 +512,13 @@ export default function Home() {
   // 보여주고 필요하면 지우거나 더하는 방향(회의록 "AI 제안 → 작업자 수정").
   useEffect(() => {
     if (!completedScan || valleyLinesByScan[completedScan.id] !== undefined) return;
+    const best = (completedScan.result?.zeroLineCandidates || [])[0];
     const advance = completedScan.result?.advanceLine;
-    const initial: ValleyLine[] = advance && advance.points.length >= 2
-      ? [{ id: 'ai-suggestion', anchorStartId: null, anchorEndId: null, points: advance.points, length_px: 0, mean_abs_deviation: 0, source: 'ai' }]
-      : [];
+    const initial: ValleyLine[] = best
+      ? [{ id: `cand-${best.rank}`, anchorStartId: best.anchor_start_id, anchorEndId: best.anchor_end_id, points: best.points, length_px: best.length_px, mean_abs_deviation: best.mean_abs_deviation, source: 'ai' }]
+      : advance && advance.points.length >= 2
+        ? [{ id: 'ai-suggestion', anchorStartId: null, anchorEndId: null, points: advance.points, length_px: 0, mean_abs_deviation: 0, source: 'ai' }]
+        : [];
     setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: initial }));
   }, [completedScan, valleyLinesByScan]);
   const valleyLines = completedScan ? valleyLinesByScan[completedScan.id] || [] : [];
