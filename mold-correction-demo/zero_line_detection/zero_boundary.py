@@ -128,6 +128,45 @@ def find_boundary_anchors(
     return anchors
 
 
+def filter_anchors_by_labels(
+    anchors: list,
+    points: list,
+    max_abs_value: float = 0.5,
+    radius_px: float = 60.0,
+) -> list:
+    """근처에 "명백히 0이 아닌" 실측 라벨만 있는 앵커를 걸러낸다.
+
+    2026-08-24 사용자 피드백: "정확히 0.0이 아니라도 제로라인이 될 수
+    있다 — 3D스캔데이터의 초록색 영역과 낮은 숫자값들을 기준으로 찾는
+    것도 나쁘지 않다." 컬러바 부호전환만으로 찾은 앵커 중에는 리브·
+    나사구멍 잡음으로 생긴 가짜도 섞여 있는데, 근처 실측값(VLM 판독)이
+    뚜렷하게 크면(0.5mm 초과) 그 앵커는 가짜일 확률이 높다.
+
+    실측 검증(JD_64XX2): 앵커7 근처 최소값이 1.0mm — 이 필터로 걸러짐.
+    진짜 정답 앵커(4번)를 포함한 나머지는 전부 0.2mm 이하라 통과함.
+
+    주의 — 이건 "탈락 필터"이지 "정답 확정"이 아니다. 근처에 낮은 값이
+    있다고 그 앵커가 반드시 진짜 0라인 끝점이라는 뜻은 아니다(앵커8도
+    0.000이 근처에 있었지만 실제 정답이 아니었다 — README 참고). 그래서
+    "근처에 라벨이 아예 없는" 앵커는 증거 부족일 뿐 반증이 아니므로
+    통과시킨다.
+    """
+    ok_points = [p for p in points if p.get("confidence") == "ok"]
+    if not ok_points:
+        return list(anchors)
+
+    kept = []
+    for a in anchors:
+        nearby_abs = [
+            abs(p["value"]) for p in ok_points
+            if (p["xPx"] - a.x) ** 2 + (p["yPx"] - a.y) ** 2 <= radius_px ** 2
+        ]
+        if nearby_abs and min(nearby_abs) > max_abs_value:
+            continue
+        kept.append(a)
+    return kept
+
+
 def grow_patches(
     values: np.ndarray,
     part_mask: np.ndarray,
@@ -220,5 +259,6 @@ def draw_zero_boundary(
 
 __all__ = [
     "ZeroAnchor", "ZeroPatch",
-    "find_boundary_anchors", "grow_patches", "draw_zero_boundary",
+    "find_boundary_anchors", "filter_anchors_by_labels",
+    "grow_patches", "draw_zero_boundary",
 ]

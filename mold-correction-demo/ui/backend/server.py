@@ -48,7 +48,7 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
     draw_zero_polylines, extract_zero_polylines,
 )
 from zero_line_detection.zero_boundary import (  # noqa: E402
-    draw_zero_boundary, find_boundary_anchors, grow_patches,
+    draw_zero_boundary, filter_anchors_by_labels, find_boundary_anchors, grow_patches,
 )
 from zero_line_detection.calibration import (  # noqa: E402
     calibrate_vmin_vmax, calibrate_with_points,
@@ -403,6 +403,10 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             zero_anchors = find_boundary_anchors(
                 calibrated_values, zero_output.part_mask
             )
+            # 근처 실측 라벨값이 뚜렷하게 크면(0.5mm 초과) 리브·나사구멍
+            # 잡음으로 생긴 가짜 앵커일 확률이 높다 — 탈락시킨다("정답
+            # 확정"이 아니라 "명백히 아닌 것만 거르는" 필터다).
+            zero_anchors = filter_anchors_by_labels(zero_anchors, points)
             zero_patches = grow_patches(
                 calibrated_values, zero_output.part_mask, zero_anchors,
                 tolerance=calibrated_tolerance,
