@@ -59,32 +59,77 @@ def _imread(path: str | Path) -> np.ndarray:
     return image
 
 
-def _sheet_part_bbox(sheet_bgr: np.ndarray) -> tuple[int, int, int, int]:
-    """시트에서 파랗게 렌더된 부품 본체가 차지한 영역을 찾는다.
+def _sheet_body_mask(sheet_bgr: np.ndarray) -> np.ndarray:
+    """시트에서 부품 그림(음영 렌더)에 해당하는 픽셀만 남긴다.
 
-    표제부(상단 표)와 하단 설명 글자는 부품이 아니므로 세로로 잘라낸다.
+    부품은 시트마다 다르게 칠해져 있다 — JD_64XX2 는 파란 렌더,
+    JD_71XX2 는 회색 렌더에 공정 구획이 분홍으로 덧칠돼 있다. 그래서
+    "파란색"으로 찾지 않고 **흰 배경도, 검은 글자도, 빨강·노랑 주석도
+    아닌 중간 밝기의 면**으로 찾는다. 분홍 덧칠은 부품 위에 칠한 것이라
+    부품으로 친다(사용자 요청: "분홍색 무시하고 그 파트 부분에만").
+
+    글자와 표선을 빼는 게 중요하다. 안 그러면 패널들이 글자를 통해 한
+    덩어리로 이어져 시트 전체가 하나로 잡힌다(실측으로 확인).
     """
     b, g, r = (sheet_bgr[..., i].astype(int) for i in range(3))
-    height = sheet_bgr.shape[0]
-    body = (b > r + 15) & (b > 80) & ~((r > 240) & (g > 240) & (b > 240))
-    body[: int(height * 0.25), :] = False
-    body[int(height * 0.92):, :] = False
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(
-        body.astype(np.uint8), connectivity=8
+    white = (r > 238) & (g > 238) & (b > 238)
+    black = (r < 70) & (g < 70) & (b < 70)          # 글자·표선
+    red = (r > 170) & (g < 90) & (b < 90)
+    yellow = (r > 200) & (g > 200) & (b < 140)      # 값 라벨 박스
+    body = ~white & ~black & ~red & ~yellow
+    # 얇은 획(글자 테두리, 치수선)은 침식으로 없앤다. 부품 면은 살아남는다.
+    eroded = cv2.erode(
+        body.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
     )
-    keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] > 1000]
-    if not keep:
+    return eroded > 0
+
+
+def _panel_candidates(sheet_bgr: np.ndarray) -> list:
+    """부품 그림이 실린 패널 후보들을 bbox 목록으로 모은다.
+
+    시트에는 전체 조감도 하나에 확대 상세도 여러 개가 실린다. 어느 것이
+    스캔과 같은 전체 뷰인지는 여기서 정하지 않는다 — 실제 선택은 투영해본
+    결과로 고른다(extract_sheet_zero_line 참고). 덩어리가 붙는 정도가
+    시트마다 달라 닫힘 커널을 여러 개 써서 후보를 넓게 모은다.
+    """
+    height = sheet_bgr.shape[0]
+    body = _sheet_body_mask(sheet_bgr)
+    body[: int(height * 0.16), :] = False           # 표제부 표
+    body[int(height * 0.96):, :] = False            # 하단 설명
+
+    seen: list = []
+    for kernel in (1, 7, 15):
+        current = body.astype(np.uint8)
+        if kernel > 1:
+            current = cv2.morphologyEx(
+                current, cv2.MORPH_CLOSE,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel)),
+            )
+        count, _labels, stats, _ = cv2.connectedComponentsWithStats(current, connectivity=8)
+        for index in range(1, count):
+            x, y, w, h, area = stats[index]
+            if area < 4000 or w < 60 or h < 20:
+                continue
+            box = (int(x), int(y), int(x + w - 1), int(y + h - 1))
+            if box not in seen:
+                seen.append(box)
+    if not seen:
         raise ValueError("시트에서 부품 형상을 찾지 못했습니다.")
-    mask = np.isin(labels, keep)
-    ys, xs = np.nonzero(mask)
-    return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+    return seen
 
 
-def _red_curve_mask(sheet_bgr: np.ndarray) -> np.ndarray:
+def _red_curve_mask(sheet_bgr: np.ndarray, min_length: int = 150) -> np.ndarray:
     """시트의 빨간 선 중 가장 큰 덩어리(=제로라인 본선)만 남긴다.
 
     빨간색은 제로라인 말고도 라벨 박스·글자에 쓰인다. 그것들은 작고
     떨어져 있으므로 가장 큰 연결 성분 하나만 취하면 선만 남는다.
+
+    시트에 따라 제로를 선이 아니라 **영역**으로 표기하기도 한다. 그런
+    시트에는 이을 선 자체가 없다 — JD_71XX2 는 빨간 성분이 672개인데
+    전부 30px 안팎의 글자였고(①②③, 공정 설명), 제로는 노란 "0" 박스와
+    분홍 공정 구획으로 표기돼 있었다. 그런 경우는 여기서 걸러내고
+    호출한 쪽에 명확히 알린다.
     """
     b, g, r = (sheet_bgr[..., i].astype(int) for i in range(3))
     red = ((r > 180) & (g < 80) & (b < 80)).astype(np.uint8)
@@ -92,6 +137,14 @@ def _red_curve_mask(sheet_bgr: np.ndarray) -> np.ndarray:
     if count <= 1:
         raise ValueError("시트에서 빨간 제로라인을 찾지 못했습니다.")
     largest = max(range(1, count), key=lambda i: stats[i, cv2.CC_STAT_AREA])
+    width = int(stats[largest, cv2.CC_STAT_WIDTH])
+    height = int(stats[largest, cv2.CC_STAT_HEIGHT])
+    if max(width, height) < min_length:
+        raise ValueError(
+            "이 시트에는 이어진 빨간 제로라인이 없습니다 "
+            f"(가장 큰 빨간 덩어리가 {width}x{height}px). "
+            "제로를 영역으로 표기한 시트로 보입니다 — 선 추출 대상이 아닙니다."
+        )
     return (labels == largest)
 
 
@@ -170,7 +223,6 @@ def extract_sheet_zero_line(
     (bbox)을 맞추는 선형 변환이라 부품 크기 대비 5% 안팎의 오차가 남는다.
     """
     sheet = _imread(sheet_path)
-    sx0, sy0, sx1, sy1 = _sheet_part_bbox(sheet)
     mask = _red_curve_mask(sheet)
     ordered = _order_curve(mask)
 
@@ -181,7 +233,8 @@ def extract_sheet_zero_line(
     if values is not None:
         smoothed = cv2.GaussianBlur(values, (0, 0), 15)
 
-    def project(mirror: bool) -> np.ndarray:
+    def project(panel: tuple, mirror: bool) -> np.ndarray:
+        sx0, sy0, sx1, sy1 = panel
         nx = (ordered[:, 0] - sx0) / max(sx1 - sx0, 1)
         if mirror:
             nx = 1.0 - nx
@@ -190,18 +243,34 @@ def extract_sheet_zero_line(
         py = np.clip((ny * (ky1 - ky0) + ky0).astype(int), 0, height - 1)
         return np.stack([px, py], axis=1)
 
-    def quality(points: np.ndarray) -> float:
+    def cost(points: np.ndarray) -> float:
+        """부품 밖으로 나가면 벌점, 안에서는 선 위 |편차| 가 낮을수록 좋다.
+
+        패널을 잘못 고르면 선이 부품 밖으로 밀려나므로 밖으로 나간 비율이
+        1차 기준이 된다. 그다음 실제 편차로 미세 판정한다.
+        """
         inside = scan_part_mask[points[:, 1], points[:, 0]]
+        outside_ratio = 1.0 - float(inside.mean())
         if not inside.any():
             return float("inf")
-        if smoothed is None:
-            return -float(inside.mean())
-        return float(np.abs(smoothed[points[:, 1], points[:, 0]][inside]).mean())
+        deviation = (
+            float(np.abs(smoothed[points[:, 1], points[:, 0]][inside]).mean())
+            if smoothed is not None else 0.0
+        )
+        return outside_ratio * 3.0 + deviation
 
-    straight = project(False)
-    flipped = project(True)
-    mirrored = quality(flipped) < quality(straight)
-    mapped = flipped if mirrored else straight
+    best = None
+    for panel in _panel_candidates(sheet):
+        for mirror in (False, True):
+            points = project(panel, mirror)
+            score = cost(points)
+            if best is None or score < best[0]:
+                best = (score, panel, mirror, points)
+
+    if best is None:
+        raise ValueError("시트 제로라인을 스캔에 맞출 패널을 찾지 못했습니다.")
+    _score, panel, mirrored, mapped = best
+    sx0, sy0, sx1, sy1 = panel
 
     simplified = cv2.approxPolyDP(
         mapped.astype(np.int32).reshape(-1, 1, 2), simplify_eps, False
@@ -211,7 +280,7 @@ def extract_sheet_zero_line(
         part_no=part_no,
         points=simplified.tolist(),
         source_sheet=str(sheet_path),
-        sheet_bbox=[sx0, sy0, sx1, sy1],
+        sheet_bbox=[int(sx0), int(sy0), int(sx1), int(sy1)],
         scan_bbox=[kx0, ky0, kx1, ky1],
         n_raw_pixels=int(mask.sum()),
         mirrored=bool(mirrored),
