@@ -176,7 +176,7 @@ def _rect_iou(first: Rect, second: Rect) -> float:
 
 
 def _deduplicate_rectangles(rectangles: list[Rect]) -> list[Rect]:
-    """동일 라벨의 외부/내부 contour 중 큰 사각형 하나만 남긴다."""
+    """동일 contour 중복과 인접 라벨을 합친 composite 박스를 제거한다."""
     ordered = sorted(
         rectangles,
         key=lambda item: (item[2] - item[0]) * (item[3] - item[1]),
@@ -190,7 +190,37 @@ def _deduplicate_rectangles(rectangles: list[Rect]) -> list[Rect]:
         ):
             continue
         unique.append(candidate)
-    return unique
+
+    # 중성 테두리 closing은 2px 정도로 붙은 두 라벨을 하나의 큰 contour로
+    # 합칠 수 있다. 실제 작은 박스 두 개가 서로 겹치지 않은 채 큰 박스 안에
+    # 들어 있을 때만 큰 박스를 버려, 단일 라벨의 내·외곽선은 그대로 유지한다.
+    atomic: list[Rect] = []
+    for candidate in unique:
+        x0, y0, x1, y1 = candidate
+        candidate_area = (x1 - x0) * (y1 - y0)
+        children: list[Rect] = []
+        for other in unique:
+            if other == candidate:
+                continue
+            ox0, oy0, ox1, oy1 = other
+            other_area = (ox1 - ox0) * (oy1 - oy0)
+            center_x = (ox0 + ox1) / 2.0
+            center_y = (oy0 + oy1) / 2.0
+            if (
+                other_area
+                <= candidate_area * config.LABEL_COMPOSITE_CHILD_MAX_AREA_RATIO
+                and x0 <= center_x <= x1
+                and y0 <= center_y <= y1
+            ):
+                children.append(other)
+        merged_pair = any(
+            _rect_iou(first, second) <= config.LABEL_COMPOSITE_CHILD_MAX_IOU
+            for child_index, first in enumerate(children)
+            for second in children[child_index + 1 :]
+        )
+        if not merged_pair:
+            atomic.append(candidate)
+    return atomic
 
 
 def _find_label_rectangles(
@@ -525,6 +555,8 @@ def _assign_line_components(
     scan_mask: np.ndarray,
     distance_to_scan: np.ndarray | None = None,
     blocked_mask: np.ndarray | None = None,
+    maximum_box_gap: int | None = None,
+    inside_scan_maximum_box_gap: int | None = None,
 ) -> dict[int, _LineComponent]:
     """스캔에 닿는 얇은 성분을 인접한 각 라벨에 품질순으로 할당한다."""
     height, width = line_mask.shape
@@ -544,6 +576,11 @@ def _assign_line_components(
     if scan_available and distance_to_scan is None:
         distance_to_scan = _distance_to_scan(scan_mask)
     maximum_scan_gap = _scan_snap_distance(scan_mask.shape)
+    regular_box_gap = (
+        config.LEADER_MAX_BOX_GAP
+        if maximum_box_gap is None
+        else maximum_box_gap
+    )
     assigned: dict[int, tuple[_LineComponent, tuple[int, float, float]]] = {}
 
     for component in range(1, count):
@@ -552,13 +589,16 @@ def _assign_line_components(
         component_height = int(stats[component, cv2.CC_STAT_HEIGHT])
         if not (config.LEADER_MIN_COMPONENT_AREA <= area <= maximum_area):
             continue
-        if max(component_width, component_height) < config.LEADER_MIN_COMPONENT_SPAN:
+        component_span = max(component_width, component_height)
+        if component_span < config.LEADER_DIRECT_COMPONENT_MIN_SPAN:
             continue
 
         ys, xs = np.where(labels == component)
         line_component = _LineComponent(ys=ys, xs=xs)
-        if blocked_mask is not None and np.any(blocked_mask[ys, xs] > 0):
-            continue
+        if blocked_mask is not None:
+            blocked_ratio = float(np.count_nonzero(blocked_mask[ys, xs])) / area
+            if blocked_ratio >= config.LEADER_BLOCKED_OVERLAP_RATIO:
+                continue
         if distance_to_scan is None:
             minimum_scan_gap = 0.0
             direct_scan_contact = 0
@@ -567,6 +607,15 @@ def _assign_line_components(
             if minimum_scan_gap > maximum_scan_gap:
                 continue
             direct_scan_contact = int(np.any(scan_mask[ys, xs] > 0))
+        direct_short_component = component_span < config.LEADER_MIN_COMPONENT_SPAN
+        if direct_short_component:
+            if not direct_scan_contact:
+                continue
+            if (
+                min(component_width, component_height)
+                < config.LEADER_DIRECT_COMPONENT_MIN_THICKNESS
+            ):
+                continue
         nearby: list[tuple[float, int]] = []
         for index in allowed_boxes:
             x, y, box_width, box_height = boxes[index]
@@ -581,7 +630,19 @@ def _assign_line_components(
             minimum_distance = float(
                 np.min(_distance_to_box_squared(xs, ys, boxes[index]))
             )
-            if minimum_distance > config.LEADER_MAX_BOX_GAP**2:
+            allowed_box_gap = (
+                config.LEADER_DIRECT_MAX_BOX_GAP
+                if direct_short_component
+                else regular_box_gap
+            )
+            if (
+                inside_scan_maximum_box_gap is not None
+                and not np.any(scan_mask[ys, xs] == 0)
+            ):
+                allowed_box_gap = min(
+                    allowed_box_gap, inside_scan_maximum_box_gap
+                )
+            if minimum_distance > allowed_box_gap**2:
                 continue
             nearby.append((minimum_distance, index))
         if not nearby:
@@ -598,6 +659,134 @@ def _assign_line_components(
                 assigned[associated_index] = (line_component, score)
 
     return {index: item[0] for index, item in assigned.items()}
+
+
+def _top_marker_endpoint(
+    bgr: np.ndarray,
+    box: Box,
+    scan_mask: np.ndarray,
+) -> tuple[int, int] | None:
+    """흰 라벨 상단 중앙의 짧고 어두운 점 마커를 엄격하게 복구한다."""
+    if _classify_fill_color(bgr, box) != "white" or not np.any(scan_mask):
+        return None
+
+    x, y, width, _ = box
+    scale = _resolution_scale(bgr.shape)
+    depth = max(3, int(round(config.LEADER_MARKER_SEARCH_DEPTH * scale)))
+    y0 = max(0, y - depth)
+    if y0 >= y or width < 3:
+        return None
+
+    # 실제 여섯 마커 라벨은 스캔 본체 위에 놓여 세 면이 모두 본체에 둘러싸여
+    # 있다. 흰 배경 라벨 근처의 우연한 어두운 무늬를 마커로 받지 않는다.
+    height, image_width = scan_mask.shape
+    box_height = box[3]
+    perimeter_depth = max(
+        2, int(round(config.LEADER_MARKER_PERIMETER_DEPTH * scale))
+    )
+    perimeter_bands = (
+        scan_mask[max(0, y - perimeter_depth) : y, x : x + width],
+        scan_mask[y : y + box_height, max(0, x - perimeter_depth) : x],
+        scan_mask[
+            y : y + box_height,
+            x + width : min(image_width, x + width + perimeter_depth),
+        ],
+        scan_mask[
+            y + box_height : min(height, y + box_height + perimeter_depth),
+            x : x + width,
+        ],
+    )
+    perimeter_ratios = [
+        float(np.count_nonzero(band)) / band.size if band.size else 0.0
+        for band in perimeter_bands
+    ]
+    minimum_perimeter_ratio = config.LEADER_MARKER_MIN_PERIMETER_SCAN_RATIO
+    if (
+        any(ratio < minimum_perimeter_ratio for ratio in perimeter_ratios[:3])
+        or sum(ratio >= minimum_perimeter_ratio for ratio in perimeter_ratios) < 3
+    ):
+        return None
+
+    value = bgr[y0:y, x : x + width].max(axis=2).astype(np.int16)
+    scan = scan_mask[y0:y, x : x + width] > 0
+    baseline_width = max(
+        2, int(round(width * config.LEADER_MARKER_BASELINE_RATIO))
+    )
+    center_width = max(3, int(round(width * config.LEADER_MARKER_CENTER_RATIO)))
+    center_x0 = max(0, (width - center_width) // 2)
+    center_x1 = min(width, center_x0 + center_width)
+    if baseline_width * 2 >= width or center_x0 >= center_x1:
+        return None
+
+    side_values = np.concatenate(
+        (value[:, :baseline_width], value[:, -baseline_width:]), axis=1
+    )
+    baseline = np.median(side_values, axis=1, keepdims=True)
+    center_value = value[:, center_x0:center_x1]
+    center_scan = scan[:, center_x0:center_x1]
+    evidence = (
+        (baseline - center_value >= config.LEADER_MARKER_MIN_CONTRAST)
+        & center_scan
+    )
+    minimum_pixels = max(
+        config.LEADER_MARKER_MIN_PIXELS,
+        int(round(config.LEADER_MARKER_MIN_PIXELS * scale)),
+    )
+    required_rows = min(config.LEADER_MARKER_REQUIRED_ROWS, evidence.shape[0])
+    minimum_row_pixels = max(
+        config.LEADER_MARKER_MIN_ROW_PIXELS,
+        int(round(config.LEADER_MARKER_MIN_ROW_PIXELS * scale)),
+    )
+    maximum_row_pixels = max(
+        minimum_row_pixels,
+        int(round(center_width * config.LEADER_MARKER_MAX_ROW_RATIO)),
+    )
+    count, marker_labels, marker_stats, _ = cv2.connectedComponentsWithStats(
+        evidence.astype(np.uint8), connectivity=8
+    )
+    selected_component: int | None = None
+    selected_area = -1
+    for component in range(1, count):
+        area = int(marker_stats[component, cv2.CC_STAT_AREA])
+        if area < minimum_pixels or not np.any(marker_labels[-1] == component):
+            continue
+        component_evidence = marker_labels == component
+        contact_evidence = component_evidence[-required_rows:]
+        row_counts = np.count_nonzero(contact_evidence, axis=1)
+        if np.any(row_counts < minimum_row_pixels) or np.any(
+            row_counts > maximum_row_pixels
+        ):
+            continue
+        row_centers = np.asarray(
+            [np.mean(np.flatnonzero(row)) for row in contact_evidence],
+            dtype=np.float64,
+        )
+        if np.ptp(row_centers) > config.LEADER_MARKER_MAX_CENTER_SHIFT * scale:
+            continue
+        if area > selected_area:
+            selected_component = component
+            selected_area = area
+    if selected_component is None:
+        return None
+
+    selected_evidence = marker_labels == selected_component
+    marker_ys, marker_xs = np.where(selected_evidence)
+    marker_center_x = float(np.mean(marker_xs)) + center_x0
+    if (
+        abs(marker_center_x - (width - 1) / 2.0)
+        > width * config.LEADER_MARKER_MAX_CENTER_ERROR_RATIO
+    ):
+        return None
+    contrasts = (
+        baseline - center_value
+    )[marker_ys, marker_xs]
+    maximum_contrast = np.max(contrasts)
+    strongest = contrasts >= maximum_contrast - config.LEADER_MARKER_MIN_CONTRAST
+    point_x = int(round(np.mean(marker_xs[strongest]))) + x + center_x0
+    point_y = int(round(np.mean(marker_ys[strongest]))) + y0
+    if scan_mask[point_y, point_x] == 0:
+        return None
+    return point_x, point_y
 
 
 def _leader_anchor_and_direction(
@@ -884,6 +1073,12 @@ def _trace_connected_leaders(
         )
         if endpoint is not None:
             endpoints[index] = endpoint
+    for index, box in enumerate(boxes):
+        if index in endpoints:
+            continue
+        endpoint = _top_marker_endpoint(bgr, box, scan_mask)
+        if endpoint is not None:
+            endpoints[index] = endpoint
     return endpoints
 
 
@@ -916,6 +1111,10 @@ def _connected_line_components(
                 scan_mask,
                 distance_to_scan,
                 blocked_mask=blocked_mask,
+                maximum_box_gap=config.LEADER_RELAXED_MAX_BOX_GAP,
+                inside_scan_maximum_box_gap=(
+                    config.LEADER_RELAXED_INSIDE_SCAN_MAX_BOX_GAP
+                ),
             )
         )
     return components

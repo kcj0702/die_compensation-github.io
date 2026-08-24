@@ -50,6 +50,37 @@ def _draw_gray_label(
 
 
 class ConnectedLeaderTest(unittest.TestCase):
+    def test_dense_red_labels_do_not_create_merged_false_candidate(self) -> None:
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (20, 60), (380, 230), (20, 180, 120), -1)
+        for x, text, point_x in ((100, "0.8", 120), (140, "0.9", 160)):
+            cv2.rectangle(image, (x, 180), (x + 38, 215), (0, 0, 255), -1)
+            cv2.rectangle(
+                image,
+                (x, 180),
+                (x + 38, 215),
+                (153, 153, 153),
+                2,
+                lineType=cv2.LINE_AA,
+            )
+            cv2.putText(
+                image,
+                text,
+                (x + 4, 204),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.line(image, (x + 19, 180), (point_x, 120), (255, 0, 0), 1)
+
+        candidates = sorted(detect_labels(image), key=lambda item: item.box[0])
+
+        self.assertEqual(len(candidates), 2)
+        self.assertTrue(all(candidate.traced for candidate in candidates))
+        self.assertTrue(all(candidate.box[2] < 50 for candidate in candidates))
+
     def test_top_clipped_white_label_uses_light_fill_fallback(self) -> None:
         image = _scan_image()
         cv2.rectangle(image, (40, -8), (110, 25), (246, 248, 247), -1)
@@ -286,6 +317,139 @@ class ConnectedLeaderTest(unittest.TestCase):
         self.assertGreater(scan_mask[y, x], 0)
         self.assertLessEqual(math.dist((x, y), expected_contact), 8.0)
 
+    def test_compact_short_leader_directly_on_scan_is_not_discarded(self) -> None:
+        image = np.full((300, 400, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (20, 60), (380, 240), (20, 180, 120), -1)
+        cv2.rectangle(image, (100, 140), (146, 176), (0, 0, 255), -1)
+        cv2.rectangle(
+            image,
+            (100, 140),
+            (146, 176),
+            (153, 153, 153),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "-0.5",
+            (104, 164),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.rectangle(image, (147, 157), (150, 159), (255, 0, 0), -1)
+
+        scan_mask = build_scan_mask(image)
+        candidates = detect_labels(image)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(candidates[0].traced)
+        self.assertIsNotNone(candidates[0].point_xy)
+        x, y = candidates[0].point_xy
+        self.assertGreater(scan_mask[y, x], 0)
+        self.assertLessEqual(math.dist((x, y), (150, 158)), 5.0)
+
+    def test_internal_hole_marker_on_blue_surface_recovers_white_label(self) -> None:
+        image = np.full((360, 600, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (80, 60), (540, 310), (255, 0, 0), -1)
+        cv2.rectangle(image, (180, 100), (440, 203), (255, 255, 255), -1)
+        cv2.rectangle(image, (270, 212), (340, 244), (246, 248, 247), -1)
+        cv2.rectangle(
+            image,
+            (270, 212),
+            (340, 244),
+            (198, 194, 196),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "-0.3",
+            (278, 235),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (25, 25, 25),
+            1,
+            cv2.LINE_AA,
+        )
+        expected_marker = (305, 208)
+        cv2.rectangle(image, (300, 205), (310, 211), (90, 90, 90), -1)
+
+        scan_mask = build_scan_mask(image)
+        candidates = detect_labels(image)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].label_color, "white")
+        self.assertTrue(candidates[0].traced)
+        self.assertIsNotNone(candidates[0].point_xy)
+        x, y = candidates[0].point_xy
+        self.assertGreater(scan_mask[y, x], 0)
+        self.assertLessEqual(math.dist((x, y), expected_marker), 4.0)
+
+    def test_white_label_on_blue_surface_without_marker_is_not_connected(self) -> None:
+        image = np.full((360, 600, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (80, 60), (540, 310), (255, 0, 0), -1)
+        cv2.rectangle(image, (180, 100), (440, 203), (255, 255, 255), -1)
+        cv2.rectangle(image, (270, 212), (340, 244), (246, 248, 247), -1)
+        cv2.rectangle(
+            image,
+            (270, 212),
+            (340, 244),
+            (198, 194, 196),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "-0.3",
+            (278, 235),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (25, 25, 25),
+            1,
+            cv2.LINE_AA,
+        )
+
+        candidates = detect_labels(image)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertFalse(candidates[0].traced)
+        self.assertIsNone(candidates[0].point_xy)
+
+    def test_diagonal_dark_scan_groove_is_not_a_point_marker(self) -> None:
+        image = np.full((360, 600, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (80, 60), (540, 310), (255, 0, 0), -1)
+        cv2.rectangle(image, (180, 100), (440, 203), (255, 255, 255), -1)
+        cv2.rectangle(image, (270, 212), (340, 244), (246, 248, 247), -1)
+        cv2.rectangle(
+            image,
+            (270, 212),
+            (340, 244),
+            (198, 194, 196),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            "-0.3",
+            (278, 235),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (25, 25, 25),
+            1,
+            cv2.LINE_AA,
+        )
+        # 중앙을 지나더라도 비스듬히 이어지는 표면 홈은 수직 점 마커가 아니다.
+        cv2.line(image, (293, 204), (317, 211), (90, 90, 90), 2)
+
+        candidates = detect_labels(image)
+
+        self.assertEqual(len(candidates), 1)
+        self.assertFalse(candidates[0].traced)
+        self.assertIsNone(candidates[0].point_xy)
+
     def test_export_marker_gaps_up_to_twelve_pixels_are_snapped(self) -> None:
         for endpoint_x in (173, 170, 167):
             with self.subTest(endpoint_x=endpoint_x):
@@ -377,6 +541,37 @@ class ConnectedLeaderTest(unittest.TestCase):
             x, y = candidate.point_xy
             self.assertGreater(scan_mask[y, x], 0)
             self.assertLessEqual(math.dist((x, y), expected), 10.0)
+
+    def test_crossing_thin_and_antialiased_leaders_keep_both_points(self) -> None:
+        image = np.full((400, 600, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (180, 100), (500, 200), (20, 180, 120), -1)
+        _draw_gray_label(image, (60, 320), (150, 352), "-1.2")
+        _draw_gray_label(image, (155, 320), (245, 352), "+0.8")
+        expected_points = [(360, 180), (220, 180)]
+        cv2.line(
+            image,
+            (200, 320),
+            expected_points[1],
+            (255, 0, 0),
+            2,
+            lineType=cv2.LINE_AA,
+        )
+        cv2.line(image, (105, 320), expected_points[0], (255, 0, 0), 1)
+
+        scan_mask = build_scan_mask(image)
+        candidates = sorted(detect_labels(image), key=lambda item: item.box[0])
+
+        self.assertEqual(len(candidates), 2)
+        for candidate, expected in zip(candidates, expected_points):
+            self.assertTrue(candidate.traced)
+            self.assertIsNotNone(candidate.point_xy)
+            x, y = candidate.point_xy
+            self.assertGreater(scan_mask[y, x], 0)
+            self.assertLessEqual(
+                math.dist((x, y), expected),
+                10.0,
+                msg=(candidate.box, candidate.point_xy, expected),
+            )
 
     def test_empty_dark_rectangle_on_scan_is_not_a_label(self) -> None:
         image = _scan_image()

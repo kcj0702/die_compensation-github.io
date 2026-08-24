@@ -131,29 +131,40 @@ def _read_qwen_values(
     reader: LabelValueReader,
     crops: list[Any],
 ) -> tuple[list[float | None], str | None]:
-    """Read crops without inferring a mapping from malformed batch output.
+    """Read every value from Qwen while preserving the crop-to-result mapping.
 
-    A complete batch result has an unambiguous positional mapping and can be
-    used directly. If the batch raises or returns the wrong number of values,
-    discard it and ask the same Qwen reader about each exact crop separately.
-    A failed singleton remains ``None`` so it cannot discard other valid reads.
+    The regular batched reader remains the fast path. Only labels that are
+    still unread after that complete result get the reader's bounded focused
+    retry. A malformed batch is discarded entirely and re-read crop by crop so
+    a short response can never shift values onto neighbouring measurement
+    points. No image-colour or substitute value is introduced here.
     """
+    batch_problem: str | None = None
+    focused_indices: list[int] = []
     try:
         batch_values = list(reader.read_values(crops))
         if len(batch_values) == len(crops):
-            return batch_values, None
-        batch_problem = (
-            "Qwen 일괄 판독 결과 수가 라벨 수와 일치하지 않았습니다 "
-            f"({len(batch_values)}/{len(crops)})."
-        )
+            values = batch_values
+            retry_indices = []
+            focused_indices = [
+                index for index, value in enumerate(values) if value is None
+            ]
+        else:
+            values = [None] * len(crops)
+            retry_indices = list(range(len(crops)))
+            batch_problem = (
+                "Qwen 일괄 판독 결과 수가 라벨 수와 일치하지 않았습니다 "
+                f"({len(batch_values)}/{len(crops)})."
+            )
     except Exception as exc:
+        values = [None] * len(crops)
+        retry_indices = list(range(len(crops)))
         batch_problem = f"Qwen 일괄 판독에 실패했습니다: {exc}"
 
-    values: list[float | None] = [None] * len(crops)
     singleton_failures = 0
-    for index, crop in enumerate(crops):
+    for index in retry_indices:
         try:
-            singleton_values = list(reader.read_values([crop]))
+            singleton_values = list(reader.read_values([crops[index]]))
         except Exception:
             singleton_failures += 1
             continue
@@ -162,9 +173,31 @@ def _read_qwen_values(
             continue
         values[index] = singleton_values[0]
 
-    warning = f"{batch_problem} 동일 Qwen으로 각 라벨을 개별 재판독했습니다."
+    focused_failures = 0
+    focused_reader = getattr(reader, "read_value_focused", None)
+    if callable(focused_reader):
+        for index in focused_indices:
+            try:
+                values[index] = focused_reader(crops[index])
+            except Exception:
+                focused_failures += 1
+
+    warning_parts: list[str] = []
+    if batch_problem:
+        warning_parts.append(batch_problem)
+    if retry_indices:
+        warning_parts.append(
+            f"동일 Qwen으로 매핑 불명확 라벨 {len(retry_indices)}개를 개별 재판독했습니다."
+        )
     if singleton_failures:
-        warning += f" 개별 판독 실패 {singleton_failures}개는 제외했습니다."
+        warning_parts.append(
+            f"개별 판독 실패 {singleton_failures}개는 결과에서 제외했습니다."
+        )
+    if focused_failures:
+        warning_parts.append(
+            f"집중 판독 오류 {focused_failures}개는 결과에서 제외했습니다."
+        )
+    warning = " ".join(warning_parts) or None
     return values, warning
 
 

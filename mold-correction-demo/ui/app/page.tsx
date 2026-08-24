@@ -23,7 +23,17 @@ type AnalysisResult = {
   zeroOverlay: string | null;
   zeroMask: string | null;
   points: PointResult[];
-  stats: { labelsRemoved: number; pointsDetected: number; zeroRegions: number; zeroRatio: number; zeroTolerance: number | null; qwenReads: number };
+  stats: {
+    labelsRemoved: number;
+    pointsDetected: number;
+    detectedCandidates?: number;
+    validCandidates?: number;
+    qwenReads: number;
+    qwenUnread?: number;
+    zeroRegions: number;
+    zeroRatio: number;
+    zeroTolerance: number | null;
+  };
   warnings: string[];
   warningsByEngine?: Partial<Record<Engine, string[]>>;
   errors: Partial<Record<Engine, string>>;
@@ -178,7 +188,14 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
 function engineSummary(engine: Engine, result: AnalysisResult) {
   if (result.errors[engine]) return { stat: '실패', detail: result.errors[engine] || '엔진 오류' };
   if (engine === 'label') return { stat: `${result.stats.labelsRemoved}개`, detail: '검출된 라벨 제거 및 주변 색상 복원 완료' };
-  if (engine === 'deviation') return { stat: `${result.stats.pointsDetected}개`, detail: `Qwen 실제 라벨 판독 ${result.stats.qwenReads}개` };
+  if (engine === 'deviation') {
+    const detected = result.stats.detectedCandidates ?? result.stats.pointsDetected;
+    const connected = result.stats.validCandidates ?? result.stats.pointsDetected;
+    return {
+      stat: `${result.stats.pointsDetected}개`,
+      detail: `라벨 후보 ${detected}개 · 스캔 연결 ${connected}개 · Qwen 실제 판독 ${result.stats.qwenReads}개`,
+    };
+  }
   return { stat: `${result.stats.zeroRegions}개`, detail: `부품 면적의 ${(result.stats.zeroRatio * 100).toFixed(1)}% · 실제 검출 결과` };
 }
 

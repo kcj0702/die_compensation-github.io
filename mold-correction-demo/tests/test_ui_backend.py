@@ -50,6 +50,24 @@ class _ScriptedReader:
         return response
 
 
+class _FocusedReader(_ScriptedReader):
+    def __init__(
+        self,
+        responses: list[list[float | None] | Exception],
+        focused_responses: list[float | None | Exception],
+    ):
+        super().__init__(responses)
+        self.focused_responses = list(focused_responses)
+        self.focused_calls: list[object] = []
+
+    def read_value_focused(self, crop):
+        self.focused_calls.append(crop)
+        response = self.focused_responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 class UiBackendModelDiscoveryTest(unittest.TestCase):
     def test_find_qwen_model_discovers_complete_workspace_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -160,6 +178,42 @@ class UiBackendStrictReadingTest(unittest.TestCase):
         )
         self.assertEqual(result["stats"]["qwenReads"], 1)
         self.assertNotIn("deviation", result["errors"])
+
+    def test_batch_none_is_not_retried_after_reader_internal_variants(self) -> None:
+        reader = _ScriptedReader([[1.25, None]])
+
+        result = self._analyze_with_reader(reader)
+
+        self.assertEqual([point["value"] for point in result["points"]], [1.25])
+        self.assertEqual(len(reader.calls), 1)
+        self.assertEqual(len(reader.calls[0]), 2)
+        self.assertEqual(result["stats"]["qwenReads"], 1)
+        self.assertEqual(result["stats"]["qwenUnread"], 1)
+
+    def test_batch_none_gets_bounded_focused_qwen_retry(self) -> None:
+        reader = _FocusedReader([[1.25, None]], [-0.5])
+
+        result = self._analyze_with_reader(reader)
+
+        self.assertEqual(
+            [point["value"] for point in result["points"]],
+            [1.25, -0.5],
+        )
+        self.assertEqual([len(call) for call in reader.calls], [2])
+        self.assertEqual(len(reader.focused_calls), 1)
+        self.assertIs(reader.focused_calls[0], reader.calls[0][1])
+        self.assertEqual(result["stats"]["qwenReads"], 2)
+        self.assertEqual(result["stats"]["qwenUnread"], 0)
+
+    def test_focused_retry_failure_does_not_change_other_qwen_value(self) -> None:
+        reader = _FocusedReader([[1.25, None]], [RuntimeError("retry failed")])
+
+        result = self._analyze_with_reader(reader)
+
+        self.assertEqual([point["value"] for point in result["points"]], [1.25])
+        self.assertEqual(result["stats"]["qwenReads"], 1)
+        self.assertEqual(result["stats"]["qwenUnread"], 1)
+        self.assertTrue(result["warningsByEngine"]["deviation"])
 
     def test_individual_failure_does_not_discard_another_crop(self) -> None:
         reader = _ScriptedReader(
