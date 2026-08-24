@@ -5,13 +5,25 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import config
-from point_extractor import ValueReader, extract_points, save_csv, save_debug_image
+if __package__:  # `python -m deviation_extraction.run`과 직접 실행을 모두 지원한다.
+    from . import config
+    from .point_extractor import (
+        ValueReader,
+        extract_points,
+        save_csv,
+        save_debug_image,
+    )
+else:  # pragma: no cover - 직접 스크립트 실행 경로
+    import config
+    from point_extractor import ValueReader, extract_points, save_csv, save_debug_image
 
 
 def _build_reader(model_id: str, device: str | None, offline: bool) -> ValueReader:
     """무거운 VLM 의존성은 실제 라벨이 있을 때만 불러온다."""
-    from vlm_reader import LabelValueReader
+    if __package__:
+        from .vlm_reader import LabelValueReader
+    else:  # pragma: no cover - 직접 스크립트 실행 경로
+        from vlm_reader import LabelValueReader
 
     return LabelValueReader(
         model_id=model_id,
@@ -36,6 +48,12 @@ def main() -> None:
     parser.add_argument("--model", type=str, default=config.VLM_MODEL_ID, help="VLM 모델 ID")
     parser.add_argument("--device", type=str, default=None, help="추론 장치 예: cuda, cuda:0, cpu")
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=config.VLM_BATCH_SIZE,
+        help="한 번에 판독할 라벨 crop 수",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="로컬 캐시만 사용하고 모델 다운로드 차단",
@@ -56,12 +74,15 @@ def main() -> None:
 
     if not args.image.is_file():
         parser.error(f"편차 이미지를 찾을 수 없음: {args.image}")
+    if args.batch_size < 1:
+        parser.error("--batch-size는 1 이상이어야 합니다.")
 
     points = extract_points(
         image_path=args.image,
         zero_line_mask_path=args.zero_line_mask,
         reader_factory=lambda: _build_reader(args.model, args.device, args.offline),
         cross_check=args.cross_check,
+        batch_size=args.batch_size,
     )
 
     save_csv(points, out_path=args.out)

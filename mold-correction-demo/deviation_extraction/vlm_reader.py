@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import re
 from threading import Lock
+from unicodedata import normalize
 
 import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 from transformers.utils.versions import require_version
 
-import config
+if __package__:  # 패키지 import와 직접 스크립트 실행을 모두 지원한다.
+    from . import config
+else:  # pragma: no cover - 직접 스크립트 실행 경로
+    import config
 
 _PROMPT = (
     "이 이미지는 도면 위에 표시된 숫자 라벨이다. "
@@ -20,7 +24,7 @@ _PROMPT = (
 
 
 class LabelValueReader:
-    """VLM을 한 번 로드하고 여러 라벨 crop의 숫자를 순차 판독한다."""
+    """VLM을 한 번 로드하고 여러 라벨 crop의 숫자를 배치 판독한다."""
 
     def __init__(
         self,
@@ -41,9 +45,17 @@ class LabelValueReader:
             # Qwen2.5-VL-3B in FP16 leaves almost no activation headroom on an
             # 8 GB RTX 4070. LLM.int8 keeps the model near 4 GB and preserves
             # the outlier path in FP16, which is a good fit for label OCR.
-            use_8bit = self.device.startswith("cuda") and (
-                torch.cuda.get_device_properties(0).total_memory < 10 * 1024**3
-            )
+            if self.device.startswith("cuda"):
+                selected_device = torch.device(self.device)
+                device_index = selected_device.index
+                if device_index is None:
+                    device_index = torch.cuda.current_device()
+                use_8bit = (
+                    torch.cuda.get_device_properties(device_index).total_memory
+                    < 10 * 1024**3
+                )
+            else:
+                use_8bit = False
         self.use_8bit = use_8bit
         self._inference_lock = Lock()
 
@@ -54,12 +66,12 @@ class LabelValueReader:
         )
         load_kwargs = {
             "local_files_only": local_files_only,
-            "dtype": dtype,
+            "torch_dtype": dtype,
         }
         if self.use_8bit:
             load_kwargs.update(
                 quantization_config=BitsAndBytesConfig(load_in_8bit=True),
-                device_map="auto",
+                device_map={"": self.device},
             )
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id, **load_kwargs
@@ -79,11 +91,34 @@ class LabelValueReader:
         """여러 라벨을 GPU 배치로 판독해 모델 호출 횟수를 줄인다."""
         if not crops:
             return []
+        if batch_size < 1:
+            raise ValueError("batch_size는 1 이상이어야 합니다.")
         results: list[float | None] = []
         for start in range(0, len(crops), batch_size):
-            batch = crops[start:start + batch_size]
+            batch = [
+                self._prepare_crop(crop)
+                for crop in crops[start:start + batch_size]
+            ]
             results.extend(self._read_batch(batch))
         return results
+
+    @staticmethod
+    def _prepare_crop(crop: Image.Image) -> Image.Image:
+        """작은 라벨은 종횡비를 유지해 확대하고 RGB 모드로 정규화한다."""
+        prepared = crop.convert("RGB")
+        if prepared.height <= 0 or prepared.width <= 0:
+            raise ValueError("비어 있는 라벨 crop은 판독할 수 없습니다.")
+        scale = min(
+            config.VLM_MAX_CROP_SCALE,
+            max(1.0, config.VLM_MIN_CROP_HEIGHT / float(prepared.height)),
+        )
+        if scale == 1.0:
+            return prepared
+        size = (
+            max(1, int(round(prepared.width * scale))),
+            max(1, int(round(prepared.height * scale))),
+        )
+        return prepared.resize(size, Image.Resampling.LANCZOS)
 
     def _read_batch(self, crops: list[Image.Image]) -> list[float | None]:
         """동일한 프롬프트를 적용한 라벨 crop 한 묶음을 생성한다."""
@@ -129,5 +164,16 @@ class LabelValueReader:
     @staticmethod
     def _parse_number(text: str) -> float | None:
         """파싱할 수 있는 숫자가 없으면 None을 반환한다."""
-        match = re.search(r"[-+]?\d+(?:\.\d+)?", text.replace(" ", ""))
-        return float(match.group()) if match else None
+        normalized_text = normalize("NFKC", text).translate(
+            str.maketrans({"−": "-", "–": "-", "—": "-", "，": ","})
+        )
+        compact_text = "".join(normalized_text.split())
+        match = re.search(r"[-+]?(?:\d+(?:[.,]\d+)?|[.,]\d+)", compact_text)
+        if not match:
+            return None
+        number = match.group().replace(",", ".")
+        if number.startswith("."):
+            number = f"0{number}"
+        if number.startswith(("+.", "-.")):
+            number = f"{number[0]}0{number[1:]}"
+        return float(number)
