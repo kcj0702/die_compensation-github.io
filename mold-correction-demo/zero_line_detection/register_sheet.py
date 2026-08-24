@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from zero_line_detection.sheet_reference import (
-    extract_sheet_zero_line, save_to_library,
+    extract_sheet_zero_areas, extract_sheet_zero_line, save_to_library,
 )
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
@@ -57,13 +57,24 @@ def main() -> int:
     output = detect_zero_line(cv2.cvtColor(scan, cv2.COLOR_BGR2RGB), config)
 
     part_no = args.part_no or part_no_from_name(args.scan.name)
-    reference = extract_sheet_zero_line(
-        args.sheet, output.part_mask, part_no, values=output.values
-    )
-    save_to_library(args.library, reference)
+    # 시트마다 제로 표기가 다르다 — 이어진 빨간 선이면 선으로, 살몬색
+    # 구획이면 여러 존(면)으로 읽는다. 선을 먼저 보고 없으면 면으로 간다.
+    try:
+        reference = extract_sheet_zero_line(
+            args.sheet, output.part_mask, part_no, values=output.values
+        )
+        kind = "line"
+        detail = f"꼭짓점 {len(reference.points)}개"
+    except ValueError:
+        reference = extract_sheet_zero_areas(
+            args.sheet, output.part_mask, part_no, values=output.values
+        )
+        kind = "areas"
+        detail = f"존 {len(reference.contours)}개"
+    save_to_library(args.library, reference, kind=kind)
 
-    print(f"[등록] 품번 {part_no}")
-    print(f"  꼭짓점 {len(reference.points)}개, 좌우반전 {reference.mirrored}")
+    print(f"[등록] 품번 {part_no} ({kind})")
+    print(f"  {detail}, 좌우반전 {reference.mirrored}")
     print(f"  시트 {args.sheet.name}")
     print(f"  저장 {args.library}")
     return 0

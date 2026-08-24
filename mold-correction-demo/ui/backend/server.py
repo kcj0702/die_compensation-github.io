@@ -492,8 +492,12 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     try:
         entry = load_library(ZERO_LINE_LIBRARY).get(part_no_from_name(filename))
         if entry:
+            # 부품에 따라 시트가 제로를 선으로 그리기도, 여러 존(면)으로
+            # 칠하기도 한다 — 등록된 형태 그대로 내보낸다.
             reference_line = {
-                "points": entry["points"],
+                "kind": entry.get("kind", "line"),
+                "points": entry.get("points") or [],
+                "contours": entry.get("contours") or [],
                 "partNo": entry["part_no"],
                 "sourceSheet": Path(entry["source_sheet"]).name,
                 "mirrored": entry.get("mirrored", False),

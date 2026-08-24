@@ -287,6 +287,123 @@ def extract_sheet_zero_line(
     )
 
 
+
+@dataclass
+class SheetZeroAreas:
+    """보정시트에 '면'으로 표기된 제로 영역들을 스캔 좌표로 옮긴 것.
+
+    부품에 따라 제로를 선이 아니라 영역으로 표기한다. JD_67XX6 시트는
+    우상단에 범례로 `"0" 라인 = 빨간 점선 + 살몬 채움` 이라고 명시해뒀다.
+    """
+
+    part_no: str
+    contours: list            # [[[x, y], ...], ...] 스캔 좌표 폴리곤들
+    source_sheet: str
+    sheet_bbox: list
+    scan_bbox: list
+    mirrored: bool = False
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _salmon_patch_mask(sheet_bgr: np.ndarray) -> np.ndarray:
+    """시트에서 '0 라인' 으로 칠한 살몬색 영역만 남긴다.
+
+    JD_67XX6 범례 박스 실측 색이 RGB(255,127,127). 부품(파란 렌더) 위에
+    반투명으로 칠해져 섞이므로 정확한 색 대신 "빨강이 초록·파랑보다 뚜렷이
+    크고, 초록과 파랑은 서로 비슷한" 조건으로 잡는다. 순수 빨강(주석선)은
+    초록·파랑이 매우 낮아 따로 구분된다.
+    """
+    b, g, r = (sheet_bgr[..., i].astype(int) for i in range(3))
+    return (r > 140) & (r > g + 35) & (r > b + 35) & (np.abs(g - b) < 45)
+
+
+def extract_sheet_zero_areas(
+    sheet_path: str | Path,
+    scan_part_mask: np.ndarray,
+    part_no: str,
+    values: np.ndarray | None = None,
+    min_area: int = 400,
+    simplify_eps: float = 2.5,
+) -> SheetZeroAreas:
+    """시트에 면으로 표기된 제로 영역을 읽어 스캔 좌표계로 옮긴다.
+
+    선 방식(extract_sheet_zero_line)과 같은 패널 선택·좌우반전 판별을
+    쓰되, 채점 기준은 "패치들이 부품 안에 들어가는가 + 그 자리 |편차| 가
+    낮은가" 로 한다(제로 영역이므로 편차가 0 에 가까워야 맞다).
+    """
+    sheet = _imread(sheet_path)
+    height, width = sheet.shape[:2]
+    patches = _salmon_patch_mask(sheet)
+    patches[: int(height * 0.20), :] = False        # 표제부
+    # 범례 박스는 부품 바깥(오른쪽 위)에 따로 있다 — 부품 그림 영역만 본다
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        patches.astype(np.uint8), connectivity=8
+    )
+    keep = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= min_area]
+    if not keep:
+        raise ValueError("시트에서 살몬색 '0' 영역을 찾지 못했습니다.")
+
+    ys, xs = np.nonzero(scan_part_mask)
+    kx0, ky0, kx1, ky1 = int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+    sh, sw = scan_part_mask.shape
+    smoothed = cv2.GaussianBlur(values, (0, 0), 15) if values is not None else None
+
+    def project(points: np.ndarray, panel: tuple, mirror: bool) -> np.ndarray:
+        sx0, sy0, sx1, sy1 = panel
+        nx = (points[:, 0] - sx0) / max(sx1 - sx0, 1)
+        if mirror:
+            nx = 1.0 - nx
+        ny = (points[:, 1] - sy0) / max(sy1 - sy0, 1)
+        px = np.clip((nx * (kx1 - kx0) + kx0).astype(int), 0, sw - 1)
+        py = np.clip((ny * (ky1 - ky0) + ky0).astype(int), 0, sh - 1)
+        return np.stack([px, py], axis=1)
+
+    centres = np.array([
+        [stats[i, cv2.CC_STAT_LEFT] + stats[i, cv2.CC_STAT_WIDTH] / 2,
+         stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT] / 2]
+        for i in keep
+    ])
+
+    best = None
+    for panel in _panel_candidates(sheet):
+        for mirror in (False, True):
+            mapped = project(centres, panel, mirror)
+            inside = scan_part_mask[mapped[:, 1], mapped[:, 0]]
+            outside_ratio = 1.0 - float(inside.mean())
+            deviation = (
+                float(np.abs(smoothed[mapped[inside][:, 1], mapped[inside][:, 0]]).mean())
+                if smoothed is not None and inside.any() else 0.0
+            )
+            score = outside_ratio * 3.0 + deviation
+            if best is None or score < best[0]:
+                best = (score, panel, mirror)
+
+    _score, panel, mirrored = best
+    contours: list = []
+    for index in keep:
+        blob = (labels == index).astype(np.uint8)
+        found, _ = cv2.findContours(blob, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not found:
+            continue
+        outline = max(found, key=cv2.contourArea).reshape(-1, 2)
+        mapped = project(outline.astype(float), panel, mirrored)
+        simplified = cv2.approxPolyDP(
+            mapped.astype(np.int32).reshape(-1, 1, 2), simplify_eps, True
+        ).reshape(-1, 2)
+        if len(simplified) >= 3:
+            contours.append(simplified.tolist())
+
+    return SheetZeroAreas(
+        part_no=part_no,
+        contours=contours,
+        source_sheet=str(sheet_path),
+        sheet_bbox=[int(v) for v in panel],
+        scan_bbox=[kx0, ky0, kx1, ky1],
+        mirrored=bool(mirrored),
+    )
+
 def check_pairing(sheet_values: list, scan_values: list) -> dict:
     """스캔과 시트가 같은 회차인지 부호 분포로 가늠한다.
 
@@ -319,16 +436,20 @@ def load_library(path: str | Path) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def save_to_library(path: str | Path, entry: SheetZeroLine) -> dict:
+def save_to_library(path: str | Path, entry, kind: str = "line") -> dict:
+    """품번별 보관함에 저장한다. kind 는 "line"(선) 또는 "areas"(여러 존)."""
     p = Path(path)
     library = load_library(p)
-    library[entry.part_no] = entry.to_dict()
+    record = entry.to_dict()
+    record["kind"] = kind
+    library[entry.part_no] = record
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(library, ensure_ascii=False, indent=2), encoding="utf-8")
     return library
 
 
 __all__ = [
-    "SheetZeroLine", "extract_sheet_zero_line", "check_pairing",
+    "SheetZeroLine", "SheetZeroAreas",
+    "extract_sheet_zero_line", "extract_sheet_zero_areas", "check_pairing",
     "load_library", "save_to_library",
 ]
