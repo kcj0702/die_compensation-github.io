@@ -35,6 +35,10 @@ from vlm_reader import LabelValueReader  # noqa: E402
 from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
+from zero_line_detection.zero_criteria import (  # noqa: E402
+    candidates_to_mask, find_zero_candidates,
+)
+from zero_line_detection.polygonize import draw_polygons, polygonize  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -141,6 +145,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     zero_output = None
     zero_overlay: np.ndarray | None = None
+    zero_candidates: list = []
+    zero_datum_mask: np.ndarray | None = None
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
@@ -148,12 +154,29 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             clean_image if clean_image is not None else image,
             cv2.COLOR_BGR2RGB,
         )
-        zero_overlay = make_overlay(
-            overlay_base,
-            zero_output.mask,
-            zero_output.centerline,
-            zero_crossing=zero_output.zero_crossing,
+
+        # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
+        # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
+        zero_candidates, flat, _ = find_zero_candidates(
+            zero_output.values,
+            zero_output.part_mask,
+            float(zero_output.result.tolerance),
         )
+        zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
+
+        if zero_datum_mask is not None and zero_datum_mask.any():
+            # 다각형으로 정리해서 그린다. 픽셀 마스크 그대로 그리면
+            # 경계가 너덜너덜해 어디가 기준인지 눈에 안 들어온다.
+            zero_overlay = draw_polygons(
+                overlay_base, polygonize(zero_datum_mask, preset="balanced")
+            )
+        else:
+            zero_overlay = make_overlay(
+                overlay_base,
+                zero_output.mask,
+                zero_output.centerline,
+                zero_crossing=zero_output.zero_crossing,
+            )
     except Exception as exc:
         errors["zero"] = str(exc)
 
@@ -213,7 +236,12 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "source": {"name": filename, "width": width, "height": height},
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
-        "zeroMask": _png_data_url(zero_output.mask) if zero_output is not None else None,
+        "zeroMask": (
+            _png_data_url(zero_datum_mask)
+            if zero_datum_mask is not None and zero_datum_mask.any()
+            else (_png_data_url(zero_output.mask) if zero_output is not None else None)
+        ),
+        "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
         "points": points,
         "stats": {
             "labelsRemoved": label_count,

@@ -1,79 +1,114 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 pushd "%~dp0"
 
-set "AJIN_NODE_DIR=C:\Users\KDT013\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin"
-set "AJIN_PNPM=C:\Users\KDT013\.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd"
+REM ── Node.js 찾기 ──────────────────────────────────────────────
+REM 원래는 특정 PC 경로가 박혀 있었다. PATH 를 먼저 보고,
+REM 없으면 표준 설치 위치를 뒤진다.
+set "AJIN_NODE="
+where node >nul 2>nul && set "AJIN_NODE=node"
+if not defined AJIN_NODE (
+  if exist "%ProgramFiles%\nodejs\node.exe" (
+    set "PATH=%ProgramFiles%\nodejs;%PATH%"
+    set "AJIN_NODE=node"
+  )
+)
+if not defined AJIN_NODE (
+  if exist "%ProgramFiles(x86)%\nodejs\node.exe" (
+    set "PATH=%ProgramFiles(x86)%\nodejs;%PATH%"
+    set "AJIN_NODE=node"
+  )
+)
+if not defined AJIN_NODE (
+  echo [ERROR] Node.js 를 찾지 못했습니다. Node.js 22 이상을 설치하세요.
+  echo         https://nodejs.org
+  pause
+  exit /b 1
+)
+
+REM ── pnpm 찾기 ─────────────────────────────────────────────────
+set "AJIN_PNPM="
+where pnpm >nul 2>nul && set "AJIN_PNPM=pnpm"
+if not defined AJIN_PNPM (
+  if exist "%APPDATA%\npm\pnpm.cmd" (
+    set "PATH=%APPDATA%\npm;%PATH%"
+    set "AJIN_PNPM=pnpm"
+  )
+)
+if not defined AJIN_PNPM (
+  echo pnpm 이 없어 설치합니다...
+  call npm install -g pnpm
+  if errorlevel 1 (
+    echo [ERROR] pnpm 설치에 실패했습니다.
+    pause
+    exit /b 1
+  )
+  set "PATH=%APPDATA%\npm;%PATH%"
+  set "AJIN_PNPM=pnpm"
+)
+
+REM ── Python 가상환경 찾기 ──────────────────────────────────────
 set "AJIN_PYTHON=%~dp0..\..\.venv\Scripts\python.exe"
-set "PATH=%AJIN_NODE_DIR%;%PATH%"
+if not exist "%AJIN_PYTHON%" set "AJIN_PYTHON=%~dp0..\.venv\Scripts\python.exe"
+if not exist "%AJIN_PYTHON%" (
+  echo [ERROR] Python 가상환경을 찾지 못했습니다.
+  echo         찾은 위치: %~dp0..\..\.venv\Scripts\python.exe
+  echo.
+  echo   저장소 루트에서 아래를 실행해 만드세요:
+  echo     python -m venv .venv
+  echo     .venv\Scripts\python.exe -m pip install -r mold-correction-demo\deviation_extraction\requirements.txt
+  echo     .venv\Scripts\python.exe -m pip install starlette uvicorn
+  pause
+  exit /b 1
+)
+
+REM 보안 방침상 외부 모델 다운로드를 막는다 (8/12 멘토링 확인 사항)
 set "HF_HUB_OFFLINE=1"
 set "TRANSFORMERS_OFFLINE=1"
 set "TOKENIZERS_PARALLELISM=false"
 
-where node >nul 2>nul
-if errorlevel 1 (
-  echo [ERROR] Node.js 22 or later is required.
-  echo Install Node.js and run this file again.
-  pause
-  exit /b 1
-)
-
-if not exist "%AJIN_PNPM%" (
-  where pnpm >nul 2>nul
-  if not errorlevel 1 set "AJIN_PNPM=pnpm"
-)
-
-if not exist "%AJIN_PNPM%" if not "%AJIN_PNPM%"=="pnpm" (
-  echo [ERROR] pnpm was not found.
-  echo Run corepack enable in CMD and try again.
-  pause
-  exit /b 1
-)
-
+REM ── UI 패키지 설치 ────────────────────────────────────────────
 if not exist "node_modules\.bin\vinext.cmd" (
-  echo Installing UI packages...
+  echo UI 패키지를 설치합니다...
   call "%AJIN_PNPM%" install
   if errorlevel 1 (
-    echo [ERROR] Package installation failed.
+    echo [ERROR] 패키지 설치에 실패했습니다.
     pause
     exit /b 1
   )
 )
 
-if not exist "%AJIN_PYTHON%" (
-  echo [ERROR] Python engine environment was not found.
-  echo Expected: %AJIN_PYTHON%
-  pause
-  exit /b 1
-)
-
-powershell -NoProfile -Command "$client = New-Object Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1', 8000); exit 0 } catch { exit 1 } finally { $client.Dispose() }"
+REM ── 엔진 서버 (8000) ──────────────────────────────────────────
+powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient; try{$c.Connect('127.0.0.1',8000); exit 0}catch{exit 1}finally{$c.Dispose()}"
 if not errorlevel 1 (
-  echo Local vision engines are already running.
+  echo 엔진 서버가 이미 실행 중입니다.
 ) else (
-  echo Starting local vision engines...
+  echo 엔진 서버를 시작합니다...
   start "AJIN Vision Engines" /B "%AJIN_PYTHON%" "%~dp0backend\server.py"
-  powershell -NoProfile -Command "$deadline = (Get-Date).AddSeconds(20); do { $client = New-Object Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1', 8000); $client.Dispose(); exit 0 } catch { $client.Dispose(); Start-Sleep -Milliseconds 500 } } while ((Get-Date) -lt $deadline); exit 1"
+  powershell -NoProfile -Command "$d=(Get-Date).AddSeconds(30); do{$c=New-Object Net.Sockets.TcpClient; try{$c.Connect('127.0.0.1',8000); $c.Dispose(); exit 0}catch{$c.Dispose(); Start-Sleep -Milliseconds 500}}while((Get-Date) -lt $d); exit 1"
   if errorlevel 1 (
-    echo [ERROR] Local vision engines failed to start.
+    echo [ERROR] 엔진 서버가 시작되지 않았습니다.
+    echo         아래를 직접 실행해 오류를 확인하세요:
+    echo         "%AJIN_PYTHON%" "%~dp0backend\server.py"
     pause
     exit /b 1
   )
 )
 
-powershell -NoProfile -Command "$client = New-Object Net.Sockets.TcpClient; try { $client.Connect('127.0.0.1', 3000); exit 0 } catch { exit 1 } finally { $client.Dispose() }"
+REM ── 화면 (3000) ───────────────────────────────────────────────
+powershell -NoProfile -Command "$c=New-Object Net.Sockets.TcpClient; try{$c.Connect('127.0.0.1',3000); exit 0}catch{exit 1}finally{$c.Dispose()}"
 if not errorlevel 1 (
   echo.
-  echo AJIN Die Insight is already running.
-  echo Open http://127.0.0.1:3000 in your browser.
+  echo AJIN Die Insight 가 이미 실행 중입니다.
+  echo 브라우저에서 http://127.0.0.1:3000 을 여세요.
   popd
   exit /b 0
 )
 
 echo.
-echo Starting AJIN Die Insight...
-echo Open http://127.0.0.1:3000 in your browser.
-echo Press Ctrl+C to stop the server.
+echo AJIN Die Insight 를 시작합니다...
+echo 브라우저에서 http://127.0.0.1:3000 을 여세요.
+echo 종료하려면 Ctrl+C 를 누르세요.
 echo.
 
 call "node_modules\.bin\vinext.cmd" dev

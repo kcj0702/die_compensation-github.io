@@ -1,0 +1,12 @@
+# AJIN Die Insight 백엔드(로컬 비전 엔진 서버) 의존성
+#
+# 설치 위치는 저장소 루트의 .venv 다 (run-ui.cmd 가 그 경로를 찾는다).
+#   python -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r mold-correction-demo/ui/backend/requirements.txt
+#
+# deviation_extraction, label_removal, zero_line_detection 각 모듈의
+# requirements.txt 도 함께 설치해야 한다 (torch, opencv 등).
+
+starlette>=0.38
+uvicorn>=0.30
+python-multipart>=0.0.9    # /api/analyze 의 파일 업로드(form) 파싱에 필요
