@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import os
 import sys
 import threading
@@ -24,7 +23,6 @@ from starlette.concurrency import run_in_threadpool
 
 UI_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = UI_DIR.parent
-WORKSPACE_DIR = PROJECT_DIR.parent
 DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
 
 # deviation_extraction currently uses local-style imports (import config), so
@@ -44,6 +42,9 @@ from zero_line_detection.polygonize import draw_polygons, polygonize  # noqa: E4
 from zero_line_detection.zero_polyline import (  # noqa: E402
     draw_zero_polylines, extract_zero_polylines,
 )
+from zero_line_detection.zero_boundary import (  # noqa: E402
+    draw_zero_boundary, find_boundary_anchors, grow_patches,
+)
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -59,44 +60,25 @@ QWEN_CACHE_DIR = (
     / "models--Qwen--Qwen2.5-VL-3B-Instruct"
     / "snapshots"
 )
-WORKSPACE_QWEN_DIR = WORKSPACE_DIR / "models" / "Qwen2.5-VL-3B-Instruct"
-QWEN_REQUIRED_FILES = (
-    "config.json",
-    "model.safetensors.index.json",
-    "tokenizer.json",
-)
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
-
-
-def _is_complete_qwen_model(candidate: Path) -> bool:
-    """Return True only when the local model and every indexed shard exist."""
-    try:
-        if not candidate.is_dir() or any(
-            not (candidate / filename).is_file() for filename in QWEN_REQUIRED_FILES
-        ):
-            return False
-        index = json.loads(
-            (candidate / "model.safetensors.index.json").read_text(encoding="utf-8")
-        )
-        shards = set(index.get("weight_map", {}).values())
-        return bool(shards) and all((candidate / shard).is_file() for shard in shards)
-    except (OSError, TypeError, ValueError):
-        return False
 
 
 def _find_qwen_model() -> Path | None:
     configured = os.environ.get("AJIN_QWEN_MODEL_PATH")
     candidates = [Path(configured)] if configured else []
-    candidates.append(WORKSPACE_QWEN_DIR)
     if QWEN_CACHE_DIR.is_dir():
         candidates.extend(
             sorted(QWEN_CACHE_DIR.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
         )
     for candidate in candidates:
-        candidate = candidate.expanduser()
-        if _is_complete_qwen_model(candidate):
-            return candidate.resolve()
+        if (
+            candidate.is_dir()
+            and (candidate / "config.json").is_file()
+            and (candidate / "model.safetensors.index.json").is_file()
+            and (candidate / "tokenizer.json").is_file()
+        ):
+            return candidate
     return None
 
 
@@ -106,25 +88,14 @@ def _get_qwen_reader() -> LabelValueReader:
         return _reader
     with _reader_lock:
         if _reader is None:
-            import torch
-
             model_path = _find_qwen_model()
             if model_path is None:
                 raise FileNotFoundError("Qwen2.5-VL-3B 로컬 모델을 찾지 못했습니다.")
-            configured_device = os.environ.get("AJIN_QWEN_DEVICE", "auto").strip().lower()
-            if configured_device in {"", "auto"}:
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "CUDA용 PyTorch를 사용할 수 없어 Qwen 판독을 건너뜁니다."
-                    )
-                device = "cuda"
-            else:
-                device = configured_device
             _reader = LabelValueReader(
                 model_id=str(model_path),
-                device=device,
+                device="cuda",
                 local_files_only=True,
-                use_8bit=device.startswith("cuda"),
+                use_8bit=True,
             )
     return _reader
 
@@ -183,6 +154,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_candidates: list = []
     zero_datum_mask: np.ndarray | None = None
     zero_lines: list = []
+    zero_anchors: list = []
+    zero_patches: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
@@ -200,12 +173,24 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         )
         zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
 
-        # 보정시트의 제로라인은 면이 아니라 선이다. 편차 부호가 바뀌는
-        # 경계를 순서 있는 폴리라인으로 뽑아 시트와 같은 형태로 그린다.
+        # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
+        # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
+        # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
+        # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
+        # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
+        zero_anchors = find_boundary_anchors(
+            zero_output.values, zero_output.part_mask
+        )
+        zero_patches = grow_patches(
+            zero_output.values, zero_output.part_mask, zero_anchors,
+            tolerance=float(zero_output.result.tolerance),
+        )
         zero_lines = extract_zero_polylines(
             zero_output.values, zero_output.part_mask
         )
-        if zero_lines:
+        if zero_patches:
+            zero_overlay = draw_zero_boundary(overlay_base, zero_anchors, zero_patches)
+        elif zero_lines:
             zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
         elif zero_datum_mask is not None and zero_datum_mask.any():
             zero_overlay = draw_polygons(
@@ -224,17 +209,11 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     points: list[dict[str, Any]] = []
     qwen_reads = 0
     fallback_reads = 0
-    deviation_warnings: list[str] = []
     try:
         candidates = detect_labels(image)
         values = zero_output.values if zero_output is not None else None
-        valid_candidates = [
-            candidate
-            for candidate in candidates
-            if candidate.point_xy is not None
-            and 0 <= candidate.point_xy[0] < width
-            and 0 <= candidate.point_xy[1] < height
-        ]
+        valid_candidates = [candidate for candidate in candidates if candidate.point_xy is not None]
+        reader = _get_qwen_reader() if valid_candidates else None
         crops = []
         for candidate in valid_candidates:
             box_x, box_y, box_w, box_h = candidate.box
@@ -246,26 +225,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             from PIL import Image as PILImage
 
             crops.append(PILImage.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-
-        qwen_values: list[float | None] = [None] * len(crops)
-        qwen_failure: str | None = None
-        if crops:
-            try:
-                reader = _get_qwen_reader()
-                read_values = list(reader.read_values(crops))
-                qwen_values[: min(len(read_values), len(crops))] = read_values[: len(crops)]
-                if len(read_values) != len(crops):
-                    qwen_failure = (
-                        f"Qwen 판독 결과 수가 후보 수와 다릅니다 "
-                        f"({len(read_values)}/{len(crops)})."
-                    )
-            except Exception as exc:
-                qwen_failure = str(exc)
-
-        if qwen_failure:
-            deviation_warnings.append(
-                f"{qwen_failure} 판독하지 못한 포인트는 컬러바 값으로 대체했습니다."
-            )
+        qwen_values = reader.read_values(crops) if reader is not None else [None] * len(crops)
 
         for index, (candidate, qwen_value) in enumerate(
             zip(valid_candidates, qwen_values), start=1
@@ -273,11 +233,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             x, y = candidate.point_xy
             if qwen_value is None:
                 value = _point_value(values, image, x, y)
-                confidence = (
-                    "qwen_unavailable|colorbar_fallback"
-                    if qwen_failure
-                    else "qwen_not_read|colorbar_fallback"
-                )
+                confidence = "qwen_not_read|colorbar_fallback"
                 fallback_reads += 1
             else:
                 value = round(float(qwen_value), 3)
@@ -300,17 +256,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
     zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
-    zero_warnings = list(zero_output.warnings) if zero_output is not None else []
-    warnings = zero_warnings + deviation_warnings
-
-    if qwen_reads and fallback_reads:
-        value_mode = "Qwen2.5-VL-3B + 컬러바 대체 판독"
-    elif qwen_reads:
-        value_mode = "Qwen2.5-VL-3B 로컬 판독"
-    elif fallback_reads:
-        value_mode = "컬러바 기반 대체 판독"
-    else:
-        value_mode = "판독 결과 없음"
+    warnings = zero_output.warnings if zero_output is not None else []
 
     return {
         "source": {"name": filename, "width": width, "height": height},
@@ -323,6 +269,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
         "zeroLines": [l.to_dict() for l in zero_lines],
+        "zeroAnchors": [a.to_dict() for a in zero_anchors],
+        "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "points": points,
         "stats": {
             "labelsRemoved": label_count,
@@ -338,12 +286,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             "fallbackReads": fallback_reads,
         },
         "warnings": warnings,
-        "warningsByEngine": {
-            "deviation": deviation_warnings,
-            "zero": zero_warnings,
-        },
         "errors": errors,
-        "valueMode": value_mode,
+        "valueMode": "Qwen2.5-VL-3B GPU 8-bit 판독",
     }
 
 
