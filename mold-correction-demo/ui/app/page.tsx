@@ -17,11 +17,15 @@ type View = 'workspace' | 'results' | 'service';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string };
+type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number };
+type ValleyLine = { id: string; anchorStartId: number; anchorEndId: number; points: [number, number][]; length_px: number; mean_abs_deviation: number };
 type AnalysisResult = {
+  analysisId: string | null;
   source: { name: string; width: number; height: number };
   cleanImage: string | null;
   zeroOverlay: string | null;
   zeroMask: string | null;
+  zeroAnchors: ZeroAnchor[];
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -97,7 +101,7 @@ function Heatmap({ imageUrl, width, height, children, lightBackground = false }:
     className={`heatmap heatmap--actual ${lightBackground ? 'heatmap--light' : ''} ${children ? 'heatmap--annotated' : ''} ${scale > 1 ? 'heatmap--zoomed' : ''} ${dragging ? 'heatmap--dragging' : ''}`}
     onDoubleClick={resetView}
     onPointerDown={(event) => {
-      if (scale <= 1 || (event.target as Element).closest('.measure-point, .zoom-controls')) return;
+      if (scale <= 1 || (event.target as Element).closest('.measure-point, .anchor-point, .zoom-controls')) return;
       event.currentTarget.setPointerCapture(event.pointerId);
       dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
       setDragging(true);
@@ -238,6 +242,28 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   })}</div>;
 }
 
+function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { anchors: ZeroAnchor[]; width: number; height: number; selectedIds: number[]; onToggle: (id: number) => void }) {
+  return <div className="point-layer anchor-layer">{anchors.map((anchor) => {
+    const selected = selectedIds.includes(anchor.anchor_id);
+    const order = selectedIds.indexOf(anchor.anchor_id);
+    return <button type="button" key={anchor.anchor_id} className={`anchor-point ${selected ? 'anchor-point--selected' : ''}`}
+      style={{ left: `${(anchor.x / width) * 100}%`, top: `${(anchor.y / height) * 100}%` }}
+      onClick={() => onToggle(anchor.anchor_id)}
+      aria-pressed={selected}
+      title={`앵커 ${anchor.anchor_id} · 클릭해서 ${selected ? '선택 해제' : '제로라인 시작/끝점으로 선택'}`}>
+      <span className="anchor-point__ring" />
+      {selected && <span className="anchor-point__order">{order + 1}</span>}
+    </button>;
+  })}</div>;
+}
+
+function ValleyLineOverlay({ lines, width, height }: { lines: ValleyLine[]; width: number; height: number }) {
+  if (!lines.length) return null;
+  return <svg className="valley-line-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+    {lines.map((line) => <polyline key={line.id} points={line.points.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke="#e0303f" strokeWidth={Math.max(width, height) * 0.0026} strokeLinecap="round" strokeLinejoin="round" />)}
+  </svg>;
+}
+
 function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: View; setView: (view: View) => void; collapsed: boolean; setCollapsed: (value: boolean) => void; hasResult: boolean }) {
   const items = [
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
@@ -322,10 +348,59 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   const image = engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
   const toggleLabel = onPointToggle;
   const allLabelsVisible = result.points.length > 0 && visibleLabelIds.size === result.points.length;
+
+  const zeroAnchors = result.zeroAnchors || [];
+  const [selectedAnchors, setSelectedAnchors] = useState<number[]>([]);
+  const [valleyLines, setValleyLines] = useState<ValleyLine[]>([]);
+  const [valleyStatus, setValleyStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [valleyError, setValleyError] = useState<string | null>(null);
+  useEffect(() => { setSelectedAnchors([]); setValleyLines([]); setValleyStatus('idle'); setValleyError(null); }, [scan.id]);
+  const toggleAnchor = (id: number) => setSelectedAnchors((current) => {
+    if (current.includes(id)) return current.filter((value) => value !== id);
+    if (current.length >= 2) return [id];
+    return [...current, id];
+  });
+  useEffect(() => {
+    if (selectedAnchors.length !== 2) return;
+    if (!result.analysisId) { setValleyStatus('error'); setValleyError('분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.'); return; }
+    let cancelled = false;
+    setValleyStatus('loading'); setValleyError(null);
+    fetch(`${API_BASE}/api/zero-valley-line`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analysisId: result.analysisId, anchorIds: selectedAnchors }),
+    })
+      .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+      .then(({ ok, data }) => {
+        if (cancelled) return;
+        if (!ok) { setValleyStatus('error'); setValleyError(data.error || '선을 잇지 못했습니다.'); setSelectedAnchors([]); return; }
+        const line = data.line;
+        setValleyLines((current) => [...current, {
+          id: `${line.anchor_start_id}-${line.anchor_end_id}-${current.length}`,
+          anchorStartId: line.anchor_start_id, anchorEndId: line.anchor_end_id,
+          points: line.points, length_px: line.length_px, mean_abs_deviation: line.mean_abs_deviation,
+        }]);
+        setValleyStatus('idle'); setSelectedAnchors([]);
+      })
+      .catch(() => { if (!cancelled) { setValleyStatus('error'); setValleyError('엔진 서버에 연결할 수 없습니다.'); setSelectedAnchors([]); } });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedAnchors, result.analysisId]);
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
-    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
-      <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div></aside>
+    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}{engine === 'zero' && <>
+        <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
+        <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
+      </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
+      <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
+      {engine === 'zero' && <div className="card mini-table anchor-panel">
+        <div className="card-title"><h3>제로라인 잇기</h3><span>앵커 {zeroAnchors.length}개</span></div>
+        <p className="anchor-panel__hint">이미지 위 초록 점(앵커) 2개를 순서대로 클릭하면, 그 사이를 실측 보정시트 수준 정확도로 잇습니다 (검증: 대각선 대비 오차 약 3.68%). 어떤 두 점을 이을지는 사람이 직접 골라야 합니다 — 자동으로는 정답 쌍을 못 찾았습니다.</p>
+        {selectedAnchors.length > 0 && valleyStatus !== 'error' && <p className="anchor-panel__status">선택됨: {selectedAnchors.join(', ')} {valleyStatus === 'loading' && '· 잇는 중…'}</p>}
+        {valleyStatus === 'error' && valleyError && <p className="anchor-panel__status anchor-panel__status--error">{valleyError}</p>}
+        {valleyLines.map((line) => <div className="point-list-row" key={line.id}><span>{line.anchorStartId}↔{line.anchorEndId}</span><b className="positive">{Math.round(line.length_px)}px</b><small>평균|편차| {line.mean_abs_deviation.toFixed(3)}</small><button type="button" className="label-visibility" onClick={() => setValleyLines((current) => current.filter((item) => item.id !== line.id))} aria-label="이 선 지우기" title="이 선 지우기"><X size={14} /></button></div>)}
+        {valleyLines.length > 0 && <button type="button" className="text-button anchor-panel__reset" onClick={() => { setValleyLines([]); setSelectedAnchors([]); }}>전체 초기화</button>}
+        {!zeroAnchors.length && <p className="empty-mini">검출된 앵커가 없습니다.</p>}
+      </div>}</aside>
     </div></section>;
 }
 
