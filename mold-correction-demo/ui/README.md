@@ -1,4 +1,4 @@
-# AJIN Die Insight UI
+# ADC (Ajin Die Compensation) UI
 
 금형생산팀 멘토링용 통합 UI 데모입니다. `deviation_extraction`,
 `label_removal`, `zero_line_detection` 결과를 한 화면에서 설명하고,

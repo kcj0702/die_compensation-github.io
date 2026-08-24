@@ -45,7 +45,7 @@ function formatBytes(value: number | null) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function Heatmap({ imageUrl, width, height, children }: { imageUrl?: string | null; width: number; height: number; children?: React.ReactNode }) {
+function Heatmap({ imageUrl, width, height, children, lightBackground = false }: { imageUrl?: string | null; width: number; height: number; children?: React.ReactNode; lightBackground?: boolean }) {
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
@@ -65,10 +65,26 @@ function Heatmap({ imageUrl, width, height, children }: { imageUrl?: string | nu
   };
   const resetView = () => { setScale(1); setPan({ x: 0, y: 0 }); };
 
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !imageUrl) return;
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const amount = event.deltaY < 0 ? 0.25 : -0.25;
+      setScale((current) => {
+        const next = Math.max(1, Math.min(4, current + amount));
+        setPan((currentPan) => clampPan(currentPan, next));
+        return next;
+      });
+    };
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', handleWheel);
+  }, [imageUrl]);
+
   return <div
     ref={viewportRef}
-    className={`heatmap heatmap--actual ${scale > 1 ? 'heatmap--zoomed' : ''} ${dragging ? 'heatmap--dragging' : ''}`}
-    onWheel={(event) => { event.preventDefault(); setZoom(scale + (event.deltaY < 0 ? 0.25 : -0.25)); }}
+    className={`heatmap heatmap--actual ${lightBackground ? 'heatmap--light' : ''} ${children ? 'heatmap--annotated' : ''} ${scale > 1 ? 'heatmap--zoomed' : ''} ${dragging ? 'heatmap--dragging' : ''}`}
     onDoubleClick={resetView}
     onPointerDown={(event) => {
       if (scale <= 1 || (event.target as Element).closest('.measure-point, .zoom-controls')) return;
@@ -103,12 +119,111 @@ function Heatmap({ imageUrl, width, height, children }: { imageUrl?: string | nu
 }
 
 function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void }) {
-  return <div className="point-layer">{points.map((point) => {
+  const labelHeight = 17;
+  const formatCorrection = (point: PointResult) => {
+    const correction = -(point.value * coefficient);
+    return `${correction > 0 ? '+' : ''}${correction.toFixed(1)}`;
+  };
+  const getLabelWidth = (point: PointResult) => Math.max(24, formatCorrection(point).length * 5.2 + 8);
+  const layerRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ id: string; x: number; y: number; clientX: number; clientY: number; moved: boolean } | null>(null);
+  const ignoreClickRef = useRef(false);
+  const layoutKeyRef = useRef('');
+  const [layerSize, setLayerSize] = useState({ width: 0, height: 0 });
+  const [labelPositions, setLabelPositions] = useState<Record<string, { x: number; y: number }>>({});
+  useEffect(() => {
+    const layer = layerRef.current;
+    if (!layer) return;
+    const updateSize = () => setLayerSize({ width: layer.clientWidth, height: layer.clientHeight });
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(layer);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!layerSize.width) return;
+    const layoutKey = `${labelHeight}:${points.map((point) => `${point.id}:${formatCorrection(point).length}`).join('|')}`;
+    const resetLayout = layoutKeyRef.current !== layoutKey;
+    layoutKeyRef.current = layoutKey;
+    setLabelPositions((current) => {
+      const next = resetLayout ? {} : { ...current };
+      const centerX = points.length > 1 ? points.reduce((sum, point) => sum + layerSize.width * point.x / 100, 0) / points.length : layerSize.width / 2;
+      const centerY = points.length > 1 ? points.reduce((sum, point) => sum + layerSize.height * point.y / 100, 0) / points.length : layerSize.height / 2;
+      points.forEach((point) => {
+        if (next[point.id]) return;
+        const labelWidth = getLabelWidth(point);
+        const pointX = layerSize.width * point.x / 100;
+        const pointY = layerSize.height * point.y / 100;
+        let dx = pointX - centerX;
+        let dy = pointY - centerY;
+        if (Math.abs(dx) + Math.abs(dy) < 1) { dx = 1; dy = 0; }
+        const length = Math.hypot(dx, dy);
+        const unitX = dx / length;
+        const unitY = dy / length;
+        const leaderEndX = pointX + unitX * 20;
+        const leaderEndY = pointY + unitY * 20;
+        next[point.id] = {
+          x: unitX >= 0 ? leaderEndX : leaderEndX - labelWidth,
+          y: unitY >= 0 ? leaderEndY : leaderEndY - labelHeight,
+        };
+      });
+      return next;
+    });
+  }, [layerSize, points, coefficient, labelHeight]);
+  const beginLabelDrag = (event: React.PointerEvent<HTMLSpanElement>, id: string) => {
+    const position = labelPositions[id];
+    if (!position) return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { id, x: position.x, y: position.y, clientX: event.clientX, clientY: event.clientY, moved: false };
+  };
+  const moveLabel = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const drag = dragRef.current;
+    const layer = layerRef.current;
+    if (!drag || drag.id !== event.currentTarget.dataset.pointId || !layer) return;
+    const scale = layer.getBoundingClientRect().width / Math.max(layer.clientWidth, 1);
+    const movedX = drag.x + (event.clientX - drag.clientX) / scale;
+    drag.moved ||= Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) > 3;
+    setLabelPositions((current) => ({ ...current, [drag.id]: {
+      x: Math.max(-140, Math.min(layer.clientWidth + 62, movedX)),
+      y: Math.max(-8, Math.min(layer.clientHeight - 24, drag.y + (event.clientY - drag.clientY) / scale)),
+    }}));
+  };
+  const endLabelDrag = (event: React.PointerEvent<HTMLSpanElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.id !== event.currentTarget.dataset.pointId) return;
+    dragRef.current = null; ignoreClickRef.current = drag.moved;
+    if (drag.moved) window.setTimeout(() => { ignoreClickRef.current = false; }, 0);
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  return <div className="point-layer" ref={layerRef}>
+    <svg className="point-leaders" aria-hidden="true" viewBox={`0 0 ${layerSize.width} ${layerSize.height}`}>{points.map((point) => {
+       const position = labelPositions[point.id]; const visible = !visibleLabelIds || visibleLabelIds.has(point.id);
+       if (!position || !visible) return null;
+       const labelWidth = getLabelWidth(point);
+       const x1 = layerSize.width * point.x / 100; const y1 = layerSize.height * point.y / 100;
+      let x2 = Math.max(position.x, Math.min(position.x + labelWidth, x1));
+      let y2 = Math.max(position.y, Math.min(position.y + labelHeight, y1));
+      if (x2 === x1 && y2 === y1) {
+        const distances = [
+          { value: x1 - position.x, edge: 'left' },
+          { value: position.x + labelWidth - x1, edge: 'right' },
+          { value: y1 - position.y, edge: 'top' },
+          { value: position.y + labelHeight - y1, edge: 'bottom' },
+        ].sort((a, b) => a.value - b.value);
+        if (distances[0].edge === 'left') x2 = position.x;
+        if (distances[0].edge === 'right') x2 = position.x + labelWidth;
+        if (distances[0].edge === 'top') y2 = position.y;
+        if (distances[0].edge === 'bottom') y2 = position.y + labelHeight;
+      }
+      return <line key={point.id} x1={x1} y1={y1} x2={x2} y2={y2} />;
+    })}</svg>{points.map((point) => {
     const correction = -(point.value * coefficient);
     const labelVisible = !visibleLabelIds || visibleLabelIds.has(point.id);
-    return <button type="button" className={`measure-point ${correction >= 0 ? 'measure-point--plus' : 'measure-point--minus'} ${onLabelToggle ? 'measure-point--interactive' : ''}`} style={{ left: `${point.x}%`, top: `${point.y}%` }} key={point.id} onClick={() => onLabelToggle?.(point.id)} aria-label={`${point.id} 라벨 ${labelVisible ? '숨기기' : '표시하기'}`} aria-pressed={labelVisible} title={`${point.id} 편차 ${point.value > 0 ? '+' : ''}${point.value.toFixed(3)} mm · 클릭하여 라벨 ${labelVisible ? 'OFF' : 'ON'}`}>
+    const position = labelPositions[point.id];
+    return <button type="button" className={`measure-point ${correction >= 0 ? 'measure-point--plus' : 'measure-point--minus'} ${onLabelToggle ? 'measure-point--interactive' : ''}`} style={{ left: `${point.x}%`, top: `${point.y}%` }} key={point.id} onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } onLabelToggle?.(point.id); }} aria-label={`${point.id} 라벨 ${labelVisible ? '숨기기' : '표시하기'}`} aria-pressed={labelVisible} title={`${point.id} 편차 ${point.value > 0 ? '+' : ''}${point.value.toFixed(3)} · 포인트 또는 라벨 클릭으로 표시 전환`}>
       <span className="measure-point__dot" />
-      {labels && labelVisible && <span className="measure-point__label"><b>{point.id}</b>{correction > 0 ? '+' : ''}{correction.toFixed(3)} mm</span>}
+      {labels && labelVisible && position && <span className="measure-point__label" data-point-id={point.id} style={{ left: `${position.x - layerSize.width * point.x / 100}px`, top: `${position.y - layerSize.height * point.y / 100}px` }} onPointerDown={(event) => beginLabelDrag(event, point.id)} onPointerMove={moveLabel} onPointerUp={endLabelDrag} onPointerCancel={endLabelDrag}>{formatCorrection(point)}</span>}
     </button>;
   })}</div>;
 }
@@ -117,18 +232,18 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
   const items = [
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
     { id: 'results' as const, label: '엔진 결과', icon: BarChart3 },
-    { id: 'service' as const, label: '보정 시트', icon: Layers3 },
+    { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
-    <div className="brand"><div className="brand__mark">A</div><div className="brand__copy"><strong>AJIN</strong><span>Die Insight</span></div></div>
-    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
+    <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /><div className="brand__copy"><strong>ADC</strong><span>Ajin Die Compensation</span></div></div>
+    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <div className="sidebar__guide"><CircleHelp size={19} /><div><b>실제 엔진 연결</b><span>모든 처리는 이 PC 안에서 실행</span></div><ChevronRight size={16} /></div>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
 }
 
 function Header({ scans, activeId, setActiveId }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void }) {
-  return <header className="topbar"><div><span className="topbar__context">금형생산팀 · 통합 보정 분석</span><h1>3D 스캔 보정 워크벤치</h1></div><div className="topbar__actions">
+  return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span><h1>ADC <small>Ajin Die Compensation</small></h1></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
     <button className="icon-button" aria-label="설정"><Settings2 size={19} /></button><div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
   </div></header>;
@@ -182,21 +297,17 @@ function engineSummary(engine: Engine, result: AnalysisResult) {
   return { stat: `${result.stats.zeroRegions}개`, detail: `부품 면적의 ${(result.stats.zeroRatio * 100).toFixed(1)}% · 실제 검출 결과` };
 }
 
-function Results({ scan, onService }: { scan: ScanItem; onService: () => void }) {
+function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsToggle }: { scan: ScanItem; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void }) {
   const [engine, setEngine] = useState<Engine>('label');
   const result = scan.result!; const meta = engineMeta[engine]; const summary = engineSummary(engine, result);
   const engineWarnings = result.warningsByEngine?.[engine] ?? (engine === 'zero' ? result.warnings : []);
-  const [visibleLabelIds, setVisibleLabelIds] = useState<Set<string>>(() => new Set(result.points.map((point) => point.id)));
+  const visibleLabelIds = new Set(result.points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
   const image = engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
-  const toggleLabel = (id: string) => setVisibleLabelIds((current) => {
-    const next = new Set(current);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+  const toggleLabel = onPointToggle;
   const allLabelsVisible = result.points.length > 0 && visibleLabelIds.size === result.points.length;
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
-    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => setVisibleLabelIds(allLabelsVisible ? new Set() : new Set(result.points.map((point) => point.id)))}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className="viewer-stage"><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
+    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div></aside>
     </div></section>;
 }
@@ -240,19 +351,37 @@ function Explorer() {
   return <div className="explorer card"><div className="explorer__title"><div><FolderOpen size={20} /><b>실시간 품번별 폴더</b></div><span>{available == null ? '연결 확인 중' : '현재 PC 폴더와 연결됨'}</span></div><div className="explorer__bar"><div className="explorer__crumb"><button disabled={!path} onClick={() => openFolder(segments.slice(0, -1).join('/'))}><ArrowLeft size={14} /></button><span><button onClick={() => openFolder('')}>{rootName}</button>{segments.map((segment, index) => <span key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => openFolder(segments.slice(0, index + 1).join('/'))}>{segment}</button></span>)}</span></div><label><ZoomIn size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="현재 폴더 검색" /></label></div><div className="explorer__body"><div className="folder-tree"><button className={`tree-root ${!path ? 'selected' : ''}`} onClick={() => openFolder('')}><ChevronDown size={15} /><FolderOpen size={17} /> <span>{rootName}</span></button><div className="tree-children">{rootEntries.map((entry) => <FolderTreeNode key={entry.path} entry={entry} selectedPath={path} onOpen={openFolder} />)}</div></div><div className="folder-content"><div className="folder-content__head"><span>이름</span><span>수정한 날짜</span><span>크기</span></div>{filtered.map((entry) => <button className="folder-row" key={entry.path} onDoubleClick={() => entry.isDirectory && openFolder(entry.path)} onClick={() => entry.isDirectory && openFolder(entry.path)}><span>{entry.isDirectory ? <Folder size={19} fill="currentColor" /> : <File size={18} />}{entry.name}</span><small>{new Date(entry.modified).toLocaleString('ko-KR')}</small><small>{entry.isDirectory ? '파일 폴더' : formatBytes(entry.size)}</small></button>)}{!filtered.length && <div className="empty-search">이 폴더는 비어 있습니다.</div>}<div className="folder-content__status">{filtered.length}개 항목 <span>·</span> 실시간 로컬 조회</div></div></div></div>;
 }
 
-function ServicePreview({ scan, folderAvailable }: { scan: ScanItem; folderAvailable: boolean }) {
-  const result = scan.result!; const points = result.points; const [coefficient, setCoefficient] = useState(0.8); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
+function SheetTitleBlock({ scan }: { scan: ScanItem }) {
+  const partName = scan.name.replace(/\.[^.]+$/, '');
+  const appliedDate = new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date());
+
+  return <section className="sheet-title-block" aria-label="보정 적용 내용">
+    <div className="sheet-title-block__heading"><strong>보정 적용 내용</strong></div>
+    <div className="sheet-title-block__label">관리 NO</div><div className="sheet-title-block__value">ADC-{scan.partNo}</div>
+    <div className="sheet-title-block__label">PART NAME</div><div className="sheet-title-block__value" title={partName}>{partName}</div>
+    <div className="sheet-title-block__label">공정</div><div className="sheet-title-block__value">금형 보정</div>
+    <div className="sheet-title-block__label">PART NO</div><div className="sheet-title-block__value">{scan.partNo}</div>
+    <div className="sheet-title-block__label">원소재</div><div className="sheet-title-block__value">3D SCAN DATA</div>
+    <div className="sheet-title-block__label">적용일자</div><div className="sheet-title-block__value">{appliedDate}</div>
+  </section>;
+}
+
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void }) {
+  const result = scan.result!; const points = result.points; const visiblePointIds = new Set(points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id)); const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(point.value * coefficient))) : 0, [coefficient, points]);
   const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
-  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">실제 서비스 예상 화면 <span className="demo-badge">DEMO</span></span><h2>가상 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button></div></div><div className="sheet-stage"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height}>{showPoints && <CorrectionPoints coefficient={coefficient} points={points} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><input aria-label="보정 계수" type="range" min="0.3" max="1.3" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.30</span><span>기준 0.80</span><span>적극적 1.30</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div></div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{points.length}개</b></div><div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div></div></aside></div>{folderAvailable && <Explorer />}</section>;
+  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button></div></div><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div></div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div><div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div></div></aside></div>{folderAvailable && <Explorer />}</section>;
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false);
+  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({});
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json()).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
+  const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
+  const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
+  const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} />}</div></main>;
 }
