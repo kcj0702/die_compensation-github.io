@@ -337,20 +337,23 @@ def connect_strongest_pair(
     """
     from zero_line_detection.zero_valley import find_valley_lines
 
-    ranked = sorted(clusters, key=lambda c: -c.strength)[:2]
-    if len(ranked) < 2:
-        return None
-
+    # 부품 마스크 위에 제대로 얹히는 군집만 끝점 후보로 쓴다.
+    # 실측(JD_64XX2): 0포인트 6개 중 2개가 부품에서 90~140px 밖이었다
+    # (좌하단 곡면이 마스크에서 빠졌거나 스캔포인트 오검출). 그런 점을
+    # 억지로 끌어와 이으면 엉뚱한 자리를 지나간다.
     class _Anchor:
         def __init__(self, anchor_id, x, y):
             self.anchor_id, self.x, self.y = anchor_id, x, y
 
-    anchors = []
-    for index, cluster in enumerate(ranked, start=1):
+    on_part = []
+    for cluster in clusters:
         sx, sy, moved = snap_into_mask(part_mask, cluster.center[0], cluster.center[1])
-        if moved > max_snap_px:
-            return None
-        anchors.append(_Anchor(index, sx, sy))
+        if moved <= max_snap_px:
+            on_part.append((cluster.strength, sx, sy))
+    if len(on_part) < 2:
+        return None
+    on_part.sort(key=lambda item: -item[0])
+    anchors = [_Anchor(index, x, y) for index, (_s, x, y) in enumerate(on_part[:2], start=1)]
 
     lines = find_valley_lines(
         values, part_mask, anchors, tolerance,
