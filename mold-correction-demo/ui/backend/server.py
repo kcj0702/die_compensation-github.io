@@ -42,6 +42,12 @@ from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
 from zero_line_detection.polygonize import draw_polygons, polygonize  # noqa: E402
+from zero_line_detection.zero_polyline import (  # noqa: E402
+    draw_zero_polylines, extract_zero_polylines,
+)
+from zero_line_detection.zero_boundary import (  # noqa: E402
+    draw_zero_boundary, find_boundary_anchors, grow_patches,
+)
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -237,6 +243,9 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_overlay: np.ndarray | None = None
     zero_candidates: list = []
     zero_datum_mask: np.ndarray | None = None
+    zero_lines: list = []
+    zero_anchors: list = []
+    zero_patches: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
@@ -254,9 +263,26 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         )
         zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
 
-        if zero_datum_mask is not None and zero_datum_mask.any():
-            # 다각형으로 정리해서 그린다. 픽셀 마스크 그대로 그리면
-            # 경계가 너덜너덜해 어디가 기준인지 눈에 안 들어온다.
+        # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
+        # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
+        # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
+        # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
+        # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
+        zero_anchors = find_boundary_anchors(
+            zero_output.values, zero_output.part_mask
+        )
+        zero_patches = grow_patches(
+            zero_output.values, zero_output.part_mask, zero_anchors,
+            tolerance=float(zero_output.result.tolerance),
+        )
+        zero_lines = extract_zero_polylines(
+            zero_output.values, zero_output.part_mask
+        )
+        if zero_patches:
+            zero_overlay = draw_zero_boundary(overlay_base, zero_anchors, zero_patches)
+        elif zero_lines:
+            zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
+        elif zero_datum_mask is not None and zero_datum_mask.any():
             zero_overlay = draw_polygons(
                 overlay_base, polygonize(zero_datum_mask, preset="balanced")
             )
@@ -377,6 +403,9 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             else (_png_data_url(zero_output.mask) if zero_output is not None else None)
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
+        "zeroLines": [l.to_dict() for l in zero_lines],
+        "zeroAnchors": [a.to_dict() for a in zero_anchors],
+        "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "points": points,
         "stats": {
             "labelsRemoved": label_count,
