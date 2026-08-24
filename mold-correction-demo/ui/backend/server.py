@@ -60,6 +60,9 @@ from zero_line_advance.advance import (  # noqa: E402
     AdvanceConfig, detect_advanced_zero_line,
 )
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
+from zero_line_detection.zero_points import (  # noqa: E402
+    cluster_zero_points, connect_strongest_pair, load_loop_paths, load_zero_points,
+)
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
 
@@ -86,6 +89,10 @@ QWEN_REQUIRED_FILES = (
 # (python -m zero_line_detection.register_sheet) 같은 품번의 스캔이
 # 들어왔을 때 추론하지 않고 시트와 동일한 선을 그대로 쓴다.
 ZERO_LINE_LIBRARY = PROJECT_DIR / "zero_line_detection" / "zero_line_library.json"
+# my_lab 파이프라인(스캔포인트 윤곽선 -> 편차 그래프 -> 0포인트)의 결과.
+# 라벨 실측값에서 나온 0포인트라 컬러바 색 잡음에 흔들리지 않는다.
+ZERO_POINTS_DIR = PROJECT_DIR / "zero_line_detection" / "zero_points_data"
+LOOP_PATHS_DIR = PROJECT_DIR / "my_lab" / "scan_point_contour" / "output"
 
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
@@ -487,6 +494,34 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     else:
         value_mode = "판독 결과 없음"
 
+    # 라벨 실측값 기반 0포인트 -> 군집(점/존) -> 선으로 잇기
+    zero_point_clusters: list = []
+    label_zero_line = None
+    try:
+        part_key = part_no_from_name(filename)
+        points_file = ZERO_POINTS_DIR / f"{part_key}.json"
+        if points_file.is_file():
+            raw_points = load_zero_points(points_file)
+            loop_paths = {}
+            for folder in LOOP_PATHS_DIR.glob("*"):
+                if part_key in folder.name.upper():
+                    candidate = folder / "scan_point_loops.json"
+                    if candidate.is_file():
+                        loop_paths = load_loop_paths(candidate)
+                    break
+            zero_point_clusters = cluster_zero_points(raw_points, loop_paths=loop_paths)
+            if zero_output is not None and zero_point_clusters:
+                line = connect_strongest_pair(
+                    zero_point_clusters,
+                    calibrated_values if calibrated_values is not None else zero_output.values,
+                    zero_output.part_mask,
+                    float(zero_output.result.tolerance),
+                )
+                if line is not None:
+                    label_zero_line = line.to_dict()
+    except Exception as exc:
+        errors["zeroPoints"] = str(exc)
+
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
     try:
@@ -533,6 +568,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "advanceLine": advance_line,
         "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
+        "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
+        "labelZeroLine": label_zero_line,
         "referenceLine": reference_line,
         "points": points,
         "stats": {

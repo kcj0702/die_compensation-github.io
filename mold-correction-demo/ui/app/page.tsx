@@ -21,6 +21,8 @@ type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: nu
 type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: number | null; points: [number, number][]; length_px: number; mean_abs_deviation: number; source: 'ai' | 'manual' };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
 type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
+type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
+type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
@@ -31,6 +33,8 @@ type AnalysisResult = {
   zeroAnchors: ZeroAnchor[];
   advanceLine: AdvanceLine | null;
   zeroLineCandidates: ZeroLineCandidate[];
+  zeroPointClusters: ZeroPointCluster[];
+  labelZeroLine: LabelZeroLine | null;
   referenceLine: ReferenceLine | null;
   points: PointResult[];
   stats: {
@@ -534,6 +538,15 @@ export default function Home() {
         setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: shapes }));
         return;
       }
+    }
+    const labelLine = completedScan.result?.labelZeroLine;
+    if (labelLine && labelLine.points.length >= 2) {
+      setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: [{
+        id: 'label-zero-line', anchorStartId: null, anchorEndId: null,
+        points: labelLine.points, length_px: labelLine.length_px,
+        mean_abs_deviation: labelLine.mean_abs_deviation, source: 'ai',
+      }] }));
+      return;
     }
     const best = (completedScan.result?.zeroLineCandidates || [])[0];
     const advance = completedScan.result?.advanceLine;
