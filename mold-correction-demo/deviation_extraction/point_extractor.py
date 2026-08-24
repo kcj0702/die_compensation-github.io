@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -11,9 +12,26 @@ import numpy as np
 import pandas as pd
 from PIL import Image as PILImage
 
-import config
-from colormap_reader import build_lut
-from label_detector import LabelCandidate, detect_labels
+if __package__:  # 패키지 import와 직접 스크립트 실행을 모두 지원한다.
+    from . import config
+    from .colormap_reader import build_lut
+    from .image_io import read_image, write_image
+    from .label_detector import (
+        LabelCandidate,
+        build_blue_annotation_mask,
+        build_scan_mask,
+        detect_labels,
+    )
+else:  # pragma: no cover - 직접 스크립트 실행 경로
+    import config
+    from colormap_reader import build_lut
+    from image_io import read_image, write_image
+    from label_detector import (
+        LabelCandidate,
+        build_blue_annotation_mask,
+        build_scan_mask,
+        detect_labels,
+    )
 
 CROP_PADDING = 4
 CSV_COLUMNS = (
@@ -64,12 +82,81 @@ def _load_zero_line_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray 
     """선택 마스크를 읽고 원본 크기와 다르면 최근접 보간으로 맞춘다."""
     if not mask_path.exists():
         return None
-    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
-    if mask is None:
+    try:
+        mask = read_image(mask_path, cv2.IMREAD_GRAYSCALE)
+    except FileNotFoundError:
         return None
     if mask.shape != shape:
         mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
     return mask
+
+
+def _read_label_values(
+    reader: ValueReader,
+    crops: list[PILImage.Image],
+    batch_size: int,
+) -> list[float | None]:
+    """판독기가 배치 API를 제공하면 사용하고, 아니면 기존 단건 API로 처리한다."""
+    batch_reader = getattr(reader, "read_values", None)
+    if callable(batch_reader):
+        try:
+            parameters = signature(batch_reader).parameters.values()
+            accepts_batch_size = any(
+                parameter.name == "batch_size"
+                or parameter.kind == Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+        except (TypeError, ValueError):
+            accepts_batch_size = True
+        if accepts_batch_size:
+            values = list(batch_reader(crops, batch_size=batch_size))
+        else:
+            values = list(batch_reader(crops))
+    else:
+        values = [reader.read_value(crop) for crop in crops]
+    if len(values) != len(crops):
+        raise ValueError("숫자 판독 결과 수가 라벨 crop 수와 다릅니다.")
+    return values
+
+
+def _sample_deviation_color(
+    bgr: np.ndarray,
+    point_xy: tuple[int, int],
+    scan_mask: np.ndarray,
+    annotation_mask: np.ndarray,
+) -> np.ndarray | None:
+    """파란 선/점을 제외한 측정점 주변 표면색의 중앙값을 반환한다."""
+    point_x, point_y = point_xy
+    height, width = bgr.shape[:2]
+    scale = max(1.0, min(height, width) / float(config.REFERENCE_SHORT_SIDE))
+    inner_radius = max(1, int(round(config.CROSS_CHECK_SAMPLE_INNER_RADIUS * scale)))
+    outer_radius = max(
+        inner_radius + 1,
+        int(round(config.CROSS_CHECK_SAMPLE_OUTER_RADIUS * scale)),
+    )
+    x0, x1 = max(0, point_x - outer_radius), min(width, point_x + outer_radius + 1)
+    y0, y1 = max(0, point_y - outer_radius), min(height, point_y + outer_radius + 1)
+
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    distance_squared = (xx - point_x) ** 2 + (yy - point_y) ** 2
+    annulus = (
+        (distance_squared >= inner_radius**2)
+        & (distance_squared <= outer_radius**2)
+    )
+    local_annotation = annotation_mask[y0:y1, x0:x1] > 0
+    local_scan = scan_mask[y0:y1, x0:x1] > 0
+    non_white = (
+        255 - bgr[y0:y1, x0:x1].min(axis=2)
+        >= config.FOREGROUND_THRESHOLD
+    )
+    valid = annulus & ~local_annotation & non_white
+    if np.any(scan_mask):
+        valid &= local_scan
+    if np.any(valid):
+        return np.rint(np.median(bgr[y0:y1, x0:x1][valid], axis=0)).astype(
+            np.uint8
+        )
+    return None
 
 
 def extract_points(
@@ -78,16 +165,27 @@ def extract_points(
     reader: ValueReader | None = None,
     reader_factory: Callable[[], ValueReader] | None = None,
     cross_check: bool = False,
+    batch_size: int = config.VLM_BATCH_SIZE,
 ) -> list[DeviationPoint]:
     """라벨 후보를 좌상단 원점의 픽셀·정규화 좌표와 판독값으로 변환한다."""
-    bgr = cv2.imread(str(image_path))
-    if bgr is None:
-        raise FileNotFoundError(f"편차 이미지를 열 수 없음: {image_path}")
+    if batch_size < 1:
+        raise ValueError("batch_size는 1 이상이어야 합니다.")
+    bgr = read_image(image_path)
 
     h_img, w_img = bgr.shape[:2]
     candidates: list[LabelCandidate] = detect_labels(bgr)
     zero_mask = _load_zero_line_mask(zero_line_mask_path, (h_img, w_img))
     lut = build_lut(bgr) if cross_check else None
+    scan_mask = build_scan_mask(bgr) if cross_check else None
+    annotation_mask = (
+        build_blue_annotation_mask(
+            bgr,
+            boxes=[candidate.box for candidate in candidates],
+            scan_mask=scan_mask,
+        )
+        if cross_check
+        else None
+    )
 
     if not candidates:
         return []
@@ -95,24 +193,36 @@ def extract_points(
         if reader_factory is not None:
             reader = reader_factory()
         else:
-            from vlm_reader import LabelValueReader
+            if __package__:
+                from .vlm_reader import LabelValueReader
+            else:  # pragma: no cover - 직접 스크립트 실행 경로
+                from vlm_reader import LabelValueReader
 
             reader = LabelValueReader()
 
+    crop_images: list[PILImage.Image] = []
+    for candidate in candidates:
+        crop_bgr = _crop_label(bgr, candidate.box)
+        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        crop_images.append(PILImage.fromarray(crop_rgb))
+    values = _read_label_values(reader, crop_images, batch_size)
+
     points: list[DeviationPoint] = []
 
-    for i, cand in enumerate(candidates, start=1):
-        crop_bgr = _crop_label(bgr, cand.box)
-        crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-        value_mm = reader.read_value(PILImage.fromarray(crop_rgb))
+    for i, (cand, value_mm) in enumerate(zip(candidates, values), start=1):
 
         status: list[str] = []
         if value_mm is None:
             status.append("value_not_read")
-        if not cand.traced or cand.point_xy is None:
+        point_in_bounds = bool(
+            cand.point_xy is not None
+            and 0 <= cand.point_xy[0] < w_img
+            and 0 <= cand.point_xy[1] < h_img
+        )
+        if not cand.traced or not point_in_bounds:
             status.append("leader_line_not_traced")
 
-        if cand.point_xy is None:
+        if not point_in_bounds:
             x = y = None
             x_norm = y_norm = None
             in_zero_line = False
@@ -131,9 +241,16 @@ def extract_points(
             and y is not None
         ):
             # 컬러맵은 판독값을 바꾸지 않고 불일치 상태만 기록한다.
-            color_value = lut.to_value(bgr[y, x])
-            if abs(color_value - value_mm) > config.CROSS_CHECK_MISMATCH_MM:
-                status.append("color_mismatch")
+            assert scan_mask is not None and annotation_mask is not None
+            sample_color = _sample_deviation_color(
+                bgr, (x, y), scan_mask, annotation_mask
+            )
+            if sample_color is None:
+                status.append("color_sample_unavailable")
+            else:
+                color_value = lut.to_value(sample_color)
+                if abs(color_value - value_mm) > config.CROSS_CHECK_MISMATCH_MM:
+                    status.append("color_mismatch")
 
         points.append(
             DeviationPoint(
@@ -164,9 +281,7 @@ def save_debug_image(
     image_path: Path, points: list[DeviationPoint], out_path: Path = config.DEBUG_IMAGE_PATH
 ) -> None:
     """원본 위에 좌표와 판독값을 겹쳐 검출 상태를 시각화한다."""
-    bgr = cv2.imread(str(image_path))
-    if bgr is None:
-        raise FileNotFoundError(f"편차 이미지를 열 수 없음: {image_path}")
+    bgr = read_image(image_path)
     for p in points:
         color = (0, 0, 255) if p.confidence != "ok" else (0, 200, 0)
         label_x, label_y, label_w, label_h = p.label_box
@@ -192,6 +307,4 @@ def save_debug_image(
             color,
             1,
         )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(out_path), bgr):
-        raise OSError(f"디버그 이미지를 저장할 수 없음: {out_path}")
+    write_image(out_path, bgr)

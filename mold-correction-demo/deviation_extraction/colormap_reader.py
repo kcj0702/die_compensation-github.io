@@ -5,15 +5,24 @@ from __future__ import annotations
 import matplotlib
 import numpy as np
 
-import config
+if __package__:  # 패키지 import와 직접 스크립트 실행을 모두 지원한다.
+    from . import config
+else:  # pragma: no cover - 직접 스크립트 실행 경로
+    import config
 
 
 class ColorToValueLUT:
     """색상 표본과 mm 값이 일대일로 대응된 최근접 탐색 LUT."""
 
     def __init__(self, colors_bgr: np.ndarray, values_mm: np.ndarray):
-        self._colors = colors_bgr.astype(np.float32)
-        self._values = values_mm.astype(np.float32)
+        colors = np.asarray(colors_bgr)
+        values = np.asarray(values_mm)
+        if colors.ndim != 2 or colors.shape[1] != 3:
+            raise ValueError("컬러 LUT는 (N, 3) BGR 배열이어야 합니다.")
+        if len(colors) == 0 or len(colors) != len(values):
+            raise ValueError("컬러와 편차값 표본 수가 같고 1개 이상이어야 합니다.")
+        self._colors = colors.astype(np.float32)
+        self._values = values.astype(np.float32)
 
     def to_value(self, bgr_pixel: np.ndarray) -> float:
         """BGR 제곱거리로 가장 가까운 표본의 값을 반환한다."""
@@ -27,16 +36,30 @@ def _from_roi(
     min_mm: float,
     max_mm: float,
 ) -> ColorToValueLUT:
-    """ROI의 짧은 축 중앙선을 샘플링해 실제 컬러바 LUT를 만든다."""
+    """ROI 중앙 띠의 중앙값을 샘플링해 실제 컬러바 LUT를 만든다."""
     x, y, w, h = roi
+    image_height, image_width = bgr.shape[:2]
+    if w <= 0 or h <= 0:
+        raise ValueError(f"컬러바 ROI의 폭과 높이는 양수여야 합니다: {roi}")
+    if x < 0 or y < 0 or x + w > image_width or y + h > image_height:
+        raise ValueError(
+            f"컬러바 ROI가 이미지 범위를 벗어났습니다: {roi}, "
+            f"image=({image_width}, {image_height})"
+        )
     strip = bgr[y:y + h, x:x + w]
     if h >= w:
         # 세로 범례는 위에서 아래로 max → min이다.
-        samples = strip[:, w // 2, :]
+        center = w // 2
+        half_band = max(0, w // 6)
+        band = strip[:, max(0, center - half_band):min(w, center + half_band + 1)]
+        samples = np.rint(np.median(band, axis=1)).astype(np.uint8)
         values = np.linspace(max_mm, min_mm, len(samples))
     else:
         # 가로 범례는 왼쪽에서 오른쪽으로 min → max다.
-        samples = strip[h // 2, :, :]
+        center = h // 2
+        half_band = max(0, h // 6)
+        band = strip[max(0, center - half_band):min(h, center + half_band + 1), :]
+        samples = np.rint(np.median(band, axis=0)).astype(np.uint8)
         values = np.linspace(min_mm, max_mm, len(samples))
     return ColorToValueLUT(samples, values)
 
