@@ -159,6 +159,64 @@ python -m zero_line_detection.run --input "data/intermediate/JD_71XX2-DR000 3D �
 
 ---
 
+## 제로라인 — "0색" 과 "기준" 은 다르다
+
+지금까지 낸 0 영역은 편차가 0에 가까운 **색**을 모은 것이었다. 그런데 스프링백
+관점에서 제로라인은 다른 것이다.
+
+성형 후 하중을 빼면 부품이 통째로 움직이는 게 아니라, **거의 움직이지 않는
+부분을 축으로 나머지가 돌아간다.** 그 안 움직이는 부분이 제로라인이고,
+보정량을 재는 기준이 된다. 넓으면 기준 **면**, 좁고 길면 기준 **선** 이 된다.
+
+문제는 "편차가 0에 가까운 색" 만으로는 이걸 특정할 수 없다는 것이다.
+편차가 0을 스치듯 지나가는 곳(기울기가 큰 곳)은 측정 위치가 몇 mm만 틀어져도
+값이 확 달라져서 기준이 될 수 없다. 계측에서 데이텀을 평평한 면에 잡는 것과
+같은 이유로, **편차가 0이고 동시에 주변이 평탄한 곳**만 후보로 남긴다.
+
+```python
+from zero_line_detection.zero_criteria import find_zero_candidates
+
+candidates, flat, gradient = find_zero_candidates(
+    out.values, out.part_mask, tolerance=out.result.tolerance,
+)
+```
+
+각 후보는 형태로 `plateau`(면, 길쭉함<3) 또는 `ridge`(선, 길쭉함≥3) 로 나뉘고,
+0 근접도·평탄도·크기를 합친 점수를 받는다. `JD_71XX2` 기준 색만으로 잡은
+53,047px 중 22,355px 만 평탄 조건까지 통과했다.
+
+**남은 문제 — 기울기 문턱값(하위 40%)은 여전히 우리가 정한 값이다.**
+"편차 0" 과 "제로라인" 이 다르다는 방향은 스프링백 원리로 근거가 있지만,
+정확히 몇 % 를 평탄으로 볼지는 현장 확인이 필요하다.
+→ `06_회의록/아진산업_방문_준비_20260825.md` Q1
+
+---
+
+## 다각형 정리 — 톱니 경계를 깔끔하게
+
+픽셀 마스크의 경계는 톱니처럼 너덜너덜하다. 가장 큰 영역이 면적 47,574px 에
+둘레 5,128px 였다(매끈한 도형이면 800px 면 충분하다). 닫기·열기 연산으로
+다듬고 Douglas-Peucker 로 꼭짓점을 줄인다. 가늘고 긴 0 영역은 외곽선만
+따르면 안쪽 빈 공간까지 칠해지므로, 구멍(내부 윤곽)을 함께 살린다.
+
+```python
+from zero_line_detection.polygonize import polygonize, draw_polygons
+
+polys = polygonize(out.mask, preset="balanced")   # accurate / balanced / clean
+img = draw_polygons(rgb, polys)
+```
+
+| 프리셋 | 꼭짓점 | 원본 대비 IoU | 용도 |
+|---|---|---|---|
+| `accurate` | 1,073 | 0.86 | 수치를 뽑아 쓸 때 |
+| **`balanced`** | **850** | **0.78** | **기본 · 화면 표시** |
+| `clean` | 256 | 0.53 | 발표·외주 전달 (모양은 크게 뭉개짐) |
+
+원본은 조각 11개에 꼭짓점 2,911개였다. 모양 보존과 단순함은 맞바꾸는
+관계이므로 용도에 맞는 프리셋을 고른다.
+
+---
+
 ## 정확도
 
 합성 이미지는 편차 분포를 우리가 정했으므로 **정답을 안다.**
@@ -261,6 +319,8 @@ python -m zero_line_detection.selftest
 | — | `label_anchors.py` | 라벨 박스·지시선 끝점 검출 (파트 3 에 넘길 것) |
 | — | `validate_real.py` | 실제 스캔에 대한 판독 정확도 검증 |
 | — | `selftest.py` | 변형 내성 자체 점검 13종 |
+| — | `zero_criteria.py` | 평탄도 기반 제로라인(기준면/기준선) 판정 |
+| — | `polygonize.py` | 마스크를 깔끔한 다각형으로 정리 |
 
 ### 라벨과 지시선을 따로 지우는 이유
 
