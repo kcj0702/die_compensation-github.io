@@ -59,6 +59,8 @@ from zero_line_detection.zero_valley import (  # noqa: E402
 from zero_line_advance.advance import (  # noqa: E402
     AdvanceConfig, detect_advanced_zero_line,
 )
+from zero_line_detection.sheet_reference import load_library  # noqa: E402
+from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -80,6 +82,11 @@ QWEN_REQUIRED_FILES = (
     "model.safetensors.index.json",
     "tokenizer.json",
 )
+# 품번별로 확정된 제로라인 보관함. 보정시트에서 읽어 등록해두면
+# (python -m zero_line_detection.register_sheet) 같은 품번의 스캔이
+# 들어왔을 때 추론하지 않고 시트와 동일한 선을 그대로 쓴다.
+ZERO_LINE_LIBRARY = PROJECT_DIR / "zero_line_detection" / "zero_line_library.json"
+
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
 
@@ -480,6 +487,20 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     else:
         value_mode = "판독 결과 없음"
 
+    # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
+    reference_line = None
+    try:
+        entry = load_library(ZERO_LINE_LIBRARY).get(part_no_from_name(filename))
+        if entry:
+            reference_line = {
+                "points": entry["points"],
+                "partNo": entry["part_no"],
+                "sourceSheet": Path(entry["source_sheet"]).name,
+                "mirrored": entry.get("mirrored", False),
+            }
+    except Exception as exc:
+        errors["zeroReference"] = str(exc)
+
     analysis_id = None
     if zero_output is not None and zero_anchors and calibrated_values is not None:
         analysis_id = _cache_analysis({
@@ -508,6 +529,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "advanceLine": advance_line,
         "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
+        "referenceLine": reference_line,
         "points": points,
         "stats": {
             "labelsRemoved": label_count,

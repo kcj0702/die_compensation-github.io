@@ -20,6 +20,7 @@ type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number;
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number };
 type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: number | null; points: [number, number][]; length_px: number; mean_abs_deviation: number; source: 'ai' | 'manual' };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
+type ReferenceLine = { points: [number, number][]; partNo: string; sourceSheet: string; mirrored: boolean };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
@@ -30,6 +31,7 @@ type AnalysisResult = {
   zeroAnchors: ZeroAnchor[];
   advanceLine: AdvanceLine | null;
   zeroLineCandidates: ZeroLineCandidate[];
+  referenceLine: ReferenceLine | null;
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -406,7 +408,10 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
             ? <p className="anchor-panel__status">AI가 "0.0" 표시점 기준으로 자동 제안한 선입니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
             : <p className="anchor-panel__status anchor-panel__status--error">AI 추천선의 신뢰도가 낮습니다{result.advanceLine.warnings[0] ? `: ${result.advanceLine.warnings[0]}` : ''}. 아래에서 AI 추천선을 지우고 앵커 2개를 직접 골라 이으세요.</p>
         )}
-        {(result.zeroLineCandidates || []).length > 0 && <div className="candidate-list">
+        {result.referenceLine && <p className="anchor-panel__status">
+          품번 {result.referenceLine.partNo} 의 보정시트({result.referenceLine.sourceSheet})에 그려진 제로라인을 그대로 불러왔습니다{result.referenceLine.mirrored ? ' (시트 그림이 좌우반전이라 뒤집어 맞춤)' : ''}. 추론이 아니라 정답지 그대로입니다.
+        </p>}
+        {!result.referenceLine && (result.zeroLineCandidates || []).length > 0 && <div className="candidate-list">
           <p className="anchor-panel__hint">AI가 모든 앵커 조합을 &quot;부품을 실제로 둘로 가르는 정도&quot;로 채점해 상위 {result.zeroLineCandidates.length}개를 추렸습니다. 1등을 기본으로 그렸으니, 실제와 다르면 아래에서 다른 후보를 눌러 바꾸세요. (실측 검증: 정답이 이 목록 안에는 들어오지만 1등은 아닐 수 있습니다.)</p>
           {result.zeroLineCandidates.map((cand) => {
             const active = valleyLines.some((line) => line.id === `cand-${cand.rank}`);
@@ -512,6 +517,14 @@ export default function Home() {
   // 보여주고 필요하면 지우거나 더하는 방향(회의록 "AI 제안 → 작업자 수정").
   useEffect(() => {
     if (!completedScan || valleyLinesByScan[completedScan.id] !== undefined) return;
+    const reference = completedScan.result?.referenceLine;
+    if (reference && reference.points.length >= 2) {
+      setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: [{
+        id: 'sheet-reference', anchorStartId: null, anchorEndId: null,
+        points: reference.points, length_px: 0, mean_abs_deviation: 0, source: 'ai',
+      }] }));
+      return;
+    }
     const best = (completedScan.result?.zeroLineCandidates || [])[0];
     const advance = completedScan.result?.advanceLine;
     const initial: ValleyLine[] = best
