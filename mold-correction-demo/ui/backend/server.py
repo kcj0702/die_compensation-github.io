@@ -62,6 +62,7 @@ from zero_line_advance.advance import (  # noqa: E402
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, load_loop_paths, load_zero_points,
+    snap_into_mask,
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
@@ -539,6 +540,31 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             }
     except Exception as exc:
         errors["zeroReference"] = str(exc)
+
+    # 클릭용 앵커는 라벨 실측값에서 나온 0포인트를 우선 쓴다. 컬러바
+    # 색에서 추정한 앵커보다 근거가 확실하고, 부품 윤곽선 위에 있다.
+    class _ClusterAnchor:
+        def __init__(self, anchor_id, x, y, kind, strength):
+            self.anchor_id, self.x, self.y = anchor_id, int(x), int(y)
+            self.kind, self.strength = kind, strength
+
+        def to_dict(self):
+            return {
+                "anchor_id": self.anchor_id, "x": self.x, "y": self.y,
+                "boundary_arclen": 0.0, "source": "label_zero_point",
+                "kind": self.kind, "strength": self.strength,
+            }
+
+    if zero_point_clusters and zero_output is not None:
+        snapped = []
+        for index, cluster in enumerate(zero_point_clusters, start=1):
+            sx, sy, moved = snap_into_mask(
+                zero_output.part_mask, cluster.center[0], cluster.center[1])
+            if moved <= 60.0:
+                snapped.append(_ClusterAnchor(
+                    len(snapped) + 1, sx, sy, cluster.kind, cluster.strength))
+        if len(snapped) >= 2:
+            zero_anchors = snapped
 
     analysis_id = None
     if zero_output is not None and zero_anchors and calibrated_values is not None:

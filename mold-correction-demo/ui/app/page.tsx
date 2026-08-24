@@ -17,7 +17,7 @@ type View = 'workspace' | 'results' | 'service';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string };
-type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number };
+type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number; source?: string; kind?: 'point' | 'zone'; strength?: number };
 type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: number | null; points: [number, number][]; length_px: number; mean_abs_deviation: number; source: 'ai' | 'manual' };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
 type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
@@ -431,7 +431,9 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
             </button>;
           })}
         </div>}
-        <p className="anchor-panel__hint">목록에 정답이 없으면, 이미지 위 초록 점(앵커) 2개를 순서대로 클릭해 직접 이으세요 (경로 정확도 검증: 대각선 대비 오차 약 3.68%).</p>
+        <p className="anchor-panel__hint">{zeroAnchors[0]?.source === 'label_zero_point'
+          ? '초록 점은 작업자가 측정한 라벨값에서 부호가 바뀌는 지점(0포인트)입니다. 2개를 순서대로 클릭하면 그 사이를 편차가 낮은 경로로 잇습니다.'
+          : '목록에 정답이 없으면, 이미지 위 초록 점(앵커) 2개를 순서대로 클릭해 직접 이으세요 (경로 정확도 검증: 대각선 대비 오차 약 3.68%).'}</p>
         {selectedAnchors.length > 0 && valleyStatus !== 'error' && <p className="anchor-panel__status">선택됨: {selectedAnchors.join(', ')} {valleyStatus === 'loading' && '· 잇는 중…'}</p>}
         {valleyStatus === 'error' && valleyError && <p className="anchor-panel__status anchor-panel__status--error">{valleyError}</p>}
         {valleyLines.map((line) => <div className="point-list-row" key={line.id}>
