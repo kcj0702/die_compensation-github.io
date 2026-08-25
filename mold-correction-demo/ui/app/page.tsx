@@ -41,12 +41,16 @@ type AnalysisResult = {
 };
 type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string };
 type FolderEntry = { name: string; path: string; isDirectory: boolean; size: number | null; modified: string };
+type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
+type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
 
 /* 보정 시트 주석 — 좌표와 크기는 모두 이미지 대비 %라 확대/축소와 창 크기에 영향받지 않는다. */
 type AnnotationKind = 'rect' | 'ellipse' | 'text' | 'arrow';
 type AnnotationTool = 'select' | AnnotationKind;
 /* 사각형·타원·텍스트는 x,y 가 좌상단이고 w,h 가 크기다. 화살표는 x,y 가 시작점이고 w,h 가 끝점까지의 변위라 음수가 될 수 있다. */
 type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; color?: string };
+type DetailRegion = { id: string; x: number; y: number; w: number; h: number; label: string };
+type SheetLayout = { id: string; kind: 'front' | 'detail'; x: number; y: number; w: number; h: number; regionId?: string };
 
 const engineMeta: Record<Engine, { name: string; short: string; color: string }> = {
   label: { name: '라벨 제거 · 복원', short: 'label_removal', color: '#7058e8' },
@@ -179,6 +183,8 @@ const HANDLE_OFFSET: Record<string, { x: number; y: number }> = {
 
 let annotationSeq = 0;
 const nextAnnotationId = () => `ann-${Date.now().toString(36)}-${++annotationSeq}`;
+let detailSeq = 0;
+const nextDetailId = () => `detail-${Date.now().toString(36)}-${++detailSeq}`;
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
@@ -199,7 +205,7 @@ function normalizeAnnotation(annotation: Annotation): Annotation {
   return { ...annotation, x: clamp(x, 0, 100 - w), y: clamp(y, 0, 100 - h), w, h };
 }
 
-function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void }) {
+function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange, detailMode, onDetailMode, labelAreaMode, onLabelAreaMode }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void; detailMode?: boolean; onDetailMode?: () => void; labelAreaMode?: 'hide' | 'show' | null; onLabelAreaMode?: (mode: 'hide' | 'show') => void }) {
   const tools: { id: AnnotationTool; icon: typeof Square; label: string }[] = [
     { id: 'select', icon: MousePointer2, label: '선택 · 이동' },
     { id: 'rect', icon: Square, label: '사각형 강조' },
@@ -217,6 +223,10 @@ function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selected
         aria-label={item.label} title={selectedColor ? `${withRo(item.label)} 변경` : '주석을 먼저 선택하세요'} />)}
     </div>
     <span className="annotation-toolbar__divider" />
+    {onDetailMode && <button type="button" className={detailMode ? 'active detail' : ''} onClick={onDetailMode} aria-pressed={detailMode} aria-label="Detail View 영역 만들기" title="Detail View 영역 만들기"><ZoomIn size={14} /></button>}
+    {onLabelAreaMode && <button type="button" className={labelAreaMode === 'hide' ? 'active hide-area' : ''} onClick={() => onLabelAreaMode('hide')} aria-pressed={labelAreaMode === 'hide'} aria-label="영역 내 라벨 숨기기" title="영역 내 라벨 숨기기"><EyeOff size={14} /></button>}
+    {onLabelAreaMode && <button type="button" className={labelAreaMode === 'show' ? 'active show-area' : ''} onClick={() => onLabelAreaMode('show')} aria-pressed={labelAreaMode === 'show'} aria-label="영역 내 라벨 보이기" title="영역 내 라벨 보이기"><Eye size={14} /></button>}
+    {onDetailMode && <span className="annotation-toolbar__divider" />}
     <button type="button" onClick={onClearAll} disabled={!hasAnnotations} aria-label="주석 전체 삭제" title="주석 전체 삭제"><Trash2 size={14} /></button>
   </div>;
 }
@@ -465,6 +475,161 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
   </div>;
 }
 
+const MIN_DETAIL_SIZE = 5;
+const MIN_LAYOUT_SIZE = 14;
+const SHEET_ASPECT = 1.414;
+
+function normalizeBox<T extends { x: number; y: number; w: number; h: number }>(box: T, minimum: number): T {
+  let { x, y, w, h } = box;
+  if (w < 0) { x += w; w = -w; }
+  if (h < 0) { y += h; h = -h; }
+  w = clamp(w, minimum, 100); h = clamp(h, minimum, 100);
+  x = clamp(x, 0, 100 - w); y = clamp(y, 0, 100 - h);
+  return { ...box, x, y, w, h };
+}
+
+function fitAspectSize(imageAspect: number, maxW: number, maxH: number) {
+  let w = maxW; let h = w * SHEET_ASPECT / imageAspect;
+  if (h > maxH) { h = maxH; w = h * imageAspect / SHEET_ASPECT; }
+  return { w, h };
+}
+
+function DetailRegionLayer({ regions, active, selectedId, onSelect, onCreate, onChange, onDelete }: { regions: DetailRegion[]; active: boolean; selectedId: string | null; onSelect: (id: string | null) => void; onCreate: (region: DetailRegion) => void; onChange: (region: DetailRegion) => void; onDelete: (id: string) => void }) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [draft, setDraftState] = useState<DetailRegion | null>(null);
+  const draftRef = useRef<DetailRegion | null>(null);
+  const opRef = useRef<{ mode: 'draw' | 'move' | 'resize'; startX: number; startY: number; origin: DetailRegion; handle?: string } | null>(null);
+  const setDraft = (value: DetailRegion | null) => { draftRef.current = value; setDraftState(value); };
+  const toPercent = (clientX: number, clientY: number) => {
+    const bounds = layerRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds.height) return { x: 0, y: 0 };
+    return { x: (clientX - bounds.left) / bounds.width * 100, y: (clientY - bounds.top) / bounds.height * 100 };
+  };
+  const beginDraw = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!active || event.button !== 0 || (event.target as Element).closest('.detail-region')) return;
+    event.preventDefault(); event.stopPropagation();
+    const start = toPercent(event.clientX, event.clientY);
+    const region: DetailRegion = { id: nextDetailId(), x: start.x, y: start.y, w: 0, h: 0, label: `DETAIL ${String.fromCharCode(65 + regions.length)}` };
+    opRef.current = { mode: 'draw', startX: start.x, startY: start.y, origin: region };
+    setDraft(region); capturePointer(event.currentTarget, event.pointerId);
+  };
+  const beginEdit = (event: React.PointerEvent<Element>, region: DetailRegion, mode: 'move' | 'resize', handle?: string) => {
+    if (active || event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation();
+    const start = toPercent(event.clientX, event.clientY);
+    opRef.current = { mode, startX: start.x, startY: start.y, origin: region, handle };
+    onSelect(region.id); setDraft(region); capturePointer(event.currentTarget, event.pointerId);
+  };
+  const handleMove = (event: React.PointerEvent<Element>) => {
+    const op = opRef.current;
+    if (!op) return;
+    const now = toPercent(event.clientX, event.clientY); const dx = now.x - op.startX; const dy = now.y - op.startY;
+    if (op.mode === 'draw') { setDraft({ ...op.origin, w: clamp(now.x, 0, 100) - op.origin.x, h: clamp(now.y, 0, 100) - op.origin.y }); return; }
+    if (op.mode === 'move') { setDraft({ ...op.origin, x: clamp(op.origin.x + dx, 0, 100 - op.origin.w), y: clamp(op.origin.y + dy, 0, 100 - op.origin.h) }); return; }
+    const handle = op.handle || 'se'; let { x, y, w, h } = op.origin;
+    if (handle.includes('n')) { y += dy; h -= dy; } if (handle.includes('s')) h += dy;
+    if (handle.includes('w')) { x += dx; w -= dx; } if (handle.includes('e')) w += dx;
+    setDraft({ ...op.origin, x, y, w, h });
+  };
+  const endOperation = (event: React.PointerEvent<Element>) => {
+    const op = opRef.current; const current = draftRef.current; opRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDraft(null); if (!op || !current) return;
+    const normalized = normalizeBox(op.mode === 'draw' && Math.abs(current.w) < MIN_DETAIL_SIZE && Math.abs(current.h) < MIN_DETAIL_SIZE ? { ...current, w: 18, h: 18 } : current, MIN_DETAIL_SIZE);
+    if (op.mode === 'draw') onCreate(normalized); else onChange(normalized);
+  };
+  const rendered = regions.map((region) => draft?.id === region.id ? draft : region);
+  const drawing = draft && !regions.some((region) => region.id === draft.id) ? draft : null;
+  return <div ref={layerRef} className={`detail-region-layer ${active ? 'detail-region-layer--active' : ''}`} onPointerDown={beginDraw} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}>
+    {[...rendered, ...(drawing ? [drawing] : [])].map((region) => {
+      const box = normalizeBox(region, draft?.id === region.id ? 0 : MIN_DETAIL_SIZE); const selected = selectedId === region.id && !active;
+      return <div key={region.id} className={`detail-region ${selected ? 'selected' : ''}`} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }} onPointerDown={(event) => beginEdit(event, region, 'move')} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}>
+        <span>{region.label}</span>
+        {selected && BOX_HANDLES.map((handle) => <i key={handle} className={`layout-resize-handle layout-resize-handle--${handle}`} style={{ left: `${HANDLE_OFFSET[handle].x * 100}%`, top: `${HANDLE_OFFSET[handle].y * 100}%` }} onPointerDown={(event) => beginEdit(event, region, 'resize', handle)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />)}
+        {selected && <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onDelete(region.id); }} aria-label={`${region.label} 삭제`}><X size={10} /></button>}
+      </div>;
+    })}
+  </div>;
+}
+
+function LabelAreaSelector({ mode, points, onApply, onComplete }: { mode: 'hide' | 'show' | null; points: PointResult[]; onApply: (ids: string[], mode: 'hide' | 'show') => void; onComplete: () => void }) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [draft, setDraftState] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const draftRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+  const startRef = useRef<{ x: number; y: number } | null>(null);
+  const setDraft = (next: { x: number; y: number; w: number; h: number } | null) => { draftRef.current = next; setDraftState(next); };
+  const toPercent = (clientX: number, clientY: number) => {
+    const bounds = layerRef.current?.getBoundingClientRect();
+    if (!bounds?.width || !bounds.height) return { x: 0, y: 0 };
+    return { x: clamp((clientX - bounds.left) / bounds.width * 100, 0, 100), y: clamp((clientY - bounds.top) / bounds.height * 100, 0, 100) };
+  };
+  const begin = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!mode || event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation(); const start = toPercent(event.clientX, event.clientY);
+    startRef.current = start; setDraft({ ...start, w: 0, h: 0 }); capturePointer(event.currentTarget, event.pointerId);
+  };
+  const move = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = startRef.current; if (!start) return; const now = toPercent(event.clientX, event.clientY);
+    setDraft({ ...start, w: now.x - start.x, h: now.y - start.y });
+  };
+  const end = (event: React.PointerEvent<HTMLDivElement>) => {
+    const current = draftRef.current; startRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDraft(null); if (!current) return;
+    const box = normalizeBox(current, 0);
+    if (mode && box.w >= 1 && box.h >= 1) onApply(points.filter((point) => point.x >= box.x && point.x <= box.x + box.w && point.y >= box.y && point.y <= box.y + box.h).map((point) => point.id), mode);
+    onComplete();
+  };
+  const box = draft ? normalizeBox(draft, 0) : null;
+  return <div ref={layerRef} className={`label-area-selector ${mode ? `active label-area-selector--${mode}` : ''}`} onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end}>
+    {box && <div className="label-area-selector__box" style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.w}%`, height: `${box.h}%` }}><span>라벨 {mode === 'show' ? '표시' : '숨김'} 영역</span></div>}
+  </div>;
+}
+
+function SheetLayoutFrame({ layout, imageAspect, selected, onSelect, onChange, onDelete, title, children }: { layout: SheetLayout; imageAspect: number; selected: boolean; onSelect: () => void; onChange: (layout: SheetLayout) => void; onDelete?: () => void; title: string; children: React.ReactNode }) {
+  const frameRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef<SheetLayout | null>(null);
+  const [draft, setDraftState] = useState<SheetLayout | null>(null);
+  const opRef = useRef<{ mode: 'move' | 'resize'; pointerId: number; clientX: number; clientY: number; origin: SheetLayout; handle?: string } | null>(null);
+  const setDraft = (value: SheetLayout | null) => { draftRef.current = value; setDraftState(value); };
+  const begin = (event: React.PointerEvent<Element>, mode: 'move' | 'resize', handle?: string) => {
+    if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); onSelect();
+    opRef.current = { mode, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, origin: layout, handle };
+    setDraft(layout); capturePointer(event.currentTarget, event.pointerId);
+  };
+  const move = (event: React.PointerEvent<Element>) => {
+    const op = opRef.current; const canvas = frameRef.current?.parentElement?.getBoundingClientRect(); if (!op || !canvas) return;
+    const dx = (event.clientX - op.clientX) / canvas.width * 100; const dy = (event.clientY - op.clientY) / canvas.height * 100;
+    if (op.mode === 'move') { setDraft({ ...op.origin, x: clamp(op.origin.x + dx, 0, 100 - op.origin.w), y: clamp(op.origin.y + dy, 0, 100 - op.origin.h) }); return; }
+    const handle = op.handle || 'se'; let { x, y, w, h } = op.origin;
+    const horizontal = handle.includes('e') || handle.includes('w');
+    const vertical = handle.includes('n') || handle.includes('s');
+    const rawW = handle.includes('w') ? op.origin.w - dx : handle.includes('e') ? op.origin.w + dx : op.origin.w;
+    const rawH = handle.includes('n') ? op.origin.h - dy : handle.includes('s') ? op.origin.h + dy : op.origin.h;
+    if (horizontal && (!vertical || Math.abs(dx) >= Math.abs(dy))) {
+      const sign = Math.sign(rawW || 1); const minW = Math.max(MIN_LAYOUT_SIZE, MIN_LAYOUT_SIZE * imageAspect / (canvas.width / canvas.height)); const maxW = Math.min(100, 100 * imageAspect / (canvas.width / canvas.height));
+      w = clamp(Math.abs(rawW), minW, maxW) * sign; h = Math.abs(w) * canvas.width / canvas.height / imageAspect * sign;
+    } else {
+      const sign = Math.sign(rawH || 1); const minH = Math.max(MIN_LAYOUT_SIZE, MIN_LAYOUT_SIZE * (canvas.width / canvas.height) / imageAspect); const maxH = Math.min(100, 100 * (canvas.width / canvas.height) / imageAspect);
+      h = clamp(Math.abs(rawH), minH, maxH) * sign; w = Math.abs(h) * canvas.height / canvas.width * imageAspect * sign;
+    }
+    if (handle.includes('w')) x = op.origin.x + op.origin.w - w;
+    if (handle.includes('n')) y = op.origin.y + op.origin.h - h;
+    setDraft({ ...op.origin, x, y, w, h });
+  };
+  const end = (event: React.PointerEvent<Element>) => {
+    const current = draftRef.current; opRef.current = null;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDraft(null); if (current) onChange(normalizeBox(current, MIN_LAYOUT_SIZE));
+  };
+  const shown = draft ? normalizeBox(draft, 0) : layout;
+  return <article ref={frameRef} className={`sheet-layout sheet-layout--${layout.kind} ${selected ? 'selected' : ''}`} style={{ left: `${shown.x}%`, top: `${shown.y}%`, width: `${shown.w}%`, height: `${shown.h}%` }} onPointerDown={onSelect}>
+    <div className="sheet-layout__bar" onPointerDown={(event) => begin(event, 'move')} onPointerMove={move} onPointerUp={end} onPointerCancel={end}><span>{title}</span><small>비율 고정 · 드래그 이동</small>{onDelete && <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onDelete(); }} aria-label={`${title} 삭제`}><X size={11} /></button>}</div>
+    <div className="sheet-layout__content">{children}</div>
+    {selected && BOX_HANDLES.map((handle) => <i key={handle} className={`layout-resize-handle layout-resize-handle--${handle}`} style={{ left: `${HANDLE_OFFSET[handle].x * 100}%`, top: `${HANDLE_OFFSET[handle].y * 100}%` }} onPointerDown={(event) => begin(event, 'resize', handle)} onPointerMove={move} onPointerUp={end} onPointerCancel={end} />)}
+  </article>;
+}
+
 function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void }) {
   const labelHeight = 17;
   const displayFor = (point: PointResult) => overrides?.[point.id] !== undefined ? overrides[point.id]! : -(point.value * coefficient);
@@ -474,6 +639,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   const dragRef = useRef<{ id: string; x: number; y: number; clientX: number; clientY: number; moved: boolean } | null>(null);
   const ignoreClickRef = useRef(false);
   const layoutKeyRef = useRef('');
+  const previousLayerSizeRef = useRef({ width: 0, height: 0 });
   const [layerSize, setLayerSize] = useState({ width: 0, height: 0 });
   const [labelPositions, setLabelPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -487,6 +653,13 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     observer.observe(layer);
     return () => observer.disconnect();
   }, []);
+  useEffect(() => {
+    const previous = previousLayerSizeRef.current;
+    if (previous.width > 0 && previous.height > 0 && (previous.width !== layerSize.width || previous.height !== layerSize.height)) {
+      setLabelPositions((current) => Object.fromEntries(Object.entries(current).map(([id, position]) => [id, { x: position.x * layerSize.width / previous.width, y: position.y * layerSize.height / previous.height }])));
+    }
+    previousLayerSizeRef.current = layerSize;
+  }, [layerSize]);
   useEffect(() => {
     if (!layerSize.width) return;
     const layoutKey = `${labelHeight}:${points.map((point) => `${point.id}:${formatCorrection(displayFor(point)).length}`).join('|')}`;
@@ -533,7 +706,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     drag.moved ||= Math.hypot(event.clientX - drag.clientX, event.clientY - drag.clientY) > 3;
     setLabelPositions((current) => ({ ...current, [drag.id]: {
       x: Math.max(-140, Math.min(layer.clientWidth + 62, movedX)),
-      y: Math.max(-8, Math.min(layer.clientHeight - 24, drag.y + (event.clientY - drag.clientY) / scale)),
+      y: Math.max(-96, Math.min(layer.clientHeight + 64, drag.y + (event.clientY - drag.clientY) / scale)),
     }}));
   };
   const endLabelDrag = (event: React.PointerEvent<HTMLSpanElement>) => {
@@ -603,6 +776,76 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   })}</div>;
 }
 
+function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void }) {
+  const sourceAspect = scan.result!.source.width / scan.result!.source.height;
+  const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
+  const [regions, setRegions] = useState<DetailRegion[]>([]);
+  const [layouts, setLayouts] = useState<SheetLayout[]>([{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }]);
+  const [hiddenDetailPointIds, setHiddenDetailPointIds] = useState<Record<string, Set<string>>>({});
+  const [selectedLayoutId, setSelectedLayoutId] = useState('front');
+  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const updateLayout = (next: SheetLayout) => setLayouts((current) => current.map((layout) => layout.id === next.id ? next : layout));
+  const createDetail = (region: DetailRegion) => {
+    const detailCount = layouts.filter((layout) => layout.kind === 'detail').length;
+    const detailAspect = region.w * scan.result!.source.width / (region.h * scan.result!.source.height);
+    const nextLayout: SheetLayout = { id: `layout-${region.id}`, kind: 'detail', regionId: region.id, x: 68, y: 7 + (detailCount % 3) * 29, ...fitAspectSize(detailAspect, 28, 25) };
+    setRegions((current) => [...current, region]); setLayouts((current) => [...current, nextLayout]);
+    setSelectedRegionId(region.id); setSelectedLayoutId(nextLayout.id); setDetailMode(false);
+  };
+  const deleteDetail = (regionId: string) => {
+    const targetLayout = layouts.find((layout) => layout.regionId === regionId);
+    setRegions((current) => current.filter((region) => region.id !== regionId));
+    setLayouts((current) => current.filter((layout) => layout.regionId !== regionId));
+    if (targetLayout) setHiddenDetailPointIds((current) => { const next = { ...current }; delete next[targetLayout.id]; return next; });
+    setSelectedRegionId(null); setSelectedLayoutId('front');
+  };
+  const selectedLayout = layouts.find((layout) => layout.id === selectedLayoutId) || layouts[0];
+  const aspectFor = (layout: SheetLayout) => {
+    const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
+    return region ? region.w * scan.result!.source.width / (region.h * scan.result!.source.height) : sourceAspect;
+  };
+  const setSelectedSize = (key: 'w' | 'h', value: number) => {
+    if (!selectedLayout) return;
+    const aspect = aspectFor(selectedLayout);
+    const minW = Math.max(MIN_LAYOUT_SIZE, MIN_LAYOUT_SIZE * aspect / SHEET_ASPECT); const maxW = Math.min(100, 100 * aspect / SHEET_ASPECT);
+    const minH = Math.max(MIN_LAYOUT_SIZE, MIN_LAYOUT_SIZE * SHEET_ASPECT / aspect); const maxH = Math.min(100, 100 * SHEET_ASPECT / aspect);
+    const w = key === 'w' ? clamp(value, minW, maxW) : clamp(value, minH, maxH) * aspect / SHEET_ASPECT;
+    const h = key === 'h' ? clamp(value, minH, maxH) : clamp(value, minW, maxW) * SHEET_ASPECT / aspect;
+    updateLayout(normalizeBox({ ...selectedLayout, w, h }, 0));
+  };
+  const updateDetailRegion = (next: DetailRegion) => {
+    setRegions((current) => current.map((item) => item.id === next.id ? next : item));
+    const nextAspect = next.w * scan.result!.source.width / (next.h * scan.result!.source.height);
+    setLayouts((current) => current.map((layout) => layout.regionId === next.id ? normalizeBox({ ...layout, ...fitAspectSize(nextAspect, layout.w, 100) }, 0) : layout));
+  };
+
+  return <div className={`sheet-canvas ${detailMode ? 'sheet-canvas--detail-mode' : ''}`} onPointerDown={(event) => { if (event.target === event.currentTarget) { setSelectedLayoutId(''); setSelectedRegionId(null); setSelectedAnnotationId(null); } }}>
+    <div className="sheet-canvas__meta"><b>A3 · FRONT VIEW</b><span>{scan.partNo} / REV.01</span></div>
+    {layouts.map((layout) => {
+      const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
+      if (layout.kind === 'detail' && !region) return null;
+      const title = layout.kind === 'front' ? '정면도 · FRONT VIEW' : region!.label;
+      const imageAspect = region ? region.w * scan.result!.source.width / (region.h * scan.result!.source.height) : sourceAspect;
+      const detailPoints = region ? points.filter((point) => point.x >= region.x && point.x <= region.x + region.w && point.y >= region.y && point.y <= region.y + region.h).map((point) => ({ ...point, x: (point.x - region.x) / region.w * 100, y: (point.y - region.y) / region.h * 100 })) : points;
+      const layoutVisiblePointIds = layout.kind === 'front' ? visiblePointIds : new Set(detailPoints.filter((point) => !hiddenDetailPointIds[layout.id]?.has(point.id)).map((point) => point.id));
+      const toggleLayoutPoint = layout.kind === 'front' ? onPointToggle : (id: string) => setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); if (hidden.has(id)) hidden.delete(id); else hidden.add(id); return { ...current, [layout.id]: hidden }; });
+      const applyAreaPoints = (ids: string[], mode: 'hide' | 'show') => {
+        if (layout.kind === 'front') ids.filter((id) => mode === 'hide' ? layoutVisiblePointIds.has(id) : !layoutVisiblePointIds.has(id)).forEach(onPointToggle);
+        else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
+      };
+      return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} /></div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}</div>
+          : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
+        <LabelAreaSelector mode={labelAreaMode} points={detailPoints} onApply={applyAreaPoints} onComplete={() => setLabelAreaMode(null)} />
+      </SheetLayoutFrame>;
+    })}
+    {showAnnotations && !detailMode && !labelAreaMode && <AnnotationLayer annotations={annotations} tool={annotationTool} setTool={setAnnotationTool} selectedId={selectedAnnotationId} onSelect={setSelectedAnnotationId} onCommit={onAnnotationCommit} onCreate={onAnnotationCreate} onDelete={onAnnotationDelete} />}
+    {detailMode && <div className="detail-mode-guide"><ZoomIn size={14} /><span>정면도 위에서 확대할 영역을 드래그하세요.</span><button type="button" onClick={() => setDetailMode(false)}>취소</button></div>}
+    {labelAreaMode && <div className={`detail-mode-guide label-area-guide label-area-guide--${labelAreaMode}`}>{labelAreaMode === 'hide' ? <EyeOff size={14} /> : <Eye size={14} />}<span>레이아웃 위에서 {labelAreaMode === 'hide' ? '숨길' : '표시할'} 라벨 영역을 드래그하세요.</span><button type="button" onClick={() => setLabelAreaMode(null)}>취소</button></div>}
+    {selectedLayout && <div className="layout-size-control" onPointerDown={(event) => event.stopPropagation()}><b>{selectedLayout.kind === 'front' ? '정면도' : regions.find((item) => item.id === selectedLayout.regionId)?.label} 크기 · 비율 고정</b><label>W <input type="range" min="5" max="100" value={selectedLayout.w} onChange={(event) => setSelectedSize('w', Number(event.target.value))} /><span>{Math.round(selectedLayout.w)}%</span></label><label>H <input type="range" min="5" max="100" value={selectedLayout.h} onChange={(event) => setSelectedSize('h', Number(event.target.value))} /><span>{Math.round(selectedLayout.h)}%</span></label></div>}
+  </div>;
+}
+
 function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: View; setView: (view: View) => void; collapsed: boolean; setCollapsed: (value: boolean) => void; hasResult: boolean }) {
   const items = [
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
@@ -645,7 +888,7 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
       try {
         const form = new FormData(); form.append('file', target.file, target.name);
         const response = await fetch(`${API_BASE}/api/analyze`, { method: 'POST', body: form });
-        const data = await response.json();
+        const data = await response.json() as AnalysisResult & { error?: string };
         if (!response.ok) throw new Error(data.error || '분석 중 오류가 발생했습니다.');
         setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'done', result: data } : scan));
       } catch (error) {
@@ -698,7 +941,7 @@ function FolderTreeNode({ entry, selectedPath, onOpen }: { entry: FolderEntry; s
   const [expanded, setExpanded] = useState(false); const [children, setChildren] = useState<FolderEntry[]>([]); const [loaded, setLoaded] = useState(false);
   const toggle = async () => {
     if (!loaded) {
-      const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(entry.path)}`); const data = await response.json();
+      const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(entry.path)}`); const data = await response.json() as FolderResponse;
       if (response.ok) { setChildren((data.entries || []).filter((item: FolderEntry) => item.isDirectory)); setLoaded(true); }
     }
     setExpanded((value) => !value); onOpen(entry.path);
@@ -709,20 +952,20 @@ function FolderTreeNode({ entry, selectedPath, onOpen }: { entry: FolderEntry; s
 function Explorer() {
   const [available, setAvailable] = useState<boolean | null>(null); const [rootName, setRootName] = useState('품번별 폴더'); const [rootEntries, setRootEntries] = useState<FolderEntry[]>([]); const [entries, setEntries] = useState<FolderEntry[]>([]); const [path, setPath] = useState(''); const [query, setQuery] = useState('');
   const openFolder = async (nextPath: string) => {
-    const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(nextPath)}`); const data = await response.json();
+    const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(nextPath)}`); const data = await response.json() as FolderResponse;
     if (!response.ok || data.available === false) { setAvailable(false); return; }
-    setAvailable(true); setRootName(data.rootName); setEntries(data.entries || []); setPath(data.path || '');
+    setAvailable(true); setRootName(data.rootName || '품번별 폴더'); setEntries(data.entries || []); setPath(data.path || '');
     if (!nextPath) setRootEntries((data.entries || []).filter((item: FolderEntry) => item.isDirectory));
   };
   useEffect(() => {
     let cancelled = false;
     fetch(`${API_BASE}/api/folders?path=`)
-      .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+      .then((response) => response.json().then((data) => ({ ok: response.ok, data: data as FolderResponse })))
       .then(({ ok, data }) => {
         if (cancelled) return;
         if (!ok || data.available === false) { setAvailable(false); return; }
         const nextEntries = data.entries || [];
-        setAvailable(true); setRootName(data.rootName); setEntries(nextEntries); setPath('');
+        setAvailable(true); setRootName(data.rootName || '품번별 폴더'); setEntries(nextEntries); setPath('');
         setRootEntries(nextEntries.filter((item: FolderEntry) => item.isDirectory));
       })
       .catch(() => { if (!cancelled) setAvailable(false); });
@@ -750,7 +993,7 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 
 function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void }) {
   const result = scan.result!; const points = result.points; const visiblePointIds = new Set(points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id)); const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
-  const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true);
+  const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   const createAnnotation = (annotation: Annotation) => setAnnotations((current) => [...current, annotation]);
   const commitAnnotation = (annotation: Annotation) => setAnnotations((current) => current.map((item) => item.id === annotation.id ? annotation : item));
   const deleteAnnotation = (id: string) => setAnnotations((current) => current.filter((item) => item.id !== id));
@@ -765,12 +1008,21 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [coefficient, points, pointOverrides]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
   const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
-  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div><SheetTitleBlock scan={scan} />{showAnnotations && <AnnotationToolbar tool={tool} setTool={(next) => { setTool(next); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} />}<div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showAnnotations && <AnnotationLayer annotations={annotations} tool={tool} setTool={setTool} selectedId={selectedAnnotationId} onSelect={setSelectedAnnotationId} onCommit={commitAnnotation} onCreate={createAnnotation} onDelete={deleteAnnotation} />}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}</section>;
+  return <section className="page page--service">
+    <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
+    <div className="service-grid"><div className="correction-card card">
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <SheetTitleBlock scan={scan} />
+      <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setTool('select'); setSelectedAnnotationId(null); }} />
+      <div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={points} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div>
+      <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span></div>
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
+  </section>;
 }
 
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({});
-  useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json()).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
+  useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
