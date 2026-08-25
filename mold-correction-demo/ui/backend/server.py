@@ -543,7 +543,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             # 실측 커버리지가 각각 19.8%/42.4%였고 존으로 내면
             # 5.6%/18.6%로 좋아진다(zero_points.py 문서 참고).
             zero_point_clusters = expand_clusters_to_zones(
-                zero_point_clusters, loop_paths=loop_paths)
+                zero_point_clusters, loop_paths=loop_paths,
+                part_mask=zero_output.part_mask if zero_output is not None else None)
     except Exception as exc:
         errors["zeroPoints"] = str(exc)
 

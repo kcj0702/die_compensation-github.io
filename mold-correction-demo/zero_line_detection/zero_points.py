@@ -219,6 +219,8 @@ def build_zone_outline(
     margin: float,
     thickness: int,
     fallback_xy=None,
+    snap_mask=None,
+    snap_boundary=None,
 ):
     """윤곽선 [start-margin, end+margin] 구간을 두껍게 부풀려 존 폴리곤을 만든다.
 
@@ -226,11 +228,17 @@ def build_zone_outline(
     그래야 보정시트처럼 부품 테두리를 감싸는 모양이 나온다. 점을
     부풀리면 엉뚱한 자리에 타원 얼룩이 생긴다(실측으로 확인).
 
+    snap_mask 를 주면 부품 밖으로 나간 구간을 테두리로 당겨 붙인다
+    (snap_segment_to_mask 참고).
+
     path 가 없으면 fallback_xy 의 볼록껍질로 대체한다.
     """
+    outline = None
     if path is not None and len(path) >= 2:
         segment = _contour_segment(
             path, start_position, end_position, margin=margin)
+        if snap_mask is not None:
+            segment = snap_segment_to_mask(segment, snap_mask, snap_boundary)
         if len(segment) >= 2:
             pad = thickness + 4
             x0 = int(segment[:, 0].min()) - pad
@@ -246,11 +254,55 @@ def build_zone_outline(
             found, _ = cv2.findContours(
                 band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             if found:
-                return max(found, key=cv2.contourArea).reshape(-1, 2) + [x0, y0]
-    if fallback_xy is not None and len(fallback_xy) > 0:
-        return cv2.convexHull(
+                outline = max(found, key=cv2.contourArea).reshape(-1, 2) + [x0, y0]
+    if outline is None and fallback_xy is not None and len(fallback_xy) > 0:
+        outline = cv2.convexHull(
             np.asarray(fallback_xy, np.float32).reshape(-1, 1, 2)).reshape(-1, 2)
-    return None
+    return outline
+
+
+def mask_boundary_points(mask) -> np.ndarray:
+    """부품 마스크의 테두리 픽셀 좌표. 면을 부품에 붙일 때 쓴다."""
+    binary = (np.asarray(mask) > 0).astype(np.uint8)
+    found, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    if not found:
+        return np.empty((0, 2), dtype=np.float32)
+    return np.vstack([c.reshape(-1, 2) for c in found]).astype(np.float32)
+
+
+def snap_segment_to_mask(segment, mask, boundary=None) -> np.ndarray:
+    """윤곽선 구간에서 부품 밖으로 나간 점을 가장 가까운 테두리로 당긴다.
+
+    [왜 필요한가]
+    실측(JD_64XX2): my_lab 의 connection_path 가 부품 아래쪽에서 최대
+    y=539 까지 처지는데 부품은 y=513 에서 끝난다. 그대로 띠를 그리면
+    측정점이 실제로는 테두리 위(y≈507)에 있는데도 흰 배경에 면이
+    둥둥 떠 보였다("빨간 면이 부품 밖에 있다"는 피드백).
+
+    안에 있는 점은 그대로 두고, 밖에 있는 점만 당긴다 — 부품 안쪽을
+    지나는 구간의 모양은 건드리지 않는다.
+    """
+    segment = np.asarray(segment, dtype=np.float32)
+    if segment.size == 0:
+        return segment
+    binary = np.asarray(mask) > 0
+    height, width = binary.shape[:2]
+    xs = np.clip(segment[:, 0].round().astype(int), 0, width - 1)
+    ys = np.clip(segment[:, 1].round().astype(int), 0, height - 1)
+    outside = ~binary[ys, xs]
+    if not outside.any():
+        return segment
+    if boundary is None:
+        boundary = mask_boundary_points(binary)
+    if len(boundary) == 0:
+        return segment
+    snapped = segment.copy()
+    targets = segment[outside]
+    # 점 수십 개 x 테두리 수천 개라 브로드캐스팅으로 충분히 빠르다
+    d2 = ((boundary[None, :, 0] - targets[:, None, 0]) ** 2
+          + (boundary[None, :, 1] - targets[:, None, 1]) ** 2)
+    snapped[outside] = boundary[np.argmin(d2, axis=1)]
+    return snapped
 
 
 def _rank_key(cluster: "ZeroCluster") -> tuple:
@@ -407,6 +459,7 @@ def expand_clusters_to_zones(
     loop_paths: dict | None = None,
     point_margin_px: float = 70.0,
     zone_thickness: int = 20,
+    part_mask=None,
 ) -> list:
     """모든 군집을 존(면)으로 만든다 — 단독 점도 윤곽선 구간으로 넓힌다.
 
@@ -447,7 +500,12 @@ def expand_clusters_to_zones(
     Args:
         point_margin_px: 단독 점을 존으로 넓힐 때 윤곽선 앞뒤 여유(px).
         zone_thickness: 윤곽선 구간을 부풀릴 두께(px).
+        part_mask: 주면 부품 밖으로 나간 구간을 테두리로 당겨 붙인다 —
+            my_lab 윤곽선이 부품 아래로 처지는 구간이 있어 그대로 두면
+            면이 흰 배경에 떠 보인다(snap_segment_to_mask 참고).
     """
+    # 테두리는 한 번만 뽑아 모든 면에서 재사용한다(면마다 다시 뽑으면 느리다)
+    boundary = mask_boundary_points(part_mask) if part_mask is not None else None
     expanded: list = []
     for cluster in clusters:
         path = (loop_paths or {}).get(cluster.loop)
@@ -464,6 +522,7 @@ def expand_clusters_to_zones(
         outline = build_zone_outline(
             path, start, end, margin=0.0, thickness=zone_thickness,
             fallback_xy=np.asarray(cluster.members, dtype=np.float32),
+            snap_mask=part_mask, snap_boundary=boundary,
         )
         if outline is None:
             expanded.append(cluster)
