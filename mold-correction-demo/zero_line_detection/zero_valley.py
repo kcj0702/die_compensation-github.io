@@ -56,7 +56,8 @@ class ZeroValleyLine:
         return asdict(self)
 
 
-def _build_graph(values: np.ndarray, part_mask: np.ndarray, smooth_sigma: float):
+def _build_graph(values: np.ndarray, part_mask: np.ndarray, smooth_sigma: float,
+                 length_cost: float = 0.02):
     vs = cv2.GaussianBlur(values, (0, 0), smooth_sigma)
     absv = np.abs(vs)
     h, w = values.shape
@@ -66,7 +67,11 @@ def _build_graph(values: np.ndarray, part_mask: np.ndarray, smooth_sigma: float)
     n = len(ys)
     cost = absv[ys, xs].astype(np.float64)
 
-    eps = 0.02  # 픽셀 길이 자체에 대한 최소 비용 (같은 |편차| 면 더 짧은 경로 선호)
+    # 픽셀 한 걸음의 고정 비용. |편차|(보통 0.2~1.5mm)에 비해 너무 작으면
+    # "편차 낮은 곳으로 한참 돌아가는" 경로가 싸게 먹혀서, 정답선이 개구부
+    # 사이를 곧장 가로지르는데 우리 선은 부품 가장자리를 크게 우회했다
+    # (JD_64XX2 실측). 이 값을 올리면 곧게 가고 선도 덜 흐물거린다.
+    eps = float(length_cost)
     rows, cols, data = [], [], []
     for dy, dx in [(0, 1), (1, 0), (1, 1), (1, -1)]:
         ny, nx = ys + dy, xs + dx
@@ -225,7 +230,8 @@ def find_valley_lines(
     min_length_px: float = 150.0,
     max_uses_per_anchor: int = 2,
     smooth_sigma: float = 15.0,
-    simplify_eps: float = 2.0,
+    simplify_eps: float = 12.0,
+    length_cost: float = 0.02,
 ) -> list:
     """앵커들 사이를 |편차|가 낮은 경로(다익스트라 최단경로)로 잇는다.
 
@@ -237,11 +243,20 @@ def find_valley_lines(
         max_uses_per_anchor: 한 앵커가 몇 개의 선에 양 끝으로 쓰일 수
             있는지 (조합 폭증 방지 — 앵커 하나는 보통 이웃 앵커 2개와만
             이어진다).
+        length_cost: 픽셀 한 걸음의 고정 비용. 올리면 경로가 곧아지지만
+            정확도는 나빠진다 — 실측(JD_64XX2)으로 0.08 이상에서
+            정답->선 3.46% -> 12.54% 로 악화돼 0.02 를 유지한다.
+            "곧은 선"은 simplify_eps 로 얻는 게 맞다.
+        simplify_eps: 결과 폴리라인 단순화 강도(px). 클수록 꺾인 점이
+            줄어 시트처럼 깔끔한 직선에 가까워진다. 실측: 2.0 -> 12.0 에서
+            꼭짓점이 53->19(64XX2), 68->17(67XX6)로 줄었는데 정확도는
+            그대로거나 오히려 소폭 좋아졌다.
     """
     if len(anchors) < 2:
         return []
 
-    graph, idx, xs, ys, vs = _build_graph(values, part_mask, smooth_sigma)
+    graph, idx, xs, ys, vs = _build_graph(
+        values, part_mask, smooth_sigma, length_cost)
 
     candidates = []
     n_anchors = len(anchors)
