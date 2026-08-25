@@ -20,7 +20,8 @@ import cv2
 import numpy as np
 
 from zero_line_detection.sheet_reference import (
-    extract_sheet_zero_areas, extract_sheet_zero_line, save_to_library,
+    MIN_ASPECT_AGREEMENT, extract_sheet_zero_areas, extract_sheet_zero_line,
+    save_to_library,
 )
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
@@ -71,10 +72,24 @@ def main() -> int:
         )
         kind = "areas"
         detail = f"존 {len(reference.contours)}개"
+
+    # 시트 패널을 잘못 골랐으면(확대도를 부품 전체로 착각) 좌표가 통째로
+    # 어긋난다. 조용히 저장하면 그 뒤 평가·학습이 전부 오염되므로 막는다.
+    # 실측(JD_71XX2): 다중 뷰 시트의 확대 패널을 골라 정답 존 5개 중 3개가
+    # 부품 바깥으로 나갔는데도 아무 경고 없이 등록됐었다.
+    if not reference.reliable:
+        print(f"[거부] 품번 {part_no}: 시트 패널과 스캔 부품의 종횡비가 "
+              f"맞지 않습니다 (일치도 {reference.aspect_agreement:.2f} < "
+              f"{MIN_ASPECT_AGREEMENT})")
+        print("  확대도(부분 뷰)를 부품 전체로 착각했을 가능성이 큽니다 —")
+        print("  다중 뷰 시트는 아직 지원하지 않습니다. 등록하지 않았습니다.")
+        return 1
+
     save_to_library(args.library, reference, kind=kind)
 
     print(f"[등록] 품번 {part_no} ({kind})")
     print(f"  {detail}, 좌우반전 {reference.mirrored}")
+    print(f"  종횡비 일치도 {reference.aspect_agreement:.2f}")
     print(f"  시트 {args.sheet.name}")
     print(f"  저장 {args.library}")
     return 0

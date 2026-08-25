@@ -50,13 +50,21 @@ def find_key_points_json(part_key: str):
     return None
 
 
-def truth_points(sheet_path, part_mask, part_no, values):
+def truth_reference(sheet_path, part_mask, part_no, values):
+    """시트에서 정답을 읽어 (좌표, 종류, 신뢰가능여부) 로 준다."""
     try:
         ref = extract_sheet_zero_line(sheet_path, part_mask, part_no, values=values)
-        return np.array(ref.points, dtype=float), "line"
+        return np.array(ref.points, dtype=float), "line", ref
     except ValueError:
         ref = extract_sheet_zero_areas(sheet_path, part_mask, part_no, values=values)
-        return np.vstack([np.array(c, dtype=float) for c in ref.contours]), "areas"
+        return (np.vstack([np.array(c, dtype=float) for c in ref.contours]),
+                "areas", ref)
+
+
+def truth_points(sheet_path, part_mask, part_no, values):
+    """예전 호출부 호환용 — (좌표, 종류) 만 준다."""
+    xy, kind, _ref = truth_reference(sheet_path, part_mask, part_no, values)
+    return xy, kind
 
 
 def find_loop_paths(part_key: str) -> dict:
@@ -92,8 +100,11 @@ def evaluate_case(
     values, part_mask = output.values, output.part_mask
     diag = float(np.hypot(*values.shape[::-1]))
 
-    truth, truth_kind = truth_points(sheet_path, part_mask, case.part_no, values)
+    truth, truth_kind, ref = truth_reference(
+        sheet_path, part_mask, case.part_no, values)
     result["truth_kind"] = truth_kind
+    result["truth_reliable"] = bool(ref.reliable)
+    result["aspect_agreement"] = ref.aspect_agreement
 
     candidates = load_zero_points(points_path)
     result["n_candidates_before_key_filter"] = len(candidates)
@@ -141,10 +152,12 @@ def _print_table(rows: list) -> None:
                   f"{r.get('status', '?'):10s}")
             continue
         ep = "/".join(f"{v:.1f}" for v in r["endpoint_dist_pct"])
+        # 정답 자체를 못 믿는 부품은 수치를 그대로 보여주면 오해를 부른다.
+        note = "" if r.get("truth_reliable", True) else "  <- 정답 무효(확대도 오인)"
         print(f"{r['part_no']:8s} {r['truth_kind']:6s} {r['n_candidates']:4d} "
               f"{r['n_clusters']:4d} {'ok':10s} "
               f"{r['pred_to_truth_median_pct']:9.2f} "
-              f"{r['truth_to_pred_median_pct']:9.2f} {ep:>16s}")
+              f"{r['truth_to_pred_median_pct']:9.2f} {ep:>16s}{note}")
 
 
 def main() -> int:

@@ -35,6 +35,28 @@ import cv2
 import numpy as np
 
 
+# 시트 패널과 스캔 부품의 종횡비가 이만큼은 맞아야 같은 그림으로 본다.
+# 실측(2026-08-25): 64XX2=0.92, 67XX6=0.93 은 정상이고 71XX2=0.41 은
+# 다중 뷰 시트라 확대 패널을 골라서 생긴 값이다 — 0.7 이면 깔끔히 갈린다.
+MIN_ASPECT_AGREEMENT = 0.7
+
+
+def aspect_agreement(sheet_bbox: list, scan_bbox: list) -> float:
+    """시트 패널과 스캔 부품의 종횡비가 얼마나 맞는지 (1.0 이 완전 일치).
+
+    시트에서 부품 전체를 보여주는 패널이라면 스캔 부품과 종횡비가
+    비슷해야 한다. 크게 다르면 **확대도(부분 뷰)를 부품 전체로 착각한
+    것**이라 bbox 선형 변환 결과를 믿으면 안 된다.
+    """
+    sx0, sy0, sx1, sy1 = sheet_bbox
+    kx0, ky0, kx1, ky1 = scan_bbox
+    sheet_ar = (sx1 - sx0) / max(sy1 - sy0, 1)
+    scan_ar = (kx1 - kx0) / max(ky1 - ky0, 1)
+    if sheet_ar <= 0 or scan_ar <= 0:
+        return 0.0
+    return float(min(sheet_ar, scan_ar) / max(sheet_ar, scan_ar))
+
+
 @dataclass
 class SheetZeroLine:
     """보정시트에서 읽어 스캔 좌표로 옮긴 제로라인."""
@@ -46,6 +68,13 @@ class SheetZeroLine:
     scan_bbox: list           # 스캔에서 부품이 차지한 영역
     n_raw_pixels: int
     mirrored: bool = False    # 시트 그림이 스캔과 좌우반전이었는지
+    # 시트 패널 종횡비가 스캔 부품과 얼마나 맞는지. MIN_ASPECT_AGREEMENT
+    # 미만이면 확대도를 잘못 고른 것이라 좌표를 믿으면 안 된다.
+    aspect_agreement: float = 1.0
+
+    @property
+    def reliable(self) -> bool:
+        return self.aspect_agreement >= MIN_ASPECT_AGREEMENT
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -284,6 +313,8 @@ def extract_sheet_zero_line(
         scan_bbox=[kx0, ky0, kx1, ky1],
         n_raw_pixels=int(mask.sum()),
         mirrored=bool(mirrored),
+        aspect_agreement=round(aspect_agreement(
+            [int(sx0), int(sy0), int(sx1), int(sy1)], [kx0, ky0, kx1, ky1]), 3),
     )
 
 
@@ -302,6 +333,12 @@ class SheetZeroAreas:
     sheet_bbox: list
     scan_bbox: list
     mirrored: bool = False
+    # 시트 패널 종횡비가 스캔 부품과 얼마나 맞는지 (SheetZeroLine 참고)
+    aspect_agreement: float = 1.0
+
+    @property
+    def reliable(self) -> bool:
+        return self.aspect_agreement >= MIN_ASPECT_AGREEMENT
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -402,6 +439,8 @@ def extract_sheet_zero_areas(
         sheet_bbox=[int(v) for v in panel],
         scan_bbox=[kx0, ky0, kx1, ky1],
         mirrored=bool(mirrored),
+        aspect_agreement=round(aspect_agreement(
+            [int(v) for v in panel], [kx0, ky0, kx1, ky1]), 3),
     )
 
 def check_pairing(sheet_values: list, scan_values: list) -> dict:
