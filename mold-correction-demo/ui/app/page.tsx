@@ -269,8 +269,17 @@ function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { ancho
 
 function ValleyLineOverlay({ lines, width, height }: { lines: ValleyLine[]; width: number; height: number }) {
   if (!lines.length) return null;
+  const strokeWidth = Math.max(width, height) * 0.0026;
   return <svg className="valley-line-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
-    {lines.map((line) => <polyline key={line.id} points={line.points.map(([x, y]) => `${x},${y}`).join(' ')} fill="none" stroke="#e0303f" strokeWidth={Math.max(width, height) * 0.0026} strokeLinecap="round" strokeLinejoin="round" />)}
+    {lines.map((line) => {
+      // sheet-reference-* 는 정답지 비교용 오버레이라 실제 검출선과
+      // 헷갈리지 않도록 파란 점선으로 따로 그린다.
+      const isSheetCompare = line.id.startsWith('sheet-reference');
+      return <polyline key={line.id} points={line.points.map(([x, y]) => `${x},${y}`).join(' ')} fill="none"
+        stroke={isSheetCompare ? '#2563eb' : '#e0303f'} strokeWidth={strokeWidth}
+        strokeDasharray={isSheetCompare ? `${strokeWidth * 2.5} ${strokeWidth * 2}` : undefined}
+        strokeLinecap="round" strokeLinejoin="round" />;
+    })}
   </svg>;
 }
 
@@ -407,15 +416,15 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
         <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개</span></div>
-        {result.advanceLine && (
+        {result.labelZeroLine && valleyLines.some((line) => line.id === 'label-zero-line') && (
+          <p className="anchor-panel__status">작업자가 실측한 라벨값이 부호를 바꾸는 지점(0포인트)들을 윤곽선을 따라 이어 검출한 선입니다. 정답지를 베낀 게 아니라 스캔 실측값에서 계산했습니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
+        )}
+        {!result.labelZeroLine && result.advanceLine && (
           result.advanceLine.confidence === 'high'
             ? <p className="anchor-panel__status">AI가 "0.0" 표시점 기준으로 자동 제안한 선입니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
             : <p className="anchor-panel__status anchor-panel__status--error">AI 추천선의 신뢰도가 낮습니다{result.advanceLine.warnings[0] ? `: ${result.advanceLine.warnings[0]}` : ''}. 아래에서 AI 추천선을 지우고 앵커 2개를 직접 골라 이으세요.</p>
         )}
-        {result.referenceLine && <p className="anchor-panel__status">
-          품번 {result.referenceLine.partNo} 의 보정시트({result.referenceLine.sourceSheet})에 표기된 제로{result.referenceLine.kind === 'areas' ? `존 ${result.referenceLine.contours.length}개` : '라인'}을 그대로 불러왔습니다{result.referenceLine.mirrored ? ' (시트 그림이 좌우반전이라 뒤집어 맞춤)' : ''}. 추론이 아니라 정답지 그대로입니다.
-        </p>}
-        {!result.referenceLine && (result.zeroLineCandidates || []).length > 0 && <div className="candidate-list">
+        {!result.labelZeroLine && !result.advanceLine && (result.zeroLineCandidates || []).length > 0 && <div className="candidate-list">
           <p className="anchor-panel__hint">AI가 모든 앵커 조합을 &quot;부품을 실제로 둘로 가르는 정도&quot;로 채점해 상위 {result.zeroLineCandidates.length}개를 추렸습니다. 1등을 기본으로 그렸으니, 실제와 다르면 아래에서 다른 후보를 눌러 바꾸세요. (실측 검증: 정답이 이 목록 안에는 들어오지만 1등은 아닐 수 있습니다.)</p>
           {result.zeroLineCandidates.map((cand) => {
             const active = valleyLines.some((line) => line.id === `cand-${cand.rank}`);
@@ -431,13 +440,29 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
             </button>;
           })}
         </div>}
+        {result.referenceLine && (() => {
+          const ref = result.referenceLine;
+          const showing = valleyLines.some((line) => line.id.startsWith('sheet-reference'));
+          return <div className="anchor-panel__compare">
+            <p className="anchor-panel__hint">
+              품번 {ref.partNo} 의 보정시트({ref.sourceSheet})에 표기된 제로{ref.kind === 'areas' ? `존 ${ref.contours.length}개` : '라인'}을 정답 비교용으로 참고할 수 있습니다{ref.mirrored ? ' (시트 그림이 좌우반전이라 뒤집어 맞춤)' : ''}. 위 검출선은 이 시트를 베낀 게 아니라 실측값에서 별도로 계산한 결과입니다.
+            </p>
+            <button type="button" className={`text-button ${showing ? 'candidate-chip--active' : ''}`} onClick={() => setValleyLines((current) => {
+              if (showing) return current.filter((line) => !line.id.startsWith('sheet-reference'));
+              const extra: ValleyLine[] = ref.kind === 'areas'
+                ? ref.contours.map((contour, i) => ({ id: `sheet-reference-${i}`, anchorStartId: null, anchorEndId: null, points: contour, length_px: 0, mean_abs_deviation: 0, source: 'ai' as const }))
+                : [{ id: 'sheet-reference-0', anchorStartId: null, anchorEndId: null, points: ref.points, length_px: 0, mean_abs_deviation: 0, source: 'ai' as const }];
+              return [...current, ...extra];
+            })}>{showing ? '정답지 비교선(파란 점선) 숨기기' : '정답지 비교선(파란 점선) 보기'}</button>
+          </div>;
+        })()}
         <p className="anchor-panel__hint">{zeroAnchors[0]?.source === 'label_zero_point'
           ? '초록 점은 작업자가 측정한 라벨값에서 부호가 바뀌는 지점(0포인트)입니다. 2개를 순서대로 클릭하면 그 사이를 편차가 낮은 경로로 잇습니다.'
           : '목록에 정답이 없으면, 이미지 위 초록 점(앵커) 2개를 순서대로 클릭해 직접 이으세요 (경로 정확도 검증: 대각선 대비 오차 약 3.68%).'}</p>
         {selectedAnchors.length > 0 && valleyStatus !== 'error' && <p className="anchor-panel__status">선택됨: {selectedAnchors.join(', ')} {valleyStatus === 'loading' && '· 잇는 중…'}</p>}
         {valleyStatus === 'error' && valleyError && <p className="anchor-panel__status anchor-panel__status--error">{valleyError}</p>}
         {valleyLines.map((line) => <div className="point-list-row" key={line.id}>
-          <span>{line.source === 'ai' ? 'AI 추천' : `${line.anchorStartId}↔${line.anchorEndId}`}</span>
+          <span>{line.id === 'label-zero-line' ? '라벨 검출' : line.id.startsWith('cand-') ? 'AI 후보' : line.id === 'ai-suggestion' ? 'AI 추천' : line.id.startsWith('sheet-reference') ? '정답지 비교' : line.source === 'ai' ? 'AI 추천' : `${line.anchorStartId}↔${line.anchorEndId}`}</span>
           <b className="positive">{line.source === 'ai' ? `점 ${line.points.length}개` : `${Math.round(line.length_px)}px`}</b>
           <small>{line.source === 'ai' ? '' : `평균|편차| ${line.mean_abs_deviation.toFixed(3)}`}</small>
           <button type="button" className="label-visibility" onClick={() => setValleyLines((current) => current.filter((item) => item.id !== line.id))} aria-label="이 선 지우기" title="이 선 지우기"><X size={14} /></button>
@@ -518,29 +543,14 @@ export default function Home() {
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
-  // 스캔이 새로 분석되면 AI 추천선(advanceLine)으로 제로라인을 미리 채워둔다.
-  // 사람이 직접 앵커를 이어야만 선이 생기는 게 아니라, AI가 먼저 만든 걸
-  // 보여주고 필요하면 지우거나 더하는 방향(회의록 "AI 제안 → 작업자 수정").
+  // 스캔이 새로 분석되면 제로라인을 미리 채워둔다. 우선순위는 "실제
+  // 검출"이 먼저다 — referenceLine(보정시트에서 그대로 베낀 것)은 정답
+  // 카피일 뿐 검출이 아니라서 기본 화면에 자동으로 깔지 않는다. 전에는
+  // referenceLine 이 먼저 낚아채서, 오늘 새로 만든 라벨 0포인트 기반
+  // 검출(labelZeroLine)이 있어도 화면엔 항상 시트 카피만 보이는 버그가
+  // 있었다 — 등록된 품번(64XX2, 67XX6)마다 "바뀐 게 없다"고 느껴진 이유.
   useEffect(() => {
     if (!completedScan || valleyLinesByScan[completedScan.id] !== undefined) return;
-    const reference = completedScan.result?.referenceLine;
-    if (reference) {
-      // 선이면 폴리라인 하나, 면이면 존마다 닫힌 폴리곤 하나씩 그린다.
-      const shapes: ValleyLine[] = reference.kind === 'areas'
-        ? (reference.contours || []).map((contour, index) => ({
-            id: `sheet-zone-${index}`, anchorStartId: null, anchorEndId: null,
-            points: [...contour, contour[0]] as [number, number][],
-            length_px: 0, mean_abs_deviation: 0, source: 'ai' as const,
-          }))
-        : (reference.points || []).length >= 2
-          ? [{ id: 'sheet-reference', anchorStartId: null, anchorEndId: null,
-               points: reference.points, length_px: 0, mean_abs_deviation: 0, source: 'ai' as const }]
-          : [];
-      if (shapes.length) {
-        setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: shapes }));
-        return;
-      }
-    }
     const labelLine = completedScan.result?.labelZeroLine;
     if (labelLine && labelLine.points.length >= 2) {
       setValleyLinesByScan((current) => ({ ...current, [completedScan.id]: [{
