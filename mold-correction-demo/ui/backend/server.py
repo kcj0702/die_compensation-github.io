@@ -63,7 +63,8 @@ from zero_line_advance.advance import (  # noqa: E402
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
-    filter_to_key_points, load_loop_paths, load_zero_points, snap_into_mask,
+    filter_to_key_points, load_key_scores, load_loop_paths, load_zero_points,
+    snap_into_mask,
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
@@ -514,19 +515,22 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                     if candidate.is_file():
                         loop_paths = load_loop_paths(candidate)
                     break
-            # 현업 제공 key_zero_point_engine(2026-08-25)이 있으면 후보를
-            # 한 번 더 거른다 — 컬러바 HSV로 후보 주변 실제 편차를 다시
-            # 재보고, 부호전환은 있었지만 실제로는 편차가 큰(노이즈) 후보를
-            # 뺀다. evaluate_pipeline.py로 확인: 최종 선의 정확도는 그대로
-            # 유지되면서(3부품 전부 동일) 후보/군집 수만 줄어든다 —
-            # "0포인트가 너무 많이 찍힌다"던 현업 지적을 화면에서 줄인다.
+            # 현업 제공 key_zero_point_engine(2026-08-25)을 두 군데에 쓴다.
+            #  1) 필터 — 0포인트 후보 중 "주요 0포인트"(K1..Kn)만 남긴다.
+            #  2) 순위 — 그 주요 점들 중 어느 둘을 제로라인 끝점으로 삼을지
+            #     엔진이 잰 컬러바 실측 |편차|(mean_abs_deviation_mm)로 고른다.
+            # 전에는 1)만 쓰고 끝점은 우리 strength(라벨 부호전환 크기)로
+            # 골랐는데, 그건 엔진이 실제로 잰 값을 버리는 셈이었다.
+            key_scores = None
             for key_folder in KEY_ZERO_POINTS_DIR.glob("*"):
                 if part_key in key_folder.name.upper():
                     key_json = key_folder / "key_zero_points.json"
                     if key_json.is_file():
                         raw_points = filter_to_key_points(raw_points, key_json)
+                        key_scores = load_key_scores(key_json)
                     break
-            zero_point_clusters = cluster_zero_points(raw_points, loop_paths=loop_paths)
+            zero_point_clusters = cluster_zero_points(
+                raw_points, loop_paths=loop_paths, key_scores=key_scores)
             if zero_output is not None and zero_point_clusters:
                 line = connect_strongest_pair(
                     zero_point_clusters,
