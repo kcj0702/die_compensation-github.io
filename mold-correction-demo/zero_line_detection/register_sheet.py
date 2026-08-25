@@ -51,6 +51,10 @@ def main() -> int:
     parser.add_argument("--vmin", type=float)
     parser.add_argument("--vmax", type=float)
     parser.add_argument("--library", type=Path, default=LIBRARY_PATH)
+    parser.add_argument(
+        "--confirm-areas", action="store_true",
+        help="살몬색 영역이 공정 구역이 아니라 정말 제로존임을 확인했을 때 붙인다",
+    )
     args = parser.parse_args()
 
     scan = read_bgr(args.scan)
@@ -84,6 +88,19 @@ def main() -> int:
         print("  확대도(부분 뷰)를 부품 전체로 착각했을 가능성이 큽니다 —")
         print("  다중 뷰 시트는 아직 지원하지 않습니다. 등록하지 않았습니다.")
         return 1
+
+    if kind == "areas" and not args.confirm_areas:
+        # 살몬/분홍 영역이 항상 제로존인 건 아니다. JD_67XX6 은 범례에
+        # `"0" 라인 = 빨간 점선 + 살몬 채움` 이라고 명시해서 맞지만,
+        # JD_71XX2 는 같은 색으로 **공정 구역**을 칠하고 "①: 하형 용접",
+        # "②: 상형 심고음" 이라고 적어놨다 — 그걸 제로존으로 등록하면
+        # 완전히 틀린 정답이 된다(실측으로 확인).
+        print(f"[확인 필요] 품번 {part_no}: 살몬색 영역 {len(reference.contours)}개를 "
+              f"제로존으로 읽었습니다.")
+        print("  이 색이 시트에서 정말 '0' 표기인지 확인하세요 —")
+        print("  공정 구역(예: \"①: 하형 용접\")을 같은 색으로 칠한 시트도 있습니다.")
+        print("  맞으면 --confirm-areas 를 붙여 다시 실행하세요.")
+        return 2
 
     save_to_library(args.library, reference, kind=kind)
 
