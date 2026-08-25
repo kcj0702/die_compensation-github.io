@@ -1017,7 +1017,15 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       form.append('x', String(xNorm));
       form.append('y', String(yNorm));
       const response = await fetch(`${API_BASE}/api/sample`, { method: 'POST', body: form });
-      const data = await response.json() as { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
+      const body = await response.text();
+      let data: { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
+      try {
+        data = JSON.parse(body) as typeof data;
+      } catch {
+        data = { error: response.status === 404
+          ? '보정 포인트 API를 찾을 수 없습니다. 로컬 엔진 서버를 최신 코드로 다시 시작하세요.'
+          : `엔진 서버 응답을 읽을 수 없습니다. (HTTP ${response.status})` } as typeof data;
+      }
       if (!response.ok) { setSampleError(data?.error || '편차값을 추정하지 못했습니다.'); return; }
       setAddedPoints((current) => [...current, {
         id: `M-${String(current.length + 1).padStart(2, '0')}`,

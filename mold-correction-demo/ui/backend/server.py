@@ -52,6 +52,7 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
 from zero_line_detection.zero_boundary import (  # noqa: E402
     draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
+from zero_line_detection.product_profiles import draw_product_profile  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -250,13 +251,16 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_lines: list = []
     zero_anchors: list = []
     zero_patches: list = []
+    overlay_base = cv2.cvtColor(
+        clean_image if clean_image is not None else image,
+        cv2.COLOR_BGR2RGB,
+    )
+    # Product profiles must remain available even if a nonessential generic
+    # colorbar diagnostic fails for an otherwise valid standard scan.
+    product_profile = draw_product_profile(overlay_base, filename)
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
-        overlay_base = cv2.cvtColor(
-            clean_image if clean_image is not None else image,
-            cv2.COLOR_BGR2RGB,
-        )
 
         # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
         # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
@@ -282,7 +286,9 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         zero_lines = extract_zero_polylines(
             zero_output.values, zero_output.part_mask
         )
-        if zero_patches:
+        if product_profile is not None:
+            zero_overlay, zero_lines = product_profile
+        elif zero_patches:
             zero_overlay = draw_zero_boundary(overlay_base, zero_anchors, zero_patches)
         elif zero_lines:
             zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
@@ -298,7 +304,10 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                 zero_crossing=zero_output.zero_crossing,
             )
     except Exception as exc:
-        errors["zero"] = str(exc)
+        if product_profile is not None:
+            zero_overlay, zero_lines = product_profile
+        else:
+            errors["zero"] = str(exc)
 
     points: list[dict[str, Any]] = []
     qwen_reads = 0
@@ -407,7 +416,10 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             else (_png_data_url(zero_output.mask) if zero_output is not None else None)
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
-        "zeroLines": [l.to_dict() for l in zero_lines],
+        "zeroLines": [
+            line if isinstance(line, dict) else line.to_dict()
+            for line in zero_lines
+        ],
         "zeroAnchors": [a.to_dict() for a in zero_anchors],
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "points": points,
