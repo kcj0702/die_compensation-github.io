@@ -69,6 +69,10 @@ class ZeroCluster:
                                      # |편차| 평균(mm). 작을수록 진짜 0에
                                      # 가깝다 — 있으면 strength보다 우선
                                      # 신뢰한다(끝점 선택 순위에 사용).
+    # 윤곽선 위 시작/끝 위치(sample index). 나중에 이 군집을 존으로
+    # 넓힐 때 윤곽선을 다시 잘라내려면 필요하다(expand_clusters_to_zones).
+    start_position: float = 0.0
+    end_position: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -208,6 +212,47 @@ def _contour_segment(
     return np.asarray([at(v) for v in steps], dtype=np.float32)
 
 
+def build_zone_outline(
+    path,
+    start_position: float,
+    end_position: float,
+    margin: float,
+    thickness: int,
+    fallback_xy=None,
+):
+    """윤곽선 [start-margin, end+margin] 구간을 두껍게 부풀려 존 폴리곤을 만든다.
+
+    점들을 부풀리는 대신 **실제 측정 윤곽선을 따라가는 띠**를 만든다 —
+    그래야 보정시트처럼 부품 테두리를 감싸는 모양이 나온다. 점을
+    부풀리면 엉뚱한 자리에 타원 얼룩이 생긴다(실측으로 확인).
+
+    path 가 없으면 fallback_xy 의 볼록껍질로 대체한다.
+    """
+    if path is not None and len(path) >= 2:
+        segment = _contour_segment(
+            path, start_position, end_position, margin=margin)
+        if len(segment) >= 2:
+            pad = thickness + 4
+            x0 = int(segment[:, 0].min()) - pad
+            y0 = int(segment[:, 1].min()) - pad
+            x1 = int(segment[:, 0].max()) + pad
+            y1 = int(segment[:, 1].max()) + pad
+            band = np.zeros((max(y1 - y0, 1), max(x1 - x0, 1)), np.uint8)
+            cv2.polylines(
+                band,
+                [(segment - [x0, y0]).astype(np.int32).reshape(-1, 1, 2)],
+                False, 255, thickness, cv2.LINE_8,
+            )
+            found, _ = cv2.findContours(
+                band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if found:
+                return max(found, key=cv2.contourArea).reshape(-1, 2) + [x0, y0]
+    if fallback_xy is not None and len(fallback_xy) > 0:
+        return cv2.convexHull(
+            np.asarray(fallback_xy, np.float32).reshape(-1, 1, 2)).reshape(-1, 2)
+    return None
+
+
 def _rank_key(cluster: "ZeroCluster") -> tuple:
     """군집 순위를 매기는 공통 기준. 낮을수록 더 믿을 만한 끝점 후보.
 
@@ -314,44 +359,20 @@ def cluster_zero_points(
                     members=xy.round(1).tolist(), contour=[],
                     strength=round(strength, 3), span=round(span, 2),
                     key_score=round(key_score, 5) if key_score is not None else None,
+                    start_position=round(float(members[0].position), 3),
+                    end_position=round(float(members[-1].position), 3),
                 ))
             else:
                 # 뭉친 자리는 면으로 잡는다 (현업 제안). 점들을 부풀리지
                 # 않고 **윤곽선을 따라가는 구간**을 두껍게 만든다 — 그래야
                 # 시트처럼 테두리를 감싸는 모양이 되고, 엉뚱한 자리에
                 # 타원 얼룩이 생기지 않는다.
-                path = (loop_paths or {}).get(loop_name)
-                outline = None
-                if path is not None and len(path) >= 2:
-                    segment = _contour_segment(
-                        path, members[0].position, members[-1].position,
-                        margin=zone_margin,
-                    )
-                    if len(segment) >= 2:
-                        band = np.zeros((2, 2), np.uint8)
-                        pad = zone_thickness + 4
-                        x0 = int(segment[:, 0].min()) - pad
-                        y0 = int(segment[:, 1].min()) - pad
-                        x1 = int(segment[:, 0].max()) + pad
-                        y1 = int(segment[:, 1].max()) + pad
-                        band = np.zeros(
-                            (max(y1 - y0, 1), max(x1 - x0, 1)), np.uint8)
-                        cv2.polylines(
-                            band,
-                            [(segment - [x0, y0]).astype(np.int32).reshape(-1, 1, 2)],
-                            False, 255, zone_thickness, cv2.LINE_8,
-                        )
-                        found, _ = cv2.findContours(
-                            band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        if found:
-                            outline = (
-                                max(found, key=cv2.contourArea).reshape(-1, 2)
-                                + [x0, y0]
-                            )
-                if outline is None:
-                    # 경로가 없으면 최소한 구성원을 감싸는 볼록껍질로 대체
-                    outline = cv2.convexHull(
-                        xy.reshape(-1, 1, 2)).reshape(-1, 2)
+                outline = build_zone_outline(
+                    (loop_paths or {}).get(loop_name),
+                    members[0].position, members[-1].position,
+                    margin=zone_margin, thickness=zone_thickness,
+                    fallback_xy=xy,
+                )
                 clusters.append(ZeroCluster(
                     cluster_id=0, loop=loop_name, kind="zone",
                     center=[round(float(center[0]), 1), round(float(center[1]), 1)],
@@ -359,6 +380,8 @@ def cluster_zero_points(
                     contour=np.asarray(outline).astype(int).tolist(),
                     strength=round(strength, 3), span=round(span, 2),
                     key_score=round(key_score, 5) if key_score is not None else None,
+                    start_position=round(float(members[0].position), 3),
+                    end_position=round(float(members[-1].position), 3),
                 ))
 
     # key_score(컬러바 실측)가 있으면 그게 strength(부호전환 크기)보다
@@ -369,6 +392,92 @@ def cluster_zero_points(
     for index, cluster in enumerate(clusters, start=1):
         cluster.cluster_id = index
     return clusters
+
+
+def _mean_sample_spacing(path) -> float:
+    """윤곽선 이웃 샘플 사이 평균 픽셀 거리."""
+    if path is None or len(path) < 2:
+        return 0.0
+    pts = np.asarray(path, dtype=np.float64)
+    return float(np.linalg.norm(np.roll(pts, -1, axis=0) - pts, axis=1).mean())
+
+
+def expand_clusters_to_zones(
+    clusters: list,
+    loop_paths: dict | None = None,
+    point_margin_px: float = 70.0,
+    zone_thickness: int = 20,
+) -> list:
+    """모든 군집을 존(면)으로 만든다 — 단독 점도 윤곽선 구간으로 넓힌다.
+
+    [왜 필요한가]
+    보정시트를 보면 부품에 따라 제로를 **선 하나**가 아니라 **여러 존**
+    으로 표기한다(JD_67XX6 = 존 9개, JD_71XX2 = 존 5개). 그런데 지금
+    파이프라인은 형태와 무관하게 항상 "점 2개를 이은 선 하나"만 낸다.
+    그래서 존 부품의 정답 커버리지가 나빴다(실측: 67XX6 19.8%,
+    71XX2 42.4% — 선 부품 64XX2도 5.3%).
+
+    이 함수는 군집 하나하나를 그 자리 윤곽선 구간을 두껍게 한 존으로
+    바꾼다. 단독 점은 앞뒤로 point_margin_px 만큼 넓혀 존을 만든다 —
+    시트도 점 하나짜리 자리를 면으로 칠하기 때문이다.
+
+    [왜 픽셀 단위인가]
+    처음엔 sample index 단위로 넓혔는데, 윤곽선 점 간격이 부품마다
+    크게 달라(실측: 64XX2 48.5px / 67XX6 80.2px / 71XX2 65.1px) 같은
+    설정이 부품마다 2배 가까이 다른 크기의 존을 만들었다. 픽셀로
+    지정하고 loop 별 평균 간격으로 환산하면 물리적으로 같은 크기가 된다.
+
+    [기본값 근거 — 정답 면적에 맞춤]
+    존을 크게 그리면 커버리지는 공짜로 좋아지지만 실무에서 쓸모없는
+    안내가 된다. 그래서 **보정시트 정답이 실제로 차지하는 면적**을
+    목표로 잡았다(실측: 67XX6 = 부품의 12.32%, 71XX2 = 8.85%).
+    margin 70px / 두께 20px 이 그 목표에 가장 가깝다(각 1.06x, 0.88x).
+
+    이 설정에서 선 출력 대비 실측 변화(커버리지 = 정답점→예측 거리
+    중앙값, 대각선 대비 %):
+
+        64XX2  커버리지 5.34% -> 1.71%   정밀도 4.81% -> 4.07%  (둘 다 개선)
+        67XX6  커버리지 19.82% -> 5.60%  정밀도 3.48% -> 8.90%
+        71XX2  커버리지 42.43% -> 18.56% 정밀도 3.90% -> 5.94%
+
+    존 부품 두 개는 정밀도를 내주고 커버리지를 크게 얻는다 — 존이
+    실제로 면이라 당연하고, 정답 면적에 맞춘 상태의 값이라 과도하게
+    칠해서 얻은 수치가 아니다. 64XX2(선 부품)는 양쪽 다 좋아졌다.
+
+    Args:
+        point_margin_px: 단독 점을 존으로 넓힐 때 윤곽선 앞뒤 여유(px).
+        zone_thickness: 윤곽선 구간을 부풀릴 두께(px).
+    """
+    expanded: list = []
+    for cluster in clusters:
+        path = (loop_paths or {}).get(cluster.loop)
+        # 픽셀 여유를 이 loop 의 sample 간격으로 나눠 sample 단위로 환산
+        spacing = _mean_sample_spacing(path)
+        margin_samples = (point_margin_px / spacing) if spacing > 1e-6 else 1.0
+        # 단독 점이면 앞뒤로 넓혀서 구간을 만든다. 이미 존이면 원래
+        # 구간을 그대로 쓰되 두께만 다시 적용한다.
+        if cluster.kind == "point":
+            start = cluster.start_position - margin_samples
+            end = cluster.end_position + margin_samples
+        else:
+            start, end = cluster.start_position, cluster.end_position
+        outline = build_zone_outline(
+            path, start, end, margin=0.0, thickness=zone_thickness,
+            fallback_xy=np.asarray(cluster.members, dtype=np.float32),
+        )
+        if outline is None:
+            expanded.append(cluster)
+            continue
+        expanded.append(ZeroCluster(
+            cluster_id=cluster.cluster_id, loop=cluster.loop, kind="zone",
+            center=cluster.center, members=cluster.members,
+            contour=np.asarray(outline).astype(int).tolist(),
+            strength=cluster.strength, span=cluster.span,
+            key_score=cluster.key_score,
+            start_position=cluster.start_position,
+            end_position=cluster.end_position,
+        ))
+    return expanded
 
 
 def draw_zero_clusters(
@@ -464,4 +573,5 @@ __all__ = [
     "snap_into_mask", "connect_strongest_pair", "load_loop_paths",
     "load_zero_points", "cluster_zero_points", "draw_zero_clusters",
     "load_key_zero_points", "filter_to_key_points", "load_key_scores",
+    "build_zone_outline", "expand_clusters_to_zones",
 ]

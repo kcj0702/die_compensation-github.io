@@ -62,8 +62,8 @@ from zero_line_advance.advance import (  # noqa: E402
 )
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.zero_points import (  # noqa: E402
-    cluster_zero_points, connect_strongest_pair, filter_to_key_points,
-    load_loop_paths, load_zero_points, snap_into_mask,
+    cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
+    filter_to_key_points, load_loop_paths, load_zero_points, snap_into_mask,
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
@@ -536,6 +536,14 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                 )
                 if line is not None:
                     label_zero_line = line.to_dict()
+            # 선을 만든 뒤 모든 군집을 존으로 넓힌다(끝점 선택은 원래
+            # 군집 중심으로 이미 끝났으므로 영향 없다). 시트가 제로를
+            # 여러 존으로 표기하는 부품(67XX6=9개, 71XX2=5개)에서
+            # "점 2개를 이은 선 하나"만으로는 정답을 크게 놓쳤다 —
+            # 실측 커버리지가 각각 19.8%/42.4%였고 존으로 내면
+            # 5.6%/18.6%로 좋아진다(zero_points.py 문서 참고).
+            zero_point_clusters = expand_clusters_to_zones(
+                zero_point_clusters, loop_paths=loop_paths)
     except Exception as exc:
         errors["zeroPoints"] = str(exc)
 
