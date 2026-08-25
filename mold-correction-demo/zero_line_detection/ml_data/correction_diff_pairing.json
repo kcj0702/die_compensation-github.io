@@ -1,0 +1,20 @@
+{
+  "64XX2": {
+    "ok": false,
+    "sheetPositiveRatio": 0.0,
+    "scanFlippedPositiveRatio": 0.567,
+    "reason": "부호 분포가 반대입니다 — 다른 회차이거나 기준면이 다를 수 있습니다."
+  },
+  "67XX6": {
+    "ok": false,
+    "sheetPositiveRatio": 0.889,
+    "scanFlippedPositiveRatio": 0.431,
+    "reason": "부호 분포가 반대입니다 — 다른 회차이거나 기준면이 다를 수 있습니다."
+  },
+  "71XX2": {
+    "ok": true,
+    "sheetPositiveRatio": 0.267,
+    "scanFlippedPositiveRatio": 0.55,
+    "reason": "부호 분포가 비슷합니다 (짝이 맞을 가능성)."
+  }
+}

@@ -642,6 +642,53 @@ async def health(_: Request) -> JSONResponse:
     )
 
 
+def read_sheet_callouts(payload: bytes) -> dict[str, Any]:
+    """보정시트 이미지에서 보정치 콜아웃(값+좌표)을 전부 읽는다.
+
+    학습 데이터 생성용 — 같은 위치의 스캔 실측값과 비교해 "측정값을
+    그대로 뒤집은 것과 실제 보정치가 얼마나 다른지"를 계산하는 데 쓴다.
+    """
+    from zero_line_detection.sheet_values import (
+        assemble_callouts, build_callout_crops, detect_callout_regions, detect_red_dots,
+    )
+
+    image = _decode_image(payload)
+    boxes = detect_callout_regions(image)
+    dots = detect_red_dots(image)
+    crops = build_callout_crops(image, boxes)
+
+    values: list[float | None] = []
+    warning: str | None = None
+    if crops:
+        reader = _get_qwen_reader()
+        values, warning = _read_qwen_values(reader, crops)
+
+    callouts = assemble_callouts(boxes, dots, values)
+    result: dict[str, Any] = {
+        "width": image.shape[1],
+        "height": image.shape[0],
+        "callouts": [c.to_dict() for c in callouts],
+        "boxesDetected": len(boxes),
+        "dotsDetected": len(dots),
+    }
+    if warning:
+        result["warning"] = warning
+    return result
+
+
+async def sheet_values(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "보정시트 이미지가 필요합니다."}, status_code=400)
+        payload = await upload.read()
+        result = await run_in_threadpool(read_sheet_callouts, payload)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def analyze(request: Request) -> JSONResponse:
     try:
         form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
@@ -817,6 +864,7 @@ app = Starlette(
     routes=[
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
+        Route("/api/sheet-values", sheet_values, methods=["POST"]),
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
