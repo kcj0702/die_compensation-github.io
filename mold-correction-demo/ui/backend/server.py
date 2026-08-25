@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 import threading
 import uuid
 from collections import OrderedDict
@@ -657,6 +658,76 @@ async def analyze(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
+    """업로드된 3D 파일을 읽어 뷰어용 메시 + RPS 후보를 만든다.
+
+    STEP 이면 홀·기준평면까지 뽑고, STL/PLY/OBJ 면 메시만 준다 —
+    삼각망으로 내보낸 시점에 원통면 정보가 이미 사라지기 때문이다.
+    """
+    from cad_import import mesh_io, step_reader
+
+    suffix = Path(filename).suffix.lower()
+    # OCCT/trimesh 는 경로 기반이라 임시 파일로 떨군다
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / (Path(filename).name or "upload")
+        path.write_bytes(payload)
+
+        if step_reader.is_step_file(path):
+            parsed = step_reader.read_step_full(path)
+            web = mesh_io.to_web_mesh(
+                parsed["mesh"], name=path.stem, source_format="step")
+            web["holes"] = parsed["holes"]
+            web["planes"] = parsed["planes"][:50]
+            web["counts"] = parsed["counts"]
+            return web
+
+        if mesh_io.is_mesh_file(path):
+            mesh = mesh_io.load_mesh(path)
+            web = mesh_io.to_web_mesh(
+                mesh, name=path.stem, source_format=suffix.lstrip("."))
+            # 삼각망엔 B-Rep 특징이 없다. 빈 배열로 명시해 프론트가
+            # "아직 안 읽음"과 "원래 없음"을 구분할 수 있게 한다.
+            web["holes"] = []
+            web["planes"] = []
+            web["counts"] = {"cylinders": 0, "holes": 0, "planes": 0}
+            web["note"] = (
+                "삼각망 파일이라 홀·기준평면 정보가 없습니다. "
+                "RPS 정렬이 필요하면 STEP(AP214)으로 받아야 합니다."
+            )
+            return web
+
+    if suffix == ".catpart":
+        raise ValueError(
+            "CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다. "
+            "CATIA에서 STEP(AP214) 또는 STL로 내보내 주세요."
+        )
+    raise ValueError(
+        f"지원하지 않는 형식입니다: {suffix or '확장자 없음'} "
+        f"(지원: STEP/STP, STL, PLY, OBJ, GLB/GLTF, 3MF)"
+    )
+
+
+async def cad(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "3D 파일이 필요합니다."}, status_code=400)
+        payload = await upload.read()
+        if len(payload) > MAX_UPLOAD_BYTES:
+            return JSONResponse(
+                {"error": f"파일이 너무 큽니다 ({len(payload) / 1024 / 1024:.0f}MB). "
+                          f"최대 {MAX_UPLOAD_BYTES // 1024 // 1024}MB"},
+                status_code=413,
+            )
+        result = await run_in_threadpool(
+            load_cad_payload, payload, getattr(upload, "filename", "part.step")
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 def zero_valley_line_for(analysis_id: str, anchor_id_a: int, anchor_id_b: int) -> dict[str, Any]:
     entry = _analysis_cache.get(analysis_id)
     if entry is None:
@@ -747,6 +818,7 @@ app = Starlette(
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
+        Route("/api/cad", cad, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]
 )

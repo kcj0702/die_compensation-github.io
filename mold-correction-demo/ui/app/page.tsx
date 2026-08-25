@@ -7,13 +7,15 @@ import {
   Activity, ArrowLeft, ArrowRight, BarChart3, Check, ChevronDown, ChevronRight,
   CircleHelp, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon,
   Layers3, ListFilter, Maximize2, MoveRight, PanelLeftClose, Play, Settings2,
-  ShieldCheck, Sparkles, UploadCloud, X, ZoomIn, ZoomOut,
+  ShieldCheck, Sparkles, UploadCloud, X, ZoomIn, ZoomOut, Box,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
+import { CadViewer, type CadMesh } from './cad-viewer';
+
 const API_BASE = 'http://127.0.0.1:8000';
 
-type View = 'workspace' | 'results' | 'service';
+type View = 'workspace' | 'results' | 'service' | 'cad';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string };
@@ -315,10 +317,11 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
     { id: 'results' as const, label: '엔진 결과', icon: BarChart3 },
     { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
+    { id: 'cad' as const, label: '3D 데이터', icon: Box },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
     <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /><div className="brand__copy"><strong>ADC</strong><span>Ajin Die Compensation</span></div></div>
-    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
+    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && item.id !== 'cad' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <div className="sidebar__guide"><CircleHelp size={19} /><div><b>실제 엔진 연결</b><span>모든 처리는 이 PC 안에서 실행</span></div><ChevronRight size={16} /></div>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
@@ -567,6 +570,127 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!valleyLines.length}><i /> 제로라인</button></div></div><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-service`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} />}{showZero && <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div></div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div><div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{valleyLines.length ? `선 ${valleyLines.length}개` : '없음'}</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div></div></aside></div>{folderAvailable && <Explorer />}</section>;
 }
 
+// 3D CAD/스캔 데이터 화면.
+//
+// 현업 자료(2026-08-25)가 정리한 제로라인 판정 4가지 방법 중 3가지
+// (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
+// 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
+// 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
+function CadWorkspace() {
+  const [mesh, setMesh] = useState<CadMesh | null>(null);
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [showHoles, setShowHoles] = useState(true);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const upload = (file: File) => {
+    setStatus('loading'); setError(null);
+    const body = new FormData();
+    body.append('file', file);
+    fetch(`${API_BASE}/api/cad`, { method: 'POST', body })
+      .then(async (response) => {
+        const data = await response.json() as CadMesh & { error?: string };
+        if (!response.ok) throw new Error(data.error || '읽지 못했습니다.');
+        return data;
+      })
+      .then((data) => { setMesh(data); setStatus('idle'); })
+      .catch((err) => { setError(String(err.message || err)); setStatus('error'); setMesh(null); });
+  };
+
+  const onPick = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) upload(file);
+    event.target.value = '';
+  };
+  const onDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    if (file) upload(file);
+  };
+
+  const summary = mesh?.summary;
+  return <section className="page page--cad">
+    <div className="page-heading page-heading--compact">
+      <div>
+        <span className="breadcrumb">ADC · Ajin Die Compensation</span>
+        <h2>3D 데이터</h2>
+        <p>STEP·STL을 읽어 형상과 조립 홀을 확인합니다. 이 PC 안에서만 처리됩니다.</p>
+      </div>
+      <button className="primary-button" onClick={() => inputRef.current?.click()}>
+        3D 파일 열기 <UploadCloud size={17} />
+      </button>
+      <input ref={inputRef} type="file" hidden accept=".step,.stp,.stl,.ply,.obj,.glb,.gltf,.3mf" onChange={onPick} />
+    </div>
+
+    <div className="cad-layout">
+      <div className="card cad-stage" onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
+        {mesh
+          ? <>
+              <div className="viewer-toolbar">
+                <div>
+                  <span className="status status--done"><Check size={13} /> {summary?.source_format.toUpperCase()} 읽기 완료</span>
+                  <b>{summary?.name}</b>
+                </div>
+                {mesh.holes.length > 0 && <button className="tool-button" onClick={() => setShowHoles(!showHoles)}>
+                  {showHoles ? <EyeOff size={14} /> : <Eye size={14} />} 홀 표시 {showHoles ? 'OFF' : 'ON'}
+                </button>}
+              </div>
+              <div className="cad-viewer"><CadViewer mesh={mesh} showHoles={showHoles} /></div>
+              <div className="viewer-legend">
+                <span>드래그: 회전 · 휠: 확대 · 오른쪽 드래그(또는 Shift+드래그): 이동</span>
+                <span>{summary?.n_faces.toLocaleString()} 삼각형</span>
+              </div>
+            </>
+          : <div className="cad-drop">
+              {status === 'loading'
+                ? <><Play size={30} /><b>읽는 중…</b><span>큰 파일은 시간이 걸립니다.</span></>
+                : <><Box size={30} /><b>3D 파일을 여기에 놓으세요</b>
+                    <span>STEP · STL · PLY · OBJ · GLB · 3MF</span>
+                    <small>CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다 — STEP(AP214)으로 내보내 주세요.</small></>}
+            </div>}
+      </div>
+
+      <aside className="inspection-panel">
+        {error && <div className="card cad-error"><b>읽지 못했습니다</b><p>{error}</p></div>}
+        {summary && <>
+          <div className="card plain-summary">
+            <h3>부품 정보</h3>
+            <div className="summary-line"><Check size={16} /><div><b>크기 ({summary.units})</b>
+              <span>{summary.bounds.size.map((v) => v.toFixed(1)).join(' × ')}</span></div></div>
+            <div className="summary-line"><Check size={16} /><div><b>원래 위치 중심</b>
+              <span>{summary.bounds.center.map((v) => v.toFixed(1)).join(', ')}</span></div></div>
+            <div className="summary-line"><Check size={16} /><div><b>메시</b>
+              <span>삼각형 {summary.n_faces.toLocaleString()} · 정점 {summary.n_vertices.toLocaleString()}</span></div></div>
+          </div>
+
+          <div className="card mini-table">
+            <div className="card-title"><h3>조립 홀 (RPS 후보)</h3><span>{mesh.holes.length}개</span></div>
+            {mesh.note && <p className="anchor-panel__hint">{mesh.note}</p>}
+            {mesh.holes.map((hole, index) => <div className="point-list-row" key={index}>
+              <span>ø{hole.diameter.toFixed(1)}</span>
+              <b className="positive">{hole.center.map((v) => v.toFixed(0)).join(', ')}</b>
+              <small>깊이 {hole.height.toFixed(1)}</small>
+              <span />
+            </div>)}
+            {!mesh.holes.length && !mesh.note && <p className="empty-mini">홀을 찾지 못했습니다.</p>}
+          </div>
+
+          {mesh.planes.length > 0 && <div className="card mini-table">
+            <div className="card-title"><h3>기준면 후보</h3><span>{mesh.counts.planes}개</span></div>
+            <p className="anchor-panel__hint">넓은 평면 순입니다. 어느 면이 실제 기준면인지는 도면에 따라 사람이 지정합니다.</p>
+            {mesh.planes.slice(0, 6).map((plane, index) => <div className="point-list-row" key={index}>
+              <span>#{index + 1}</span>
+              <b className="positive">{(plane.area / 100).toFixed(0)} cm²</b>
+              <small>법선 {plane.normal.map((v) => v.toFixed(2)).join(', ')}</small>
+              <span />
+            </div>)}
+          </div>}
+        </>}
+      </aside>
+    </div>
+  </section>;
+}
+
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({});
   const [valleyLinesByScan, setValleyLinesByScan] = useState<Record<string, ValleyLine[]>>({});
@@ -609,6 +733,6 @@ export default function Home() {
     return { ...current, [completedScan.id]: next };
   });
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} valleyLines={valleyLines} />}</div></main>;
+  const selectView = (next: View) => { if (next === 'workspace' || next === 'cad' || hasResult) setView(next); };
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} valleyLines={valleyLines} />}{view === 'cad' && <CadWorkspace />}</div></main>;
 }
