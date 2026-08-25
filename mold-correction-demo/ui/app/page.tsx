@@ -275,10 +275,22 @@ function ZeroZoneOverlay({ clusters, width, height }: { clusters: ZeroPointClust
   // 이미 앵커로 화면에 나오므로 여기선 존만 그린다.
   const zones = clusters.filter((c) => c.kind === 'zone' && c.contour.length >= 3);
   if (!zones.length) return null;
+  // 히트맵 자체가 무지개색이라 옅은 채움만으론 안 보인다는 피드백 —
+  // 흰 테두리로 후광을 깔아 어떤 배경색 위에서도 도드라지게 하고,
+  // 채움도 진하게, "존" 글자를 중심에 박아 확실히 표시한다.
+  const strokeWidth = Math.max(width, height) * 0.004;
+  const fontSize = Math.max(width, height) * 0.02;
   return <svg className="zero-zone-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
-    {zones.map((cluster) => <polygon key={cluster.cluster_id}
-      points={cluster.contour.map(([x, y]) => `${x},${y}`).join(' ')}
-      fill="rgba(255,120,120,0.30)" stroke="#dc1414" strokeWidth={Math.max(width, height) * 0.0018} />)}
+    {zones.map((cluster) => {
+      const points = cluster.contour.map(([x, y]) => `${x},${y}`).join(' ');
+      return <g key={cluster.cluster_id}>
+        <polygon points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} strokeLinejoin="round" opacity={0.95} />
+        <polygon points={points} fill="rgba(255,45,45,0.55)" stroke="#b30f0f" strokeWidth={strokeWidth} strokeLinejoin="round" />
+        <text x={cluster.center[0]} y={cluster.center[1]} textAnchor="middle" dominantBaseline="middle"
+          fontSize={fontSize} fontWeight={800} fill="#7a0d0d"
+          stroke="#ffffff" strokeWidth={fontSize * 0.18} paintOrder="stroke" style={{ paintOrder: 'stroke' }}>존</text>
+      </g>;
+    })}
   </svg>;
 }
 
