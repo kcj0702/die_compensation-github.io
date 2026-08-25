@@ -46,7 +46,7 @@ type FolderEntry = { name: string; path: string; isDirectory: boolean; size: num
 type AnnotationKind = 'rect' | 'ellipse' | 'text' | 'arrow';
 type AnnotationTool = 'select' | AnnotationKind;
 /* 사각형·타원·텍스트는 x,y 가 좌상단이고 w,h 가 크기다. 화살표는 x,y 가 시작점이고 w,h 가 끝점까지의 변위라 음수가 될 수 있다. */
-type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number };
+type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; color?: string };
 
 const engineMeta: Record<Engine, { name: string; short: string; color: string }> = {
   label: { name: '라벨 제거 · 복원', short: 'label_removal', color: '#7058e8' },
@@ -138,6 +138,34 @@ const MIN_ANNOTATION_SIZE = 2;
 const DEFAULT_ANNOTATION_SIZE: Record<AnnotationKind, { w: number; h: number }> = {
   rect: { w: 14, h: 10 }, ellipse: { w: 14, h: 12 }, text: { w: 16, h: 7 }, arrow: { w: 12, h: -8 },
 };
+/* 주석 색상. 도면에서 구분이 잘 되는 색만 골랐다. */
+const ANNOTATION_COLORS = [
+  { hex: '#e8802f', label: '주황' },
+  { hex: '#d33f3f', label: '빨강' },
+  { hex: '#2f7fd6', label: '파랑' },
+  { hex: '#17a06f', label: '초록' },
+  { hex: '#8b5cd6', label: '보라' },
+  { hex: '#3d4550', label: '먹색' },
+];
+const DEFAULT_ANNOTATION_COLOR = ANNOTATION_COLORS[0].hex;
+
+/* 받침이 있으면 '으로', 없거나 ㄹ 받침이면 '로'. (보라 → 보라로, 주황 → 주황으로) */
+function withRo(word: string) {
+  const code = word.charCodeAt(word.length - 1) - 0xac00;
+  if (code < 0 || code > 11171) return `${word}로`;
+  const jong = code % 28;
+  return `${word}${jong === 0 || jong === 8 ? '' : '으'}로`;
+}
+
+/* 도형 채움은 같은 색을 옅게 깐다. CSS 만으로는 색을 반투명하게 못 만들어 여기서 계산한다. */
+function withAlpha(hex: string, alpha: number) {
+  const value = hex.replace('#', '');
+  const full = value.length === 3 ? value.split('').map((c) => c + c).join('') : value;
+  const int = parseInt(full, 16);
+  if (!Number.isFinite(int)) return hex;
+  return `rgba(${(int >> 16) & 255}, ${(int >> 8) & 255}, ${int & 255}, ${alpha})`;
+}
+
 /* 글자 크기는 이미지와 함께 확대·축소되도록 레이어 안의 px 로 다룬다. */
 const DEFAULT_TEXT_SIZE = 10;
 const TEXT_SIZE_MIN = 6;
@@ -171,7 +199,7 @@ function normalizeAnnotation(annotation: Annotation): Annotation {
   return { ...annotation, x: clamp(x, 0, 100 - w), y: clamp(y, 0, 100 - h), w, h };
 }
 
-function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void }) {
+function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void }) {
   const tools: { id: AnnotationTool; icon: typeof Square; label: string }[] = [
     { id: 'select', icon: MousePointer2, label: '선택 · 이동' },
     { id: 'rect', icon: Square, label: '사각형 강조' },
@@ -181,6 +209,13 @@ function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll }: { tool
   ];
   return <div className="annotation-toolbar" role="toolbar" aria-label="주석 도구">
     {tools.map((item) => { const Icon = item.icon; return <button key={item.id} type="button" className={tool === item.id ? 'active' : ''} onClick={() => setTool(item.id)} aria-pressed={tool === item.id} aria-label={item.label} title={item.label}><Icon size={14} /></button>; })}
+    <span className="annotation-toolbar__divider" />
+    {/* 팔레트는 모드가 아니라 동작이다. 선택한 주석의 색을 그대로 비추므로 화면과 어긋나지 않는다. */}
+    <div className={`annotation-palette ${selectedColor ? '' : 'annotation-palette--idle'}`} role="group" aria-label="주석 색상">
+      {ANNOTATION_COLORS.map((item) => <button key={item.hex} type="button" className={`annotation-swatch ${selectedColor === item.hex ? 'annotation-swatch--active' : ''}`}
+        style={{ ['--swatch' as string]: item.hex }} onClick={() => onColorChange(item.hex)} disabled={!selectedColor} aria-pressed={selectedColor === item.hex}
+        aria-label={item.label} title={selectedColor ? `${withRo(item.label)} 변경` : '주석을 먼저 선택하세요'} />)}
+    </div>
     <span className="annotation-toolbar__divider" />
     <button type="button" onClick={onClearAll} disabled={!hasAnnotations} aria-label="주석 전체 삭제" title="주석 전체 삭제"><Trash2 size={14} /></button>
   </div>;
@@ -244,7 +279,7 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
     if (tool === 'select' || event.button !== 0) return;
     event.preventDefault(); event.stopPropagation();
     const start = toPercent(event.clientX, event.clientY);
-    const seed: Annotation = { id: nextAnnotationId(), kind: tool, x: start.x, y: start.y, w: 0, h: 0, ...(tool === 'text' ? { text: '' } : {}) };
+    const seed: Annotation = { id: nextAnnotationId(), kind: tool, x: start.x, y: start.y, w: 0, h: 0, color: DEFAULT_ANNOTATION_COLOR, ...(tool === 'text' ? { text: '' } : {}) };
     opRef.current = { mode: 'draw', startX: start.x, startY: start.y, origin: seed, moved: false };
     setDraft(seed);
     capturePointer(event.currentTarget, event.pointerId);
@@ -366,12 +401,18 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
     onPointerDown={beginDraw} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}>
 
     {layerSize.width > 0 && arrows.length > 0 && <svg className="annotation-arrows" viewBox={`0 0 ${layerSize.width} ${layerSize.height}`} aria-hidden="true">
-      <defs><marker id="adc-arrowhead" markerWidth="9" markerHeight="7" refX="8.2" refY="3.5" orient="auto"><polygon points="0 0, 9 3.5, 0 7" fill="#e8802f" /></marker></defs>
+      {/* 화살촉은 marker 안에서 색을 물려받지 못해 쓰이는 색마다 하나씩 만든다. */}
+      <defs>{[...new Set(arrows.map((arrow) => arrow.color || DEFAULT_ANNOTATION_COLOR))].map((hex) => (
+        <marker key={hex} id={`adc-arrowhead-${hex.replace('#', '')}`} markerWidth="9" markerHeight="7" refX="8.2" refY="3.5" orient="auto">
+          <polygon points="0 0, 9 3.5, 0 7" fill={hex} />
+        </marker>
+      ))}</defs>
       {arrows.map((arrow) => {
         const x1 = layerSize.width * arrow.x / 100; const y1 = layerSize.height * arrow.y / 100;
         const x2 = layerSize.width * (arrow.x + arrow.w) / 100; const y2 = layerSize.height * (arrow.y + arrow.h) / 100;
+        const hex = arrow.color || DEFAULT_ANNOTATION_COLOR;
         return <g key={arrow.id}>
-          <line className="annotation-arrow__line" x1={x1} y1={y1} x2={x2} y2={y2} markerEnd="url(#adc-arrowhead)" />
+          <line className="annotation-arrow__line" style={{ stroke: hex }} x1={x1} y1={y1} x2={x2} y2={y2} markerEnd={`url(#adc-arrowhead-${hex.replace('#', '')})`} />
           {!armed && <line className="annotation-arrow__hit" x1={x1} y1={y1} x2={x2} y2={y2}
             onPointerDown={(event) => beginMove(event, arrow)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />}
         </g>;
@@ -382,7 +423,12 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
       if (annotation.kind === 'arrow') return null;
       const selected = selectedId === annotation.id && !drawing;
       const editing = editingId === annotation.id;
-      const box = { left: `${Math.min(annotation.x, annotation.x + annotation.w)}%`, top: `${Math.min(annotation.y, annotation.y + annotation.h)}%`, width: `${Math.abs(annotation.w)}%`, height: `${Math.abs(annotation.h)}%` };
+      const hex = annotation.color || DEFAULT_ANNOTATION_COLOR;
+      const box = {
+        left: `${Math.min(annotation.x, annotation.x + annotation.w)}%`, top: `${Math.min(annotation.y, annotation.y + annotation.h)}%`,
+        width: `${Math.abs(annotation.w)}%`, height: `${Math.abs(annotation.h)}%`,
+        ['--annot' as string]: hex, ['--annot-fill' as string]: withAlpha(hex, 0.22), ['--annot-glow' as string]: withAlpha(hex, 0.3),
+      };
       return <div key={annotation.id} className={`annotation-shape annotation-shape--${annotation.kind} ${selected ? 'annotation-shape--selected' : ''}`} style={box}
         onPointerDown={(event) => beginMove(event, annotation)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}
         onDoubleClick={(event) => { if (annotation.kind !== 'text') return; event.stopPropagation(); setEditingId(annotation.id); setEditText(annotation.text || ''); }}>
@@ -402,7 +448,9 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
       const size = target.fontSize ?? DEFAULT_TEXT_SIZE;
       /* 편집 중에도 크기를 바로 확인할 수 있도록 preventDefault 로 textarea 포커스를 지킨다. */
       const resize = (next: number) => onCommit({ ...target, fontSize: clamp(next, TEXT_SIZE_MIN, TEXT_SIZE_MAX) });
-      return <>
+      /* 핸들은 도형의 자식이 아니라 변수가 상속되지 않으므로 여기서 직접 씌운다. */
+      const selectedHex = target.color || DEFAULT_ANNOTATION_COLOR;
+      return <div className="annotation-selection" style={{ ['--annot' as string]: selectedHex }}>
         {renderHandles(target)}
         <button type="button" className="annotation-delete" style={{ left: `${anchorX}%`, top: `${anchorY}%` }} onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => { event.stopPropagation(); onDelete(selectedId); onSelect(null); }} aria-label="이 주석 삭제" title="삭제 (Delete)"><X size={11} /></button>
@@ -412,7 +460,7 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
           <span className="annotation-fontsize__value" aria-live="polite">{size}</span>
           <button type="button" onClick={() => resize(size + TEXT_SIZE_STEP)} disabled={size >= TEXT_SIZE_MAX} aria-label="글자 크게" title="글자 크게">A<span>+</span></button>
         </div>}
-      </>;
+      </div>;
     })()}
   </div>;
 }
@@ -707,11 +755,17 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const commitAnnotation = (annotation: Annotation) => setAnnotations((current) => current.map((item) => item.id === annotation.id ? annotation : item));
   const deleteAnnotation = (id: string) => setAnnotations((current) => current.filter((item) => item.id !== id));
   const clearAnnotations = () => { setAnnotations(() => []); setSelectedAnnotationId(null); setTool('select'); };
+  /* 새 주석은 늘 기본색으로 그려지고, 색 변경은 주석을 고른 뒤 팔레트를 누르는 동작으로만 일어난다. */
+  const selectedColor = selectedAnnotationId ? (annotations.find((item) => item.id === selectedAnnotationId)?.color ?? DEFAULT_ANNOTATION_COLOR) : null;
+  const changeColor = (hex: string) => {
+    if (!selectedAnnotationId) return;
+    setAnnotations((current) => current.map((item) => item.id === selectedAnnotationId ? { ...item, color: hex } : item));
+  };
   const displayFor = (point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [coefficient, points, pointOverrides]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
   const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
-  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div><SheetTitleBlock scan={scan} />{showAnnotations && <AnnotationToolbar tool={tool} setTool={(next) => { setTool(next); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} />}<div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showAnnotations && <AnnotationLayer annotations={annotations} tool={tool} setTool={setTool} selectedId={selectedAnnotationId} onSelect={setSelectedAnnotationId} onCommit={commitAnnotation} onCreate={createAnnotation} onDelete={deleteAnnotation} />}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}</section>;
+  return <section className="page page--service"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>실제 라벨 제거 이미지에 검출된 편차값과 제로라인을 합성합니다.</p></div></div><div className="service-grid"><div className="correction-card card"><div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 실제 결과 합성</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div><SheetTitleBlock scan={scan} />{showAnnotations && <AnnotationToolbar tool={tool} setTool={(next) => { setTool(next); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} />}<div className="sheet-stage sheet-stage--light"><Heatmap key={`${scan.id}-${showZero ? 'zero' : 'clean'}`} imageUrl={baseImage} width={result.source.width} height={result.source.height} lightBackground>{showAnnotations && <AnnotationLayer annotations={annotations} tool={tool} setTool={setTool} selectedId={selectedAnnotationId} onSelect={setSelectedAnnotationId} onCommit={commitAnnotation} onCreate={createAnnotation} onDelete={deleteAnnotation} />}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={visiblePointIds} onLabelToggle={onPointToggle} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}</Heatmap><div className="sheet-stamp"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div><div className="sheet-note"><ShieldCheck size={17} /><span><b>검토용 가상 보정치입니다.</b> 실제 가공 전 담당자 승인과 현장 검증이 필요합니다.</span></div></div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}</section>;
 }
 
 export default function Home() {
