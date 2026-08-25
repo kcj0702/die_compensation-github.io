@@ -33,7 +33,11 @@ DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
 
-from label_detector import build_scan_mask, detect_labels  # noqa: E402
+from label_detector import (  # noqa: E402
+    build_blue_annotation_mask, build_scan_mask, detect_labels,
+)
+from colormap_reader import build_lut  # noqa: E402
+from point_extractor import _sample_deviation_color  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
 from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
@@ -465,6 +469,57 @@ async def analyze(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def sample_point(image: np.ndarray, x_norm: float, y_norm: float) -> dict[str, Any]:
+    """클릭한 지점의 표면색을 컬러바로 되짚어 편차값을 추정한다.
+
+    라벨을 판독해 얻는 값과 달리 이건 어디까지나 추정치다. 파이프라인도 색 역산을
+    판독값 검증용으로만 쓰고 있어(point_extractor 의 교차검증), 여기서도 같은 함수를
+    그대로 불러 써서 기준이 갈라지지 않게 한다.
+    """
+    height, width = image.shape[:2]
+    x = int(round(x_norm / 100.0 * (width - 1)))
+    y = int(round(y_norm / 100.0 * (height - 1)))
+    if not (0 <= x < width and 0 <= y < height):
+        raise ValueError("이미지 범위를 벗어난 지점입니다.")
+
+    scan_mask = build_scan_mask(image)
+    if np.any(scan_mask) and scan_mask[y, x] == 0:
+        raise ValueError("스캔 본체 바깥은 편차값을 추정할 수 없습니다.")
+
+    annotation_mask = build_blue_annotation_mask(image)
+    color = _sample_deviation_color(image, (x, y), scan_mask, annotation_mask)
+    if color is None:
+        raise ValueError("주변 표면색을 읽지 못했습니다. 다른 지점을 눌러 보세요.")
+
+    value = build_lut(image).to_value(color)
+    return {
+        "xPx": x,
+        "yPx": y,
+        "x": round(x / width * 100, 3),
+        "y": round(y / height * 100, 3),
+        "value": round(float(value), 3),
+        "source": "colormap",
+        "bgr": [int(c) for c in color],
+    }
+
+
+async def sample(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=1, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
+        x_norm = float(str(form.get("x", "")))
+        y_norm = float(str(form.get("y", "")))
+        image = _decode_image(await upload.read())
+        result = await run_in_threadpool(sample_point, image, x_norm, y_norm)
+        return JSONResponse(result)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 def _safe_folder(relative_path: str) -> Path:
     candidate = (FOLDER_ROOT / relative_path).resolve()
     if candidate != FOLDER_ROOT and FOLDER_ROOT not in candidate.parents:
@@ -511,6 +566,7 @@ app = Starlette(
     routes=[
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
+        Route("/api/sample", sample, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]
 )
