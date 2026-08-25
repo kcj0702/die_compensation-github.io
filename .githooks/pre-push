@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# Block pushing any new commit whose tree contains confidential KNU KDT materials.
+protected_name='경북대KDT(14기) 자료'
+protected_input='mold-correction-demo/label_removal/input/'
+protected_output='mold-correction-demo/label_removal/output/'
+zero_sha='0000000000000000000000000000000000000000'
+
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$zero_sha" ] && continue
+
+  # Inspect commits that do not exist on any remote ref yet. This avoids
+  # re-checking commits already published through another branch (for example
+  # when an older feature branch is fast-forwarded to the current main).
+  commits=$(git rev-list "$local_sha" --not --remotes)
+
+  for commit in $commits; do
+    tree_paths=$(git ls-tree -r --name-only "$commit")
+    if printf '%s\n' "$tree_paths" | grep -Fq "$protected_name" ||
+       printf '%s\n' "$tree_paths" | grep -Fq "$protected_input" ||
+       printf '%s\n' "$tree_paths" | grep -Fq "$protected_output"; then
+      echo "ERROR: push blocked because a commit contains confidential KNU KDT materials." >&2
+      echo "A protected path is present in the commit." >&2
+      exit 1
+    fi
+  done
+done
+
+exit 0
