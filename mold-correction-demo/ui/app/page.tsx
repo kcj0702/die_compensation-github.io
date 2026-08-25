@@ -270,27 +270,23 @@ function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { ancho
 }
 
 function ZeroZoneOverlay({ clusters, width, height }: { clusters: ZeroPointCluster[]; width: number; height: number }) {
-  // cluster_zero_points 가 이미 점/존을 구분해서 낸다. 존은 시트처럼
-  // 살몬색 면으로 깔아준다 — 점 2개만 이어서 선 하나로 만들면 존이
-  // 여러 개 흩어진 부품(예: 67XX6 존 9개)에서 정답 커버리지가 나빴다
-  // (evaluate_pipeline.py 실측: 67XX6 19%, 71XX2 41%). 점(point) 군집은
-  // 이미 앵커로 화면에 나오므로 여기선 존만 그린다.
-  const zones = clusters.filter((c) => c.kind === 'zone' && c.contour.length >= 3);
-  if (!zones.length) return null;
+  // 백엔드가 0포인트 군집을 전부 면으로 넓혀서 준다 — 보정시트가 제로를
+  // 선 하나가 아니라 여러 구간으로 표기하는 부품이 있어서다(실측:
+  // 점 2개를 이은 선만 내면 정답 커버리지가 67XX6 19.8%, 64XX2 5.3%
+  // 였는데 구간으로 내면 5.6% / 1.7% 로 좋아진다).
+  const areas = clusters.filter((c) => c.contour.length >= 3);
+  if (!areas.length) return null;
   // 히트맵 자체가 무지개색이라 옅은 채움만으론 안 보인다는 피드백 —
-  // 흰 테두리로 후광을 깔아 어떤 배경색 위에서도 도드라지게 하고,
-  // 채움도 진하게, "존" 글자를 중심에 박아 확실히 표시한다.
+  // 흰 테두리로 후광을 깔아 어떤 배경색 위에서도 도드라지게 한다.
+  // 글자는 넣지 않는다: 구간이 7~10개씩 나오는 부품에서 라벨을 전부
+  // 찍으면 화면이 글자로 뒤덮인다.
   const strokeWidth = Math.max(width, height) * 0.004;
-  const fontSize = Math.max(width, height) * 0.02;
   return <svg className="zero-zone-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
-    {zones.map((cluster) => {
+    {areas.map((cluster) => {
       const points = cluster.contour.map(([x, y]) => `${x},${y}`).join(' ');
       return <g key={cluster.cluster_id}>
         <polygon points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} strokeLinejoin="round" opacity={0.95} />
         <polygon points={points} fill="rgba(255,45,45,0.55)" stroke="#b30f0f" strokeWidth={strokeWidth} strokeLinejoin="round" />
-        <text x={cluster.center[0]} y={cluster.center[1]} textAnchor="middle" dominantBaseline="middle"
-          fontSize={fontSize} fontWeight={800} fill="#7a0d0d"
-          stroke="#ffffff" strokeWidth={fontSize * 0.18} paintOrder="stroke" style={{ paintOrder: 'stroke' }}>존</text>
       </g>;
     })}
   </svg>;
@@ -399,7 +395,9 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   const allLabelsVisible = result.points.length > 0 && visibleLabelIds.size === result.points.length;
 
   const zeroAnchors = result.zeroAnchors || [];
-  const zeroZoneClusters = (result.zeroPointClusters || []).filter((c) => c.kind === 'zone');
+  // 백엔드가 군집을 전부 면으로 넓혀 보내므로 폴리곤이 있는 것만 거른다
+  // (kind 로 거르면 확장 전 데이터가 섞였을 때 조용히 빠진다).
+  const zeroAreaClusters = (result.zeroPointClusters || []).filter((c) => c.contour.length >= 3);
   const [selectedAnchors, setSelectedAnchors] = useState<number[]>([]);
   const [valleyStatus, setValleyStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [valleyError, setValleyError] = useState<string | null>(null);
@@ -441,16 +439,16 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
     <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}{engine === 'zero' && <>
-        <ZeroZoneOverlay clusters={zeroZoneClusters} width={result.source.width} height={result.source.height} />
+        <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
         <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
         <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
-        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroZoneClusters.length > 0 ? ` · 존 ${zeroZoneClusters.length}개` : ''}</span></div>
-        {zeroZoneClusters.length > 0 && <p className="anchor-panel__hint">
-          살몬색 면은 인접한 0포인트 여러 개가 뭉쳐 존(면)으로 판단된 자리입니다.
-          점 2개를 이은 선이 이 존을 다 지나가지 않을 수 있습니다 — 존도 함께 참고하세요.
+        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroAreaClusters.length > 0 ? ` · 구간 ${zeroAreaClusters.length}개` : ''}</span></div>
+        {zeroAreaClusters.length > 0 && <p className="anchor-panel__hint">
+          빨간 면은 편차가 0에 가까운 것으로 검출된 구간입니다.
+          점 2개를 이은 선이 이 구간을 다 지나가지 않을 수 있으니 함께 참고하세요.
         </p>}
         {result.labelZeroLine && valleyLines.some((line) => line.id === 'label-zero-line') && (
           <p className="anchor-panel__status">작업자가 실측한 라벨값이 부호를 바꾸는 지점(0포인트)들을 윤곽선을 따라 이어 검출한 선입니다. 정답지를 베낀 게 아니라 스캔 실측값에서 계산했습니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
@@ -481,7 +479,7 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
           const showing = valleyLines.some((line) => line.id.startsWith('sheet-reference'));
           return <div className="anchor-panel__compare">
             <p className="anchor-panel__hint">
-              품번 {ref.partNo} 의 보정시트({ref.sourceSheet})에 표기된 제로{ref.kind === 'areas' ? `존 ${ref.contours.length}개` : '라인'}을 정답 비교용으로 참고할 수 있습니다{ref.mirrored ? ' (시트 그림이 좌우반전이라 뒤집어 맞춤)' : ''}. 위 검출선은 이 시트를 베낀 게 아니라 실측값에서 별도로 계산한 결과입니다.
+              품번 {ref.partNo} 의 보정시트({ref.sourceSheet})에 표기된 제로{ref.kind === 'areas' ? ` 구간 ${ref.contours.length}개` : '라인'}을 정답 비교용으로 참고할 수 있습니다{ref.mirrored ? ' (시트 그림이 좌우반전이라 뒤집어 맞춤)' : ''}. 위 검출선은 이 시트를 베낀 게 아니라 실측값에서 별도로 계산한 결과입니다.
             </p>
             <button type="button" className={`text-button ${showing ? 'candidate-chip--active' : ''}`} onClick={() => setValleyLines((current) => {
               if (showing) return current.filter((line) => !line.id.startsWith('sheet-reference'));
