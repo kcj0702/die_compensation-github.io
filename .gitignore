@@ -222,3 +222,15 @@ __marimo__/
 
 # pnpm local cache
 .pnpm-store/
+
+# Confidential KNU KDT training materials — never commit or upload.
+/경북대KDT(14기) 자료/
+/경북대KDT(14기) 자료.zip
+/경북대KDT(14기) 자료.7z
+/경북대KDT(14기) 자료.rar
+/경북대KDT(14기) 자료.tar
+/경북대KDT(14기) 자료.tar.gz
+
+# Confidential label-removal datasets — never commit or upload.
+/mold-correction-demo/label_removal/input/
+/mold-correction-demo/label_removal/output/

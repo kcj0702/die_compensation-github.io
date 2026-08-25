@@ -250,6 +250,141 @@ button { cursor: pointer; }
 .coefficient-card input[type=range] { accent-color:#ffb51b; }
 .orange { color:#a36c00!important; }
 
+.measure-point__dot { padding:0; cursor:default; }
+.measure-point--interactive .measure-point__dot { cursor:pointer; }
+.measure-point__label--editable { cursor:pointer; }
+.measure-point__label--editable:active { cursor:grabbing; }
+.measure-point__label--overridden { color:#1f5e9e; border-color:#4a90e2; background:#fff; box-shadow:0 0 0 1px #4a90e2,0 3px 8px rgba(74,144,226,.28); }
+.measure-point--interactive:hover .measure-point__label--overridden { color:#1f5e9e; background:#f0f6fc; box-shadow:0 0 0 1px #4a90e2,0 4px 10px rgba(74,144,226,.4); }
+.point-leaders line.point-leader--overridden { stroke:rgba(74,144,226,.94); }
+.measure-point__label--editing { padding:2px 3px; cursor:text; background:#fff; border-color:#eb6b3d; box-shadow:0 0 0 2px rgba(235,107,61,.35); }
+.measure-point--interactive:hover .measure-point__label--editing { background:#fff; box-shadow:0 0 0 2px rgba(235,107,61,.35); }
+.measure-point__label__input { width:38px; padding:0; border:0; outline:0; background:transparent; color:inherit; font:inherit; font-weight:750; text-align:center; }
+.measure-point__label__reset { width:14px; height:14px; margin-left:3px; padding:0; display:grid; place-items:center; border:0; border-radius:3px; color:#4a90e2; background:#eaf2fc; cursor:pointer; font-size:11px; line-height:1; }
+.measure-point__label__reset:hover { color:#fff; background:#4a90e2; }
+.blue { color:#1f5e9e!important; }
+.reset-all-overrides { width:100%; height:32px; margin-top:14px; padding:0 12px; border:1px solid #cddef2; border-radius:6px; color:#1f5e9e; background:#f4f8fd; cursor:pointer; font:inherit; font-size:9px; font-weight:700; }
+.reset-all-overrides:hover { border-color:#4a90e2; background:#e8f1fc; }
+.coefficient-note { margin:12px 0 0; padding:8px 10px; border-radius:7px; color:#1f5e9e; background:#f0f6fc; font-size:8px; line-height:1.4; }
+
+/* ── 보정 시트 주석 도구 ─────────────────────────────────────── */
+.annotation-toolbar { display:flex; align-items:center; gap:3px; padding:7px 10px; border-bottom:1px solid var(--line); background:#fcfcfa; }
+.annotation-toolbar button { width:28px; height:28px; display:grid; place-items:center; padding:0; border:1px solid transparent; border-radius:6px; color:#79838f; background:transparent; cursor:pointer; transition:color .15s ease,border-color .15s ease,background .15s ease; }
+.annotation-toolbar button:hover:not(:disabled) { color:#3d4c60; border-color:#e4e7ea; background:#fff; }
+.annotation-toolbar button.active { color:#b8620f; border-color:#f0cfa4; background:#fff6e9; box-shadow:0 1px 3px rgba(184,98,15,.14); }
+.annotation-toolbar button:disabled { opacity:.32; cursor:not-allowed; }
+.annotation-toolbar__divider { width:1px; height:17px; margin:0 5px; background:#e2e5e8; }
+
+/* 포인트 레이어와 시트 도장은 이미지 전체 또는 모서리를 덮고 있어서, 그대로 두면
+   그 아래(z-index 6)에 있는 주석 도형과 핸들을 클릭할 수 없다. 레이어 자체는
+   이벤트를 통과시키고 실제로 눌러야 하는 포인트 요소만 다시 받게 한다. */
+.point-layer { pointer-events:none; }
+.measure-point { pointer-events:auto; }
+.sheet-stamp { pointer-events:none; }
+
+.annotation-layer { position:absolute; inset:0; z-index:6; pointer-events:none; }
+.annotation-layer--armed { z-index:9; pointer-events:auto; }
+.annotation-layer--rect,.annotation-layer--ellipse,.annotation-layer--text { cursor:crosshair; }
+.annotation-layer--arrow { cursor:crosshair; }
+
+.annotation-arrows { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+.annotation-arrow__line { stroke:#e8802f; stroke-width:2.4; stroke-linecap:round; }
+/* 선택 UI 묶음. 도형 밖에 있어서 색을 여기서 내려받는다. */
+.annotation-selection { position:absolute; inset:0; pointer-events:none; }
+.annotation-selection .annotation-handle { border-color:var(--annot,#c1650f); }
+.annotation-selection .annotation-delete { background:var(--annot,#c1502a); }
+.annotation-arrow__hit { stroke:transparent; stroke-width:14; stroke-linecap:round; pointer-events:stroke; cursor:move; }
+
+.annotation-shape { position:absolute; box-sizing:border-box; pointer-events:auto; cursor:move; }
+.annotation-layer--armed .annotation-shape { pointer-events:none; }
+/* 색은 주석마다 --annot 계열 변수로 들어온다. 팔레트에서 고른 값이 그대로 반영된다. */
+.annotation-shape--rect,.annotation-shape--ellipse { border:1.5px solid var(--annot,#e8802f); background:var(--annot-fill,rgba(248,163,88,.28)); box-shadow:0 0 0 1px rgba(255,255,255,.5) inset; }
+.annotation-shape--ellipse { border-radius:50%; }
+.annotation-shape--selected { box-shadow:0 0 0 1px rgba(255,255,255,.6) inset,0 0 0 2px var(--annot-glow,rgba(212,105,26,.3)); }
+
+/* 텍스트 상자는 흰 바탕을 유지해 가독성을 지키고, 테두리와 글자에 색을 쓴다. */
+.annotation-shape--text { display:flex; align-items:center; justify-content:center; padding:3px 5px; border:1.5px solid var(--annot,#d98a3d); border-radius:5px; background:rgba(255,255,255,.96); box-shadow:0 2px 7px rgba(35,25,10,.16); }
+.annotation-shape--text.annotation-shape--selected { box-shadow:0 0 0 2px var(--annot-glow,rgba(212,105,26,.28)),0 2px 7px rgba(35,25,10,.2); }
+.annotation-text__value { overflow:hidden; width:100%; color:var(--annot,#2a2013); font-size:10px; font-weight:750; line-height:1.3; text-align:center; white-space:pre-wrap; word-break:break-word; }
+.annotation-text__value em { color:#a99274; font-weight:600; font-style:normal; }
+.annotation-text__input { width:100%; height:100%; padding:0; border:0; outline:0; resize:none; overflow:hidden; color:var(--annot,#2a2013); background:transparent; font:inherit; font-size:10px; font-weight:750; line-height:1.3; text-align:center; }
+
+/* 색상 팔레트 */
+.annotation-palette { display:flex; align-items:center; gap:4px; }
+.annotation-swatch { width:17px!important; height:17px!important; padding:0; border:1.5px solid rgba(0,0,0,.14)!important; border-radius:50%; background:var(--swatch)!important; cursor:pointer; transition:transform .12s ease,box-shadow .12s ease,opacity .12s ease; }
+.annotation-swatch:hover:not(:disabled) { transform:scale(1.14); }
+.annotation-swatch--active { border-color:#fff!important; box-shadow:0 0 0 2px var(--swatch),0 1px 3px rgba(0,0,0,.25); }
+/* 주석을 고르기 전에는 무엇에 적용될지 알 수 없으므로 눌리지 않게 둔다. */
+.annotation-palette--idle .annotation-swatch { opacity:.3; cursor:not-allowed; }
+
+.annotation-handle { position:absolute; z-index:2; width:9px; height:9px; margin:-5px 0 0 -5px; border:1.5px solid #c1650f; border-radius:2px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.28); pointer-events:auto; touch-action:none; }
+.annotation-handle--endpoint { border-radius:50%; }
+.annotation-handle--nw,.annotation-handle--se { cursor:nwse-resize; }
+.annotation-handle--ne,.annotation-handle--sw { cursor:nesw-resize; }
+.annotation-handle--n,.annotation-handle--s { cursor:ns-resize; }
+.annotation-handle--e,.annotation-handle--w { cursor:ew-resize; }
+.annotation-handle--endpoint { cursor:crosshair; }
+
+.annotation-delete { position:absolute; z-index:3; width:17px; height:17px; margin:-9px 0 0 4px; display:grid; place-items:center; padding:0; border:0; border-radius:50%; color:#fff; background:#c1502a; box-shadow:0 2px 5px rgba(0,0,0,.32); cursor:pointer; pointer-events:auto; }
+.annotation-delete:hover { background:#a13d1c; }
+
+/* 텍스트 상자 글자 크기 조절 — 선택했을 때 상자 바로 아래에 붙는다. */
+.annotation-fontsize { position:absolute; z-index:3; margin-top:7px; display:flex; align-items:center; gap:1px; padding:2px; border:1px solid #e2c9a6; border-radius:5px; background:rgba(255,255,255,.97); box-shadow:0 2px 6px rgba(35,25,10,.22); pointer-events:auto; touch-action:none; }
+.annotation-fontsize button { width:16px; height:15px; display:grid; place-items:center; padding:0; border:0; border-radius:3px; color:#8a5a1c; background:#fdf4e6; cursor:pointer; font-size:8px; font-weight:800; line-height:1; }
+.annotation-fontsize button span { font-size:9px; }
+.annotation-fontsize button:hover:not(:disabled) { color:#fff; background:#d1801f; }
+.annotation-fontsize button:disabled { opacity:.35; cursor:default; }
+.annotation-fontsize__value { min-width:15px; color:#6b5334; text-align:center; font-size:8px; font-weight:750; font-variant-numeric:tabular-nums; }
+
+.layer-toggles button.active.amber { color:#b8620f; border-color:#f0cfa4; background:#fff6e9; }
+.layer-toggles button.active.amber i { background:#e8802f; }
+
+/* ── 흰 시트와 독립 정면도/Detail View 레이아웃 ─────────────── */
+.sheet-canvas { position:relative; width:100%; aspect-ratio:1.414/1; overflow:hidden; border:1px solid #d8d8d3; background-color:#fff; background-image:linear-gradient(rgba(38,52,67,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(38,52,67,.035) 1px,transparent 1px); background-size:20px 20px; box-shadow:0 4px 16px rgba(31,43,54,.12); touch-action:none; user-select:none; }
+.sheet-canvas:before { content:""; position:absolute; inset:2.2%; border:1px solid #9ca3a7; pointer-events:none; }
+.sheet-canvas__meta { position:absolute; z-index:1; right:3%; bottom:2.5%; display:flex; gap:12px; color:#515960; font-size:7px; letter-spacing:.06em; }
+.sheet-canvas__meta span { color:#858c92; }
+.sheet-canvas--detail-mode { cursor:crosshair; }
+.sheet-layout { position:absolute; z-index:2; min-width:60px; min-height:50px; overflow:visible; border:1px solid #89939c; background:#fff; box-shadow:0 3px 10px rgba(30,43,56,.13); }
+.sheet-layout.selected { z-index:4; outline:2px solid rgba(44,115,181,.45); outline-offset:2px; }
+.sheet-layout__bar { position:absolute; z-index:25; left:0; right:0; top:0; height:20px; display:flex; align-items:center; gap:6px; padding:0 5px 0 7px; color:#3e4953; background:rgba(243,244,243,.94); border-bottom:1px solid #b8bec2; cursor:move; font-size:7px; letter-spacing:.04em; }
+.sheet-layout__bar span { overflow:hidden; font-weight:800; text-overflow:ellipsis; white-space:nowrap; }
+.sheet-layout__bar small { flex:1; color:#a0a5aa; text-align:right; font-size:6px; white-space:nowrap; }
+.sheet-layout__bar button,.detail-region button { width:16px; height:16px; display:grid; place-items:center; padding:0; border:0; border-radius:3px; color:#7c858c; background:transparent; cursor:pointer; }
+.sheet-layout__bar button:hover,.detail-region button:hover { color:#fff; background:#c65034; }
+.sheet-layout__content { position:absolute; inset:0; overflow:visible; background:#fff; }
+.front-view-layout,.detail-crop { position:absolute; inset:0; overflow:visible; }
+.front-view-layout > img { position:absolute; inset:0; width:100%; height:100%; object-fit:fill; pointer-events:none; }
+.layout-image-clip { position:absolute; inset:0; overflow:hidden; background:#fff; }
+.layout-image-clip > img { position:absolute; max-width:none; max-height:none; object-fit:fill; pointer-events:none; }
+.sheet-layout .point-layer { z-index:20; overflow:visible; }
+.sheet-canvas > .annotation-layer { z-index:12; }
+.layout-resize-handle { position:absolute; z-index:30; width:9px; height:9px; margin:-5px 0 0 -5px; border:1px solid #216ead; border-radius:2px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.28); touch-action:none; }
+.layout-resize-handle--nw,.layout-resize-handle--se { cursor:nwse-resize; }.layout-resize-handle--ne,.layout-resize-handle--sw { cursor:nesw-resize; }.layout-resize-handle--n,.layout-resize-handle--s { cursor:ns-resize; }.layout-resize-handle--e,.layout-resize-handle--w { cursor:ew-resize; }
+.detail-region-layer { position:absolute; z-index:10; inset:0; pointer-events:none; }
+.detail-region-layer--active { pointer-events:auto; cursor:crosshair; background:rgba(44,115,181,.025); }
+.detail-region { position:absolute; box-sizing:border-box; border:1.5px dashed #236da8; background:rgba(53,135,201,.2); box-shadow:0 0 0 1px rgba(255,255,255,.6) inset; pointer-events:auto; cursor:move; }
+.detail-region-layer--active .detail-region { pointer-events:none; }
+.detail-region.selected { border-color:#15598d; background:rgba(53,135,201,.26); box-shadow:0 0 0 2px rgba(33,110,173,.28); }
+.detail-region > span { position:absolute; left:-1px; bottom:100%; padding:2px 5px; color:#fff; background:#236da8; font-size:6px; font-weight:800; letter-spacing:.05em; white-space:nowrap; }
+.detail-region > button { position:absolute; right:-18px; top:-18px; color:#fff; background:#236da8; }
+.label-area-selector { position:absolute; z-index:24; inset:0; overflow:visible; pointer-events:none; }
+.label-area-selector.active { pointer-events:auto; cursor:crosshair; background:rgba(190,70,45,.025); }
+.label-area-selector__box { position:absolute; box-sizing:border-box; border:1.5px dashed #bd463f; background:rgba(220,78,67,.18); box-shadow:0 0 0 1px rgba(255,255,255,.65) inset; }
+.label-area-selector__box span { position:absolute; left:-1px; bottom:100%; padding:2px 5px; color:#fff; background:#bd463f; font-size:6px; font-weight:800; white-space:nowrap; }
+.label-area-selector--show .label-area-selector__box { border-color:#16836f; background:rgba(31,164,139,.18); }.label-area-selector--show .label-area-selector__box span { background:#16836f; }
+.detail-mode-guide { position:absolute; z-index:20; left:50%; top:3.5%; display:flex; align-items:center; gap:7px; transform:translateX(-50%); padding:6px 8px 6px 10px; border:1px solid #9bc5e5; border-radius:6px; color:#245f8e; background:rgba(244,250,255,.96); box-shadow:0 3px 10px rgba(32,86,130,.18); font-size:8px; font-weight:700; pointer-events:auto; }
+.detail-mode-guide button { padding:2px 6px; border:0; border-radius:4px; color:#fff; background:#337daf; font-size:7px; cursor:pointer; }
+.label-area-guide { border-color:#e0aaa5; color:#8e3732; background:rgba(255,247,246,.97); }.label-area-guide button { background:#bd463f; }
+.label-area-guide--show { border-color:#9dd5c9; color:#176b5b; background:rgba(244,252,250,.97); }.label-area-guide--show button { background:#16836f; }
+.layout-size-control { position:absolute; z-index:15; left:3.2%; bottom:3.2%; display:flex; align-items:center; gap:8px; padding:5px 7px; border:1px solid #d9dde0; border-radius:5px; color:#53606a; background:rgba(255,255,255,.94); box-shadow:0 2px 7px rgba(30,43,56,.12); font-size:7px; }
+.layout-size-control b { color:#34424e; white-space:nowrap; }.layout-size-control label { display:flex; align-items:center; gap:3px; }.layout-size-control input { width:55px; margin:0; accent-color:#2877b5; }.layout-size-control span { min-width:22px; color:#2871aa; font-variant-numeric:tabular-nums; text-align:right; }
+.sheet-stamp--paper { right:3.3%; bottom:7.5%; width:135px; border-color:#62686c; color:#293139; background:rgba(255,255,255,.92); backdrop-filter:none; }
+.sheet-stamp--paper small { color:#707980; }
+.annotation-toolbar button.detail.active { color:#1e68a1; border-color:#a7cae4; background:#eff8ff; box-shadow:0 1px 3px rgba(30,104,161,.14); }
+.annotation-toolbar button.hide-area.active { color:#a33c36; border-color:#e4b2ae; background:#fff3f2; box-shadow:0 1px 3px rgba(163,60,54,.14); }
+.annotation-toolbar button.show-area.active { color:#13725f; border-color:#a8d9ce; background:#effaf7; box-shadow:0 1px 3px rgba(19,114,95,.14); }
+
 @keyframes pulse{50%{opacity:.35}}
 @media(max-width:1120px){.workspace-grid,.service-grid{grid-template-columns:1fr}.engine-panel{display:grid;grid-template-columns:1fr 1fr 1fr}.results-layout{grid-template-columns:1fr}.inspection-panel{display:grid;grid-template-columns:repeat(3,1fr)}.sheet-stage .heatmap{min-height:470px}}
 @media(max-width:820px){.app-shell,.app-shell--collapsed{padding-left:0}.sidebar{width:68px}.sidebar .brand__copy,.sidebar .sidebar__eyebrow,.sidebar .sidebar__nav button span,.sidebar .sidebar__nav em,.sidebar .sidebar__guide,.sidebar .sidebar__collapse span{display:none}.app-shell{padding-left:68px}.topbar{align-items:flex-start}.topbar__actions{flex:1;justify-content:flex-end}.profile div,.item-select span{display:none}.item-select{min-width:160px;height:40px}.item-select select{max-width:145px}.page-heading{align-items:flex-start;flex-direction:column}.step-pills{width:100%}.step-pills span{flex:1;justify-content:center}.engine-panel,.inspection-panel{grid-template-columns:1fr}.result-tabs button{padding:0 10px}.result-tabs small{display:none}.explorer__body{grid-template-columns:190px 1fr}.folder-content__head,.folder-row{grid-template-columns:minmax(160px,1fr) 90px}.folder-content__head span:last-child,.folder-row small:last-child{display:none}.sheet-title-block{grid-template-columns:minmax(145px,1fr) 76px minmax(110px,1fr);grid-template-rows:repeat(6,36px)}.sheet-title-block__heading{grid-row:1/7;padding:8px!important}.sheet-title-block__heading strong{height:74px;font-size:16px;letter-spacing:.06em}.sheet-title-block__label,.sheet-title-block__value{font-size:8px}}

@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# Block accidental staging of confidential KNU KDT materials, even with git add -f.
+protected_name='경북대KDT(14기) 자료'
+protected_input='mold-correction-demo/label_removal/input/'
+protected_output='mold-correction-demo/label_removal/output/'
+
+staged_paths=$(git diff --cached --name-only --diff-filter=ACMR)
+
+if printf '%s\n' "$staged_paths" | grep -Fq "$protected_name" ||
+   printf '%s\n' "$staged_paths" | grep -Fq "$protected_input" ||
+   printf '%s\n' "$staged_paths" | grep -Fq "$protected_output"; then
+  echo "ERROR: confidential KNU KDT materials cannot be committed." >&2
+  echo "Remove the protected path from the Git index before committing." >&2
+  exit 1
+fi
+
+exit 0
