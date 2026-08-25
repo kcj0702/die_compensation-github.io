@@ -1,0 +1,225 @@
+{
+  "product_engine": "JD_71XX2",
+  "source_zero_points": "C:\\ajin\\my_lab\\zero_point_selection\\output\\JD_71XX2-DR000 3D 스캔\\zero_points.json",
+  "coordinate_system": "source image absolute pixel coordinates (x, y)",
+  "radius_rule": "mean adjacent scan-point spacing of each closed contour",
+  "pixel_rule": "circle AND product mask AND valid HSV color pixels",
+  "score_rule": "mean(abs(deviation_mm)) after HSV color-bar conversion",
+  "key_threshold_mm": 0.5,
+  "colorbar": {
+    "x": 1256,
+    "top_y": 8,
+    "bottom_y": 758,
+    "top_value_mm": 2.0,
+    "bottom_value_mm": -2.0
+  },
+  "candidate_count": 8,
+  "key_zero_point_count": 7,
+  "loops": [
+    {
+      "name": "product_outer",
+      "scan_point_mean_spacing_px": 65.12222,
+      "candidate_count": 8,
+      "key_zero_point_count": 7,
+      "candidates": [
+        {
+          "point": [
+            663.0,
+            523.0
+          ],
+          "source_type": "exact_label_zero",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5254,
+          "mean_abs_deviation_mm": 0.17652,
+          "median_abs_deviation_mm": 0.13867,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            590.0,
+            321.0
+          ],
+          "source_type": "exact_label_zero",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5738,
+          "mean_abs_deviation_mm": 0.19734,
+          "median_abs_deviation_mm": 0.18133,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            129.90909,
+            412.18182
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5571,
+          "mean_abs_deviation_mm": 0.37911,
+          "median_abs_deviation_mm": 0.35733,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            342.75,
+            508.75
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5627,
+          "mean_abs_deviation_mm": 0.17359,
+          "median_abs_deviation_mm": 0.128,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            956.75,
+            539.25
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5119,
+          "mean_abs_deviation_mm": 0.78516,
+          "median_abs_deviation_mm": 0.88,
+          "threshold_mm": 0.5,
+          "selected": false
+        },
+        {
+          "point": [
+            1096.14286,
+            420.71429
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 3806,
+          "mean_abs_deviation_mm": 0.25775,
+          "median_abs_deviation_mm": 0.224,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            997.4,
+            399.6
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5908,
+          "mean_abs_deviation_mm": 0.24467,
+          "median_abs_deviation_mm": 0.19733,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            853.33333,
+            370.33333
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5451,
+          "mean_abs_deviation_mm": 0.37084,
+          "median_abs_deviation_mm": 0.34667,
+          "threshold_mm": 0.5,
+          "selected": true
+        }
+      ],
+      "key_zero_points": [
+        {
+          "point": [
+            663.0,
+            523.0
+          ],
+          "source_type": "exact_label_zero",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5254,
+          "mean_abs_deviation_mm": 0.17652,
+          "median_abs_deviation_mm": 0.13867,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            590.0,
+            321.0
+          ],
+          "source_type": "exact_label_zero",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5738,
+          "mean_abs_deviation_mm": 0.19734,
+          "median_abs_deviation_mm": 0.18133,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            129.90909,
+            412.18182
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5571,
+          "mean_abs_deviation_mm": 0.37911,
+          "median_abs_deviation_mm": 0.35733,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            342.75,
+            508.75
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5627,
+          "mean_abs_deviation_mm": 0.17359,
+          "median_abs_deviation_mm": 0.128,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            1096.14286,
+            420.71429
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 3806,
+          "mean_abs_deviation_mm": 0.25775,
+          "median_abs_deviation_mm": 0.224,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            997.4,
+            399.6
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5908,
+          "mean_abs_deviation_mm": 0.24467,
+          "median_abs_deviation_mm": 0.19733,
+          "threshold_mm": 0.5,
+          "selected": true
+        },
+        {
+          "point": [
+            853.33333,
+            370.33333
+          ],
+          "source_type": "sign_change_interpolation",
+          "radius_px": 65.12222,
+          "product_color_pixel_count": 5451,
+          "mean_abs_deviation_mm": 0.37084,
+          "median_abs_deviation_mm": 0.34667,
+          "threshold_mm": 0.5,
+          "selected": true
+        }
+      ]
+    }
+  ]
+}

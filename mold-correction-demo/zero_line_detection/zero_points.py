@@ -117,6 +117,39 @@ def load_zero_points(json_path: str | Path) -> list:
     return points
 
 
+def load_key_zero_points(json_path: str | Path) -> set:
+    """key_zero_point_engine 이 낸 key_zero_points.json 에서 '핵심'으로
+    확인된 점들의 좌표를 읽는다.
+
+    현업 팀이 만든 후처리다(2026-08-25 공유): 0포인트 후보 하나하나를
+    반경 원으로 잘라, **컬러바 HSV로 읽은 실제 편차값**의 평균이
+    threshold_mm 미만인지 다시 확인한다. 우리 strength(부호 전환
+    크기)와는 독립적인 신호다 — strength는 "라벨 두 값이 부호가
+    바뀌었는가"만 보는데, 그 자리 실제 색이 여전히 짙으면(진짜 편차가
+    크면) 노이즈였다는 뜻이다. JD_64XX2 기준 12개 후보 중 5개만
+    "핵심"으로 남았다 — 현업이 지적한 "0포인트가 너무 많이 찍힌다"는
+    문제를 색으로 다시 검증해 줄인 것이다.
+    """
+    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    keys: set = set()
+    for loop in data.get("loops", []):
+        for item in loop.get("key_zero_points", []):
+            x, y = item["point"]
+            keys.add((round(float(x), 1), round(float(y), 1)))
+    return keys
+
+
+def filter_to_key_points(points: list, key_json_path: str | Path) -> list:
+    """0포인트 후보를 key_zero_point_engine 이 '핵심'으로 남긴 것만 남긴다.
+
+    좌표로 매칭한다 — key_zero_points.json 에는 sample_index 가 없지만,
+    같은 zero_points.json 후보를 그대로 넘겨 계산했으므로 좌표가
+    소수점까지 정확히 일치한다.
+    """
+    keys = load_key_zero_points(key_json_path)
+    return [p for p in points if (round(p.x, 1), round(p.y, 1)) in keys]
+
+
 def _contour_segment(
     path: np.ndarray, start: float, end: float, margin: float, closed: bool = True
 ) -> np.ndarray:
@@ -366,4 +399,5 @@ __all__ = [
     "ZeroPoint", "ZeroCluster",
     "snap_into_mask", "connect_strongest_pair", "load_loop_paths",
     "load_zero_points", "cluster_zero_points", "draw_zero_clusters",
+    "load_key_zero_points", "filter_to_key_points",
 ]

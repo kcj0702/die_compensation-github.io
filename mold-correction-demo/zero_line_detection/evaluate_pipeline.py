@@ -17,8 +17,14 @@ load_zero_points -> cluster_zero_points -> connect_strongest_pair.
 """
 from __future__ import annotations
 
+import sys
+
 import cv2
 import numpy as np
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
 
 from zero_line_detection.ml_dataset import CASES, DEFAULT_DATA_DIR, ZERO_POINTS_DIR, _imread
 from zero_line_detection.sheet_reference import (
@@ -26,10 +32,22 @@ from zero_line_detection.sheet_reference import (
 )
 from zero_line_detection.zero_line import detect_zero_line
 from zero_line_detection.zero_points import (
-    cluster_zero_points, connect_strongest_pair, load_loop_paths, load_zero_points,
+    cluster_zero_points, connect_strongest_pair, filter_to_key_points,
+    load_loop_paths, load_zero_points,
 )
 
 LOOP_PATHS_DIR = ZERO_POINTS_DIR.parent.parent / "my_lab" / "scan_point_contour" / "output"
+KEY_POINTS_DIR = ZERO_POINTS_DIR.parent.parent / "my_lab" / "zero_point_selection" / "output"
+
+
+def find_key_points_json(part_key: str):
+    """품번으로 key_zero_points.json 을 찾는다(있으면). 없으면 None."""
+    for folder in KEY_POINTS_DIR.glob("*"):
+        if part_key in folder.name.upper():
+            candidate = folder / "key_zero_points.json"
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def truth_points(sheet_path, part_mask, part_no, values):
@@ -51,7 +69,10 @@ def find_loop_paths(part_key: str) -> dict:
     return {}
 
 
-def evaluate_case(case) -> dict:
+def evaluate_case(case, use_key_filter: bool = False) -> dict:
+    """use_key_filter=True 면 key_zero_point_engine 이 '핵심'으로 남긴
+    후보만 클러스터링에 넣는다(있는 품번만 — 없으면 원래대로 전체 후보).
+    """
     scan_path = DEFAULT_DATA_DIR / case.scan_name
     sheet_path = DEFAULT_DATA_DIR / case.sheet_name
     points_path = ZERO_POINTS_DIR / f"{case.part_no}.json"
@@ -69,6 +90,11 @@ def evaluate_case(case) -> dict:
     result["truth_kind"] = truth_kind
 
     candidates = load_zero_points(points_path)
+    result["n_candidates_before_key_filter"] = len(candidates)
+    if use_key_filter:
+        key_json = find_key_points_json(case.part_no)
+        if key_json is not None:
+            candidates = filter_to_key_points(candidates, key_json)
     loop_paths = find_loop_paths(case.part_no)
     clusters = cluster_zero_points(candidates, loop_paths=loop_paths)
     result["n_candidates"] = len(candidates)
@@ -100,11 +126,10 @@ def evaluate_case(case) -> dict:
     return result
 
 
-def main() -> int:
+def _print_table(rows: list) -> None:
     print(f"{'품번':8s} {'정답':6s} {'후보':>4s} {'군집':>4s} {'상태':10s} "
           f"{'선->정답%':>9s} {'정답->선%':>9s} {'끝점오차%':>16s}")
-    for case in CASES:
-        r = evaluate_case(case)
+    for r in rows:
         if r.get("status") != "ok":
             print(f"{r['part_no']:8s} {'':6s} {'':>4s} {'':>4s} "
                   f"{r.get('status', '?'):10s}")
@@ -114,11 +139,23 @@ def main() -> int:
               f"{r['n_clusters']:4d} {'ok':10s} "
               f"{r['pred_to_truth_median_pct']:9.2f} "
               f"{r['truth_to_pred_median_pct']:9.2f} {ep:>16s}")
+
+
+def main() -> int:
+    print("=== 기본 (전체 0포인트 후보) ===")
+    baseline = [evaluate_case(case, use_key_filter=False) for case in CASES]
+    _print_table(baseline)
+
+    print("\n=== key_zero_point_engine 필터 적용 (있는 품번만) ===")
+    filtered = [evaluate_case(case, use_key_filter=True) for case in CASES]
+    _print_table(filtered)
+
     print(
         "\n끝점오차%는 실제로 골라진 두 끝점 각각이 정답에서 얼마나 떨어져"
         "\n있는지(대각선 대비 %)다. 이 값이 크면 '가장 강한 부호전환 2개'"
-        "\n규칙이 진짜 끝점을 놓쳤다는 뜻 — 규칙을 고친 뒤 이 스크립트를"
-        "\n다시 돌려서 이 숫자가 줄었는지로 확인한다."
+        "\n규칙이 진짜 끝점을 놓쳤다는 뜻. key 필터는 컬러바 HSV로 후보"
+        "\n주변 실제 편차를 다시 확인해 노이즈 후보를 줄인다(현업 제공,"
+        "\n2026-08-25) — 위 두 표를 비교해 실제로 나아졌는지 본다."
     )
     return 0
 

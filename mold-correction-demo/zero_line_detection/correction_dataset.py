@@ -124,6 +124,27 @@ def check_pairing(sheet_values: list, scan_values: list) -> dict:
     }
 
 
+def machining_note(scan_value: float, correction_value: float) -> str:
+    """'살빼기(가공)는 쉽고 살붙이기(용접)는 어렵다'는 금형 가공 제약으로
+    보정 방향을 해석한다(2026-08-25 현업 자료).
+
+    스캔 편차가 +(제품이 CAD보다 두꺼움)면 금형을 깎아내면 되므로(가공)
+    쉽다. 편차가 -(제품이 CAD보다 얇음)면 금형에 용접으로 채워야 하므로
+    (살붙이기) 어렵고 위험하다. 보정치 부호 자체가 이미 이 방향을
+    말해준다 — 추가로, 용접 방향인데 실측값을 그대로 안 뒤집고
+    보수적으로 줄여 반영했으면("축소반영") 그게 이 제약을 실제로
+    반영한 흔적일 수 있다는 신호를 남긴다.
+    """
+    if correction_value < -1e-6:
+        return "가공(살빼기)"
+    if correction_value > 1e-6:
+        mirror = -scan_value  # 실측을 그대로 뒤집었으면 나왔을 값
+        if mirror > 1e-6 and correction_value < mirror - 0.05:
+            return "용접(살붙이기)-축소반영"
+        return "용접(살붙이기)"
+    return "변경없음"
+
+
 def match_and_diff(
     part_no: str,
     scan_points: list,
@@ -161,6 +182,7 @@ def match_and_diff(
             "match_distance_px": round(distance, 1),
             "raw_diff": round(correction - scan_value, 3),
             "residual": round(correction + scan_value, 3),
+            "machining_note": machining_note(scan_value, correction),
         })
     return rows
 
@@ -206,6 +228,26 @@ def build_dataset(cases: list) -> tuple:
     return all_rows, pairing_report
 
 
+def _write_with_retry(path: Path, write_fn, attempts: int = 5, delay: float = 1.5) -> None:
+    """OneDrive/백신이 방금 커밋된 파일을 잠깐 잠그는 경우가 있다(실측
+    확인). 임시 파일에 쓰고 바꿔치기하면서 몇 번 재시도한다."""
+    import os
+    import time
+
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        tmp_path = path.with_suffix(path.suffix + f".tmp{attempt}")
+        try:
+            write_fn(tmp_path)
+            os.replace(tmp_path, path)
+            return
+        except PermissionError as exc:
+            last_exc = exc
+            tmp_path.unlink(missing_ok=True)
+            time.sleep(delay)
+    raise PermissionError(f"{path} 쓰기 실패(재시도 {attempts}회): {last_exc}")
+
+
 def save_dataset(rows: list, pairing_report: dict, out_dir: Path = DATASET_DIR) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     csv_path = out_dir / "correction_diff_dataset.csv"
@@ -213,16 +255,24 @@ def save_dataset(rows: list, pairing_report: dict, out_dir: Path = DATASET_DIR) 
         "part_no", "scan_point_id", "scan_x", "scan_y", "scan_value",
         "sheet_x", "sheet_y", "projected_x", "projected_y",
         "correction_value", "match_distance_px", "raw_diff", "residual",
+        "machining_note",
     ]
-    with csv_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+
+    def write_csv(tmp_path: Path) -> None:
+        with tmp_path.open("w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+
+    _write_with_retry(csv_path, write_csv)
 
     report_path = out_dir / "correction_diff_pairing.json"
-    report_path.write_text(
-        json.dumps(pairing_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(pairing_report, ensure_ascii=False, indent=2)
+    _write_with_retry(
+        report_path,
+        lambda tmp_path: tmp_path.write_text(payload, encoding="utf-8"),
+    )
     return csv_path
 
 

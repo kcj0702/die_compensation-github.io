@@ -62,8 +62,8 @@ from zero_line_advance.advance import (  # noqa: E402
 )
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.zero_points import (  # noqa: E402
-    cluster_zero_points, connect_strongest_pair, load_loop_paths, load_zero_points,
-    snap_into_mask,
+    cluster_zero_points, connect_strongest_pair, filter_to_key_points,
+    load_loop_paths, load_zero_points, snap_into_mask,
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 
@@ -95,6 +95,9 @@ ZERO_LINE_LIBRARY = PROJECT_DIR / "zero_line_detection" / "zero_line_library.jso
 # 라벨 실측값에서 나온 0포인트라 컬러바 색 잡음에 흔들리지 않는다.
 ZERO_POINTS_DIR = PROJECT_DIR / "zero_line_detection" / "zero_points_data"
 LOOP_PATHS_DIR = PROJECT_DIR / "my_lab" / "scan_point_contour" / "output"
+# 현업 제공 key_zero_point_engine 결과(있으면 0포인트 후보를 컬러바 HSV
+# 재검증으로 한 번 더 거른다). 없는 품번은 그냥 원래 후보를 그대로 쓴다.
+KEY_ZERO_POINTS_DIR = PROJECT_DIR / "my_lab" / "zero_point_selection" / "output"
 
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
@@ -511,6 +514,18 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                     if candidate.is_file():
                         loop_paths = load_loop_paths(candidate)
                     break
+            # 현업 제공 key_zero_point_engine(2026-08-25)이 있으면 후보를
+            # 한 번 더 거른다 — 컬러바 HSV로 후보 주변 실제 편차를 다시
+            # 재보고, 부호전환은 있었지만 실제로는 편차가 큰(노이즈) 후보를
+            # 뺀다. evaluate_pipeline.py로 확인: 최종 선의 정확도는 그대로
+            # 유지되면서(3부품 전부 동일) 후보/군집 수만 줄어든다 —
+            # "0포인트가 너무 많이 찍힌다"던 현업 지적을 화면에서 줄인다.
+            for key_folder in KEY_ZERO_POINTS_DIR.glob("*"):
+                if part_key in key_folder.name.upper():
+                    key_json = key_folder / "key_zero_points.json"
+                    if key_json.is_file():
+                        raw_points = filter_to_key_points(raw_points, key_json)
+                    break
             zero_point_clusters = cluster_zero_points(raw_points, loop_paths=loop_paths)
             if zero_output is not None and zero_point_clusters:
                 line = connect_strongest_pair(
@@ -649,7 +664,8 @@ def read_sheet_callouts(payload: bytes) -> dict[str, Any]:
     그대로 뒤집은 것과 실제 보정치가 얼마나 다른지"를 계산하는 데 쓴다.
     """
     from zero_line_detection.sheet_values import (
-        assemble_callouts, build_callout_crops, detect_callout_regions, detect_red_dots,
+        assemble_callouts, build_callout_crops, detect_callout_regions,
+        detect_instruction_notes, detect_red_dots,
     )
 
     image = _decode_image(payload)
@@ -664,12 +680,17 @@ def read_sheet_callouts(payload: bytes) -> dict[str, Any]:
         values, warning = _read_qwen_values(reader, crops)
 
     callouts = assemble_callouts(boxes, dots, values)
+    # "OO ea 절대높이 유지" 같은 지시문은 숫자가 아니라 값으로 안 읽힌다.
+    # 어느 점에 적용되는지까지는 자동으로 못 풀어서(sheet_values.py 문서
+    # 참고) 위치만 알려주고 사람이 확인하게 한다.
+    notes = detect_instruction_notes(image)
     result: dict[str, Any] = {
         "width": image.shape[1],
         "height": image.shape[0],
         "callouts": [c.to_dict() for c in callouts],
         "boxesDetected": len(boxes),
         "dotsDetected": len(dots),
+        "instructionNotes": [list(box) for box in notes],
     }
     if warning:
         result["warning"] = warning
