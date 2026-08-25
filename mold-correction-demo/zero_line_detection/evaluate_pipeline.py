@@ -33,7 +33,7 @@ from zero_line_detection.sheet_reference import (
 from zero_line_detection.zero_line import detect_zero_line
 from zero_line_detection.zero_points import (
     cluster_zero_points, connect_strongest_pair, filter_to_key_points,
-    load_loop_paths, load_zero_points,
+    load_key_scores, load_loop_paths, load_zero_points,
 )
 
 LOOP_PATHS_DIR = ZERO_POINTS_DIR.parent.parent / "my_lab" / "scan_point_contour" / "output"
@@ -69,9 +69,15 @@ def find_loop_paths(part_key: str) -> dict:
     return {}
 
 
-def evaluate_case(case, use_key_filter: bool = False) -> dict:
-    """use_key_filter=True 면 key_zero_point_engine 이 '핵심'으로 남긴
-    후보만 클러스터링에 넣는다(있는 품번만 — 없으면 원래대로 전체 후보).
+def evaluate_case(
+    case, use_key_filter: bool = False, use_key_ranking: bool = False,
+) -> dict:
+    """key_zero_point_engine 결과를 어떻게 쓸지 두 가지를 따로 켤 수 있다.
+
+    use_key_filter: '핵심'으로 남긴 후보만 클러스터링에 넣는다(노이즈 제거).
+    use_key_ranking: 군집에 컬러바 실측 key_score를 매겨서 끝점 선택
+        순위(strength 대신)에 쓴다(더 나은 끝점을 고르길 기대).
+    둘 다 해당 품번에 key_zero_points.json 이 있을 때만 적용된다.
     """
     scan_path = DEFAULT_DATA_DIR / case.scan_name
     sheet_path = DEFAULT_DATA_DIR / case.sheet_name
@@ -91,12 +97,12 @@ def evaluate_case(case, use_key_filter: bool = False) -> dict:
 
     candidates = load_zero_points(points_path)
     result["n_candidates_before_key_filter"] = len(candidates)
-    if use_key_filter:
-        key_json = find_key_points_json(case.part_no)
-        if key_json is not None:
-            candidates = filter_to_key_points(candidates, key_json)
+    key_json = find_key_points_json(case.part_no) if (use_key_filter or use_key_ranking) else None
+    if use_key_filter and key_json is not None:
+        candidates = filter_to_key_points(candidates, key_json)
+    key_scores = load_key_scores(key_json) if (use_key_ranking and key_json is not None) else None
     loop_paths = find_loop_paths(case.part_no)
-    clusters = cluster_zero_points(candidates, loop_paths=loop_paths)
+    clusters = cluster_zero_points(candidates, loop_paths=loop_paths, key_scores=key_scores)
     result["n_candidates"] = len(candidates)
     result["n_clusters"] = len(clusters)
 
@@ -142,20 +148,32 @@ def _print_table(rows: list) -> None:
 
 
 def main() -> int:
-    print("=== 기본 (전체 0포인트 후보) ===")
-    baseline = [evaluate_case(case, use_key_filter=False) for case in CASES]
+    print("=== 기본 (전체 0포인트 후보, strength로만 순위) ===")
+    baseline = [evaluate_case(case) for case in CASES]
     _print_table(baseline)
 
-    print("\n=== key_zero_point_engine 필터 적용 (있는 품번만) ===")
+    print("\n=== key 필터만 (노이즈 후보 제거, 순위는 그대로 strength) ===")
     filtered = [evaluate_case(case, use_key_filter=True) for case in CASES]
     _print_table(filtered)
+
+    print("\n=== key 순위 적용 (컬러바 실측값으로 끝점 순위, 필터는 안 함) ===")
+    ranked = [evaluate_case(case, use_key_ranking=True) for case in CASES]
+    _print_table(ranked)
+
+    print("\n=== key 필터 + 순위 둘 다 (실제 배포 후보) ===")
+    combined = [
+        evaluate_case(case, use_key_filter=True, use_key_ranking=True)
+        for case in CASES
+    ]
+    _print_table(combined)
 
     print(
         "\n끝점오차%는 실제로 골라진 두 끝점 각각이 정답에서 얼마나 떨어져"
         "\n있는지(대각선 대비 %)다. 이 값이 크면 '가장 강한 부호전환 2개'"
-        "\n규칙이 진짜 끝점을 놓쳤다는 뜻. key 필터는 컬러바 HSV로 후보"
-        "\n주변 실제 편차를 다시 확인해 노이즈 후보를 줄인다(현업 제공,"
-        "\n2026-08-25) — 위 두 표를 비교해 실제로 나아졌는지 본다."
+        "\n규칙이 진짜 끝점을 놓쳤다는 뜻. key 필터/순위는 컬러바 HSV로"
+        "\n후보 주변 실제 편차를 다시 확인한다(현업 제공, 2026-08-25) —"
+        "\n필터는 노이즈 후보를 줄이고, 순위는 strength 대신 그 실측값"
+        "\n으로 끝점을 고른다. 네 표를 비교해 실제로 나아졌는지 본다."
     )
     return 0
 

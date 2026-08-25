@@ -65,6 +65,10 @@ class ZeroCluster:
     contour: list            # zone 일 때 채울 폴리곤. point 면 빈 리스트
     strength: float          # 구성원 중 가장 확실한 전환 크기
     span: float              # 윤곽선 위에서 차지한 길이 (sample 단위)
+    key_score: float | None = None  # key_zero_point_engine의 컬러바 실측
+                                     # |편차| 평균(mm). 작을수록 진짜 0에
+                                     # 가깝다 — 있으면 strength보다 우선
+                                     # 신뢰한다(끝점 선택 순위에 사용).
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -139,6 +143,25 @@ def load_key_zero_points(json_path: str | Path) -> set:
     return keys
 
 
+def load_key_scores(json_path: str | Path) -> dict:
+    """key_zero_point_engine 결과에서 좌표별 컬러바 실측 |편차| 평균(mm)을 읽는다.
+
+    selected 여부와 무관하게 candidates 전체에서 읽는다 — 이미
+    filter_to_key_points 로 걸렀으면 살아남은 점만 매칭되고, 안 걸렀으면
+    후보 전체가 매칭된다. connect_strongest_pair 에서 strength 대신(혹은
+    같이) 끝점 순위를 매기는 데 쓴다 — strength는 "라벨 부호가 바뀌었나"
+    만 보는 간접 신호고, 이건 그 자리 실제 색을 다시 잰 직접 신호다.
+    """
+    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    scores: dict = {}
+    for loop in data.get("loops", []):
+        for item in loop.get("candidates", []):
+            x, y = item["point"]
+            scores[(round(float(x), 1), round(float(y), 1))] = float(
+                item["mean_abs_deviation_mm"])
+    return scores
+
+
 def filter_to_key_points(points: list, key_json_path: str | Path) -> list:
     """0포인트 후보를 key_zero_point_engine 이 '핵심'으로 남긴 것만 남긴다.
 
@@ -185,6 +208,26 @@ def _contour_segment(
     return np.asarray([at(v) for v in steps], dtype=np.float32)
 
 
+def _rank_key(cluster: "ZeroCluster") -> tuple:
+    """군집 순위를 매기는 공통 기준. 낮을수록 더 믿을 만한 끝점 후보.
+
+    실측(JD_64XX2)으로 드러난 문제를 고쳤다: key_score(컬러바 실측)만
+    보고 정렬하면, 작업자가 라벨에 **직접 "0.0"이라고 적은 exact 점**
+    (strength=EXACT_ZERO_STRENGTH)이 key_score 0.03mm 차이로 밀려나
+    엉뚱한 점이 끝점으로 뽑혔다. exact 라벨은 컬러바 재검증보다 더
+    직접적인 증거라 항상 최우선이어야 한다.
+
+    우선순위: 1) exact 라벨 2) key_score 낮은 순(0에 가까움)
+    3) strength 높은 순.
+    """
+    is_exact = cluster.strength >= EXACT_ZERO_STRENGTH - 0.5
+    return (
+        0 if is_exact else (1 if cluster.key_score is not None else 2),
+        cluster.key_score if cluster.key_score is not None else 0.0,
+        -cluster.strength,
+    )
+
+
 def cluster_zero_points(
     points: list,
     loop_paths: dict | None = None,
@@ -193,6 +236,7 @@ def cluster_zero_points(
     max_pixel_gap: float = 120.0,
     zone_margin: float = 0.6,
     zone_thickness: int = 26,
+    key_scores: dict | None = None,
 ) -> list:
     """같은 윤곽선에서 인접한 0포인트를 묶는다. 윤곽선이 다르면 절대 안 묶는다.
 
@@ -208,6 +252,12 @@ def cluster_zero_points(
 
     기본값 merge_gap=2.5, min_strength=0.15 는 JD_64XX2 실측 보정시트에
     맞춰 고른 값이다(군집->정답 3.4%, 정답->군집 5.6% 로 양방향 최적).
+
+        key_scores: {(x,y): mean_abs_deviation_mm} — key_zero_point_engine
+            이 컬러바로 다시 잰 실측값(load_key_scores). 주면 각 군집에
+            key_score(구성원 중 최솟값 = 가장 0에 가까움)를 매겨서
+            connect_strongest_pair 가 strength 대신 이걸로 순위를 매길
+            수 있게 한다.
     """
     kept = [p for p in points if p.strength >= min_strength]
     clusters: list = []
@@ -251,12 +301,19 @@ def cluster_zero_points(
             center = xy.mean(axis=0)
             span = float(members[-1].position - members[0].position)
             strength = float(max(m.strength for m in members))
+            member_scores = [
+                key_scores[(round(m.x, 1), round(m.y, 1))]
+                for m in members
+                if key_scores is not None and (round(m.x, 1), round(m.y, 1)) in key_scores
+            ]
+            key_score = min(member_scores) if member_scores else None
             if len(members) == 1:
                 clusters.append(ZeroCluster(
                     cluster_id=0, loop=loop_name, kind="point",
                     center=[round(float(center[0]), 1), round(float(center[1]), 1)],
                     members=xy.round(1).tolist(), contour=[],
                     strength=round(strength, 3), span=round(span, 2),
+                    key_score=round(key_score, 5) if key_score is not None else None,
                 ))
             else:
                 # 뭉친 자리는 면으로 잡는다 (현업 제안). 점들을 부풀리지
@@ -301,9 +358,14 @@ def cluster_zero_points(
                     members=xy.round(1).tolist(),
                     contour=np.asarray(outline).astype(int).tolist(),
                     strength=round(strength, 3), span=round(span, 2),
+                    key_score=round(key_score, 5) if key_score is not None else None,
                 ))
 
-    clusters.sort(key=lambda c: -c.strength)
+    # key_score(컬러바 실측)가 있으면 그게 strength(부호전환 크기)보다
+    # 신뢰도 높은 신호다 — 있는 군집을 먼저, 그 안에서는 0에 가까운
+    # (key_score 낮은) 순으로. key_score 없는 군집은 기존처럼 strength
+    # 로만 뒤에 정렬한다.
+    clusters.sort(key=_rank_key)
     for index, cluster in enumerate(clusters, start=1):
         cluster.cluster_id = index
     return clusters
@@ -378,15 +440,17 @@ def connect_strongest_pair(
         def __init__(self, anchor_id, x, y):
             self.anchor_id, self.x, self.y = anchor_id, x, y
 
+    # 순위는 cluster_zero_points 와 같은 기준(_rank_key)을 쓴다 — exact
+    # 라벨 최우선, 그다음 key_score(컬러바 실측), 마지막 strength.
     on_part = []
     for cluster in clusters:
         sx, sy, moved = snap_into_mask(part_mask, cluster.center[0], cluster.center[1])
         if moved <= max_snap_px:
-            on_part.append((cluster.strength, sx, sy))
+            on_part.append((_rank_key(cluster), sx, sy))
     if len(on_part) < 2:
         return None
-    on_part.sort(key=lambda item: -item[0])
-    anchors = [_Anchor(index, x, y) for index, (_s, x, y) in enumerate(on_part[:2], start=1)]
+    on_part.sort(key=lambda item: item[0])
+    anchors = [_Anchor(index, x, y) for index, (_k, x, y) in enumerate(on_part[:2], start=1)]
 
     lines = find_valley_lines(
         values, part_mask, anchors, tolerance,
@@ -399,5 +463,5 @@ __all__ = [
     "ZeroPoint", "ZeroCluster",
     "snap_into_mask", "connect_strongest_pair", "load_loop_paths",
     "load_zero_points", "cluster_zero_points", "draw_zero_clusters",
-    "load_key_zero_points", "filter_to_key_points",
+    "load_key_zero_points", "filter_to_key_points", "load_key_scores",
 ]
