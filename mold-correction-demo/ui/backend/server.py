@@ -61,6 +61,7 @@ from zero_line_advance.advance import (  # noqa: E402
     AdvanceConfig, detect_advanced_zero_line,
 )
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
+from zero_line_detection.green_belt import find_green_belts  # noqa: E402
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
     filter_to_key_points, load_key_scores, load_loop_paths, load_zero_points,
@@ -552,6 +553,21 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:
         errors["zeroPoints"] = str(exc)
 
+    # 현업이 준 영라인 선정 방법(2026-08-25) 그대로 — "녹색 영역" 과
+    # "플러스/마이너스 전환대" 가 겹치는 **길쭉한 벨트**를 찾는다.
+    # 두 0포인트를 억지로 잇지 않으므로, 측정 근거가 없는 자리에는
+    # 아무것도 그리지 않는다(green_belt.py 문서에 실측 근거 있음).
+    green_belts: list = []
+    try:
+        if zero_output is not None:
+            belt_values = (
+                calibrated_values if calibrated_values is not None
+                else zero_output.values
+            )
+            green_belts = find_green_belts(belt_values, zero_output.part_mask)
+    except Exception as exc:
+        errors["greenBelts"] = str(exc)
+
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
     try:
@@ -624,6 +640,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "advanceLine": advance_line,
         "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
         "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
+        "greenBelts": [b.to_dict() for b in green_belts],
         "labelZeroLine": label_zero_line,
         "referenceLine": reference_line,
         "points": points,

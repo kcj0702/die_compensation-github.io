@@ -26,6 +26,8 @@ type ValleyLine = { id: string; anchorStartId: number | null; anchorEndId: numbe
 type ValleyLineResponse = { anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
 type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
+// 현업 방식(녹색 영역 x 부호 전환대)으로 찾은 영라인 후보 구간
+type GreenBelt = { belt_id: number; contour: [number, number][]; center: [number, number]; length_px: number; area_px: number; mean_abs_deviation: number };
 type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
 type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
@@ -39,6 +41,7 @@ type AnalysisResult = {
   advanceLine: AdvanceLine | null;
   zeroLineCandidates: ZeroLineCandidate[];
   zeroPointClusters: ZeroPointCluster[];
+  greenBelts: GreenBelt[];
   labelZeroLine: LabelZeroLine | null;
   referenceLine: ReferenceLine | null;
   points: PointResult[];
@@ -810,6 +813,23 @@ function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { ancho
   })}</div>;
 }
 
+function GreenBeltOverlay({ belts, width, height }: { belts: GreenBelt[]; width: number; height: number }) {
+  // 현업이 준 방법 그대로 — "녹색(오차 0 근처)" 이면서 "플러스/마이너스가
+  // 전환되는" 자리만 벨트로 낸다. 근거가 없는 자리엔 아무것도 안 그린다.
+  const usable = belts.filter((b) => b.contour.length >= 3);
+  if (!usable.length) return null;
+  const strokeWidth = Math.max(width, height) * 0.003;
+  return <svg className="green-belt-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+    {usable.map((belt) => {
+      const points = belt.contour.map(([x, y]) => `${x},${y}`).join(' ');
+      return <g key={belt.belt_id}>
+        <polygon points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 3} strokeLinejoin="round" opacity={0.9} />
+        <polygon points={points} fill="rgba(0,200,80,0.45)" stroke="#00893f" strokeWidth={strokeWidth} strokeLinejoin="round" />
+      </g>;
+    })}
+  </svg>;
+}
+
 function ZeroZoneOverlay({ clusters, width, height }: { clusters: ZeroPointCluster[]; width: number; height: number }) {
   // 백엔드가 0포인트 군집을 전부 면으로 넓혀서 준다 — 보정시트가 제로를
   // 선 하나가 아니라 여러 구간으로 표기하는 부품이 있어서다(실측:
@@ -1057,12 +1077,18 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
     <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}{engine === 'zero' && <>
         <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
+        <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
         <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
         <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
-        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroAreaClusters.length > 0 ? ` · 구간 ${zeroAreaClusters.length}개` : ''}</span></div>
+        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroAreaClusters.length > 0 ? ` · 구간 ${zeroAreaClusters.length}개` : ''}{(result.greenBelts || []).length > 0 ? ` · 녹색벨트 ${result.greenBelts.length}개` : ''}</span></div>
+        {(result.greenBelts || []).length > 0 && <p className="anchor-panel__hint">
+          초록 면은 <b>오차가 0에 가깝고(녹색) 동시에 +/− 가 뒤바뀌는</b> 구간입니다 —
+          현업에서 알려주신 영라인 판정 방법 그대로입니다. 측정 근거가 있는
+          자리에만 표시하므로 끊겨 보일 수 있습니다.
+        </p>}
         {zeroAreaClusters.length > 0 && <p className="anchor-panel__hint">
           빨간 면은 편차가 0에 가까운 것으로 검출된 구간입니다.
           점 2개를 이은 선이 이 구간을 다 지나가지 않을 수 있으니 함께 참고하세요.
