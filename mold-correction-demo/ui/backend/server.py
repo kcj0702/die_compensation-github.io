@@ -69,6 +69,9 @@ from zero_line_detection.green_belt import find_green_belts  # noqa: E402
 from zero_line_detection.simple_zero_line import (  # noqa: E402
     find_simple_zero_lines,
 )
+from zero_line_detection.approved_profile import (  # noqa: E402
+    approved_shapes_for, distance_report,
+)
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
     filter_to_key_points, load_key_scores, load_loop_paths, load_zero_points,
@@ -598,6 +601,19 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:
         errors["simpleZeroLines"] = str(exc)
 
+    # 승인된 영라인 도형(있는 품번만) — **비교 기준선일 뿐** 검출을 대체하지
+    # 않는다. 시트에서 유도한 정답보다 이쪽이 믿을 만해서 같이 내보낸다
+    # (JD_64XX2 실측: 우리 직선과 2.04% / 1.82%, 시트 정답과는 6.12% / 5.00%).
+    approved_profile: list = []
+    approved_distance = None
+    try:
+        approved_profile = approved_shapes_for(part_key, width, height)
+        if approved_profile and simple_zero_lines:
+            approved_distance = distance_report(
+                [l.points for l in simple_zero_lines], part_key, width, height)
+    except Exception as exc:
+        errors["approvedProfile"] = str(exc)
+
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
     try:
@@ -672,6 +688,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
         "greenBelts": [b.to_dict() for b in green_belts],
         "simpleZeroLines": [l.to_dict() for l in simple_zero_lines],
+        "approvedProfile": approved_profile,
+        "approvedDistance": approved_distance,
         "labelZeroLine": label_zero_line,
         "referenceLine": reference_line,
         "points": points,

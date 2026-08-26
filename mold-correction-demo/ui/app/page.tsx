@@ -31,6 +31,9 @@ type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; conto
 // 현업 방식(녹색 영역 x 부호 전환대)으로 찾은 영라인 후보 구간
 // 주요 0포인트를 직선으로 이은 영라인 — 곡선 없이 꺾임 최대 1개
 type SimpleZeroLine = { line_id: number; points: [number, number][]; route_type: string; bend_count: number; combined_coverage: number; tolerance_coverage: number; product_coverage: number; support_count: number; length_px: number };
+// 승인 도면에서 뽑은 영라인 도형 — 검출이 아니라 비교 기준선이다
+type ApprovedShape = { shape_id: number; points: [number, number][]; is_closed: boolean };
+type ApprovedDistance = { to_approved_pct: number; to_predicted_pct: number; diagonal_px: number };
 type GreenBelt = { belt_id: number; contour: [number, number][]; center: [number, number]; length_px: number; area_px: number; mean_abs_deviation: number };
 type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
 type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
@@ -47,6 +50,8 @@ type AnalysisResult = {
   zeroPointClusters: ZeroPointCluster[];
   greenBelts: GreenBelt[];
   simpleZeroLines: SimpleZeroLine[];
+  approvedProfile: ApprovedShape[];
+  approvedDistance: ApprovedDistance | null;
   labelZeroLine: LabelZeroLine | null;
   referenceLine: ReferenceLine | null;
   points: PointResult[];
@@ -820,6 +825,29 @@ function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { ancho
   })}</div>;
 }
 
+function ApprovedProfileOverlay({ shapes, width, height }: { shapes: ApprovedShape[]; width: number; height: number }) {
+  // 승인 도면의 영라인. **검출 결과가 아니다** — 얼마나 붙었는지 눈으로
+  // 보라고 같이 그린다. 검출선과 헷갈리지 않게 보라색 점선으로 구분한다.
+  if (!shapes.length) return null;
+  const strokeWidth = Math.max(width, height) * 0.0026;
+  return <svg className="approved-profile-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+    {shapes.map((shape) => {
+      const points = shape.points.map(([x, y]) => `${x},${y}`).join(' ');
+      const common = {
+        points, fill: 'none', stroke: '#7c3aed', strokeWidth,
+        strokeDasharray: `${strokeWidth * 4} ${strokeWidth * 3}`,
+        strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+      };
+      return <g key={shape.shape_id}>
+        {shape.is_closed
+          ? <polygon points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} opacity={0.85} />
+          : <polyline points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} opacity={0.85} strokeLinecap="round" strokeLinejoin="round" />}
+        {shape.is_closed ? <polygon {...common} /> : <polyline {...common} />}
+      </g>;
+    })}
+  </svg>;
+}
+
 function SimpleZeroLineOverlay({ lines, width, height }: { lines: SimpleZeroLine[]; width: number; height: number }) {
   // 현업 zero_line_drawing 방식 — 주요 0포인트를 직선으로 잇는다.
   // "정답지처럼 깔끔한 직선" 요구에 맞춰 곡선을 쓰지 않으므로 꼭짓점은
@@ -1111,12 +1139,18 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
         <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
         <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
         <SimpleZeroLineOverlay lines={result.simpleZeroLines || []} width={result.source.width} height={result.source.height} />
+        <ApprovedProfileOverlay shapes={result.approvedProfile || []} width={result.source.width} height={result.source.height} />
         <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
         <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
         <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroAreaClusters.length > 0 ? ` · 구간 ${zeroAreaClusters.length}개` : ''}{(result.greenBelts || []).length > 0 ? ` · 녹색벨트 ${result.greenBelts.length}개` : ''}{(result.simpleZeroLines || []).length > 0 ? ` · 직선 ${result.simpleZeroLines.length}개` : ''}</span></div>
+        {(result.approvedProfile || []).length > 0 && <p className="anchor-panel__hint">
+          보라 점선은 <b>승인 도면의 영라인</b>입니다 — 검출 결과가 아니라
+          비교 기준선입니다.
+          {result.approvedDistance && ` 검출한 직선과 이 도형 사이 거리는 ${result.approvedDistance.to_approved_pct}% / ${result.approvedDistance.to_predicted_pct}% (이미지 대각선 대비 중앙값)입니다.`}
+        </p>}
         {(result.simpleZeroLines || []).length > 0 && <p className="anchor-panel__hint">
           주황 직선은 주요 0포인트를 이은 영라인입니다. 곡선을 쓰지 않고
           꺾임은 최대 1개까지만 허용합니다. 괄호 안은 편차 -0.5~+0.5mm
