@@ -69,8 +69,8 @@ from zero_line_detection.green_belt import find_green_belts  # noqa: E402
 from zero_line_detection.simple_zero_line import (  # noqa: E402
     find_simple_zero_lines,
 )
-from zero_line_detection.approved_profile import (  # noqa: E402
-    approved_shapes_for, distance_report,
+from zero_line_detection.lab_profile import (  # noqa: E402
+    distance_report, lab_shapes_for,
 )
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
@@ -601,18 +601,22 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:
         errors["simpleZeroLines"] = str(exc)
 
-    # 승인된 영라인 도형(있는 품번만) — **비교 기준선일 뿐** 검출을 대체하지
-    # 않는다. 시트에서 유도한 정답보다 이쪽이 믿을 만해서 같이 내보낸다
-    # (JD_64XX2 실측: 우리 직선과 2.04% / 1.82%, 시트 정답과는 6.12% / 5.00%).
-    approved_profile: list = []
-    approved_distance = None
+    # my_lab 파이프라인이 그린 영라인(있는 품번만). 데모 화면은 이것을
+    # 영라인으로 표시하고, 우리 검출은 대조용으로 숨겨 둔다.
+    #
+    # 처음엔 이걸 "승인 도면" 으로 알고 정답처럼 썼는데 아니었다 —
+    # my_lab/zero_line_drawing 스크립트의 출력이다(lab_profile.py 참고).
+    # 게다가 우리 검출과 같은 key_zero_points 를 끝점으로 쓰므로, 둘이
+    # 가깝다는 것이 정확도의 근거가 되지 못한다.
+    lab_profile: list = []
+    lab_distance = None
     try:
-        approved_profile = approved_shapes_for(part_key, width, height)
-        if approved_profile and simple_zero_lines:
-            approved_distance = distance_report(
+        lab_profile = lab_shapes_for(part_key, width, height)
+        if lab_profile and simple_zero_lines:
+            lab_distance = distance_report(
                 [l.points for l in simple_zero_lines], part_key, width, height)
     except Exception as exc:
-        errors["approvedProfile"] = str(exc)
+        errors["labProfile"] = str(exc)
 
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
@@ -688,8 +692,8 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
         "greenBelts": [b.to_dict() for b in green_belts],
         "simpleZeroLines": [l.to_dict() for l in simple_zero_lines],
-        "approvedProfile": approved_profile,
-        "approvedDistance": approved_distance,
+        "labProfile": lab_profile,
+        "labDistance": lab_distance,
         "labelZeroLine": label_zero_line,
         "referenceLine": reference_line,
         "points": points,
