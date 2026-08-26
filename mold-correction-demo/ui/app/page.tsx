@@ -826,23 +826,23 @@ function AnchorPicker({ anchors, width, height, selectedIds, onToggle }: { ancho
 }
 
 function ApprovedProfileOverlay({ shapes, width, height }: { shapes: ApprovedShape[]; width: number; height: number }) {
-  // 승인 도면의 영라인. **검출 결과가 아니다** — 얼마나 붙었는지 눈으로
-  // 보라고 같이 그린다. 검출선과 헷갈리지 않게 보라색 점선으로 구분한다.
+  // 승인 도면의 제로라인. 데모에서는 이것이 제로라인 결과다
+  // (feat/product-zero-line-profiles 의 표기를 그대로 따른다 —
+  //  빨간 점선 외곽선, 닫힌 면은 옅은 빨강 채움).
   if (!shapes.length) return null;
-  const strokeWidth = Math.max(width, height) * 0.0026;
+  const strokeWidth = Math.max(width, height) * 0.0028;
+  const dash = `${strokeWidth * 3.5} ${strokeWidth * 2.5}`;
   return <svg className="approved-profile-overlay" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
     {shapes.map((shape) => {
       const points = shape.points.map(([x, y]) => `${x},${y}`).join(' ');
-      const common = {
-        points, fill: 'none', stroke: '#7c3aed', strokeWidth,
-        strokeDasharray: `${strokeWidth * 4} ${strokeWidth * 3}`,
-        strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
-      };
+      const halo = { points, fill: 'none', stroke: '#ffffff', strokeWidth: strokeWidth * 2.8,
+        opacity: 0.85, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
+      const line = { points, fill: 'none', stroke: '#eb3737', strokeWidth, strokeDasharray: dash,
+        strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const };
       return <g key={shape.shape_id}>
-        {shape.is_closed
-          ? <polygon points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} opacity={0.85} />
-          : <polyline points={points} fill="none" stroke="#ffffff" strokeWidth={strokeWidth * 2.4} opacity={0.85} strokeLinecap="round" strokeLinejoin="round" />}
-        {shape.is_closed ? <polygon {...common} /> : <polyline {...common} />}
+        {shape.is_closed && <polygon points={points} fill="rgba(255,45,45,0.20)" stroke="none" />}
+        {shape.is_closed ? <polygon {...halo} /> : <polyline {...halo} />}
+        {shape.is_closed ? <polygon {...line} /> : <polyline {...line} />}
       </g>;
     })}
   </svg>;
@@ -1090,6 +1090,9 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   // (kind 로 거르면 확장 전 데이터가 섞였을 때 조용히 빠진다).
   const zeroAreaClusters = (result.zeroPointClusters || []).filter((c) => c.contour.length >= 3);
   const [selectedAnchors, setSelectedAnchors] = useState<number[]>([]);
+  // 승인 도면이 있는 품번은 그것이 데모의 제로라인이다. 우리 검출 결과는
+  // 기본으로 숨기고, 필요할 때만 켜서 대조한다.
+  const [showDetection, setShowDetection] = useState(false);
   const [valleyStatus, setValleyStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [valleyError, setValleyError] = useState<string | null>(null);
   useEffect(() => { setSelectedAnchors([]); setValleyStatus('idle'); setValleyError(null); }, [scan.id]);
@@ -1136,41 +1139,34 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
     <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}{engine === 'zero' && <>
-        <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
-        <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
-        <SimpleZeroLineOverlay lines={result.simpleZeroLines || []} width={result.source.width} height={result.source.height} />
         <ApprovedProfileOverlay shapes={result.approvedProfile || []} width={result.source.width} height={result.source.height} />
-        <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
-        <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
+        {showDetection && <>
+          <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
+          <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
+          <SimpleZeroLineOverlay lines={result.simpleZeroLines || []} width={result.source.width} height={result.source.height} />
+          <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
+          <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
+        </>}
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
-        <div className="card-title"><h3>제로라인</h3><span>앵커 {zeroAnchors.length}개{zeroAreaClusters.length > 0 ? ` · 구간 ${zeroAreaClusters.length}개` : ''}{(result.greenBelts || []).length > 0 ? ` · 녹색벨트 ${result.greenBelts.length}개` : ''}{(result.simpleZeroLines || []).length > 0 ? ` · 직선 ${result.simpleZeroLines.length}개` : ''}</span></div>
-        {(result.approvedProfile || []).length > 0 && <p className="anchor-panel__hint">
-          보라 점선은 <b>승인 도면의 영라인</b>입니다 — 검출 결과가 아니라
-          비교 기준선입니다.
-          {result.approvedDistance && ` 검출한 직선과 이 도형 사이 거리는 ${result.approvedDistance.to_approved_pct}% / ${result.approvedDistance.to_predicted_pct}% (이미지 대각선 대비 중앙값)입니다.`}
-        </p>}
-        {(result.simpleZeroLines || []).length > 0 && <p className="anchor-panel__hint">
-          주황 직선은 주요 0포인트를 이은 영라인입니다. 곡선을 쓰지 않고
-          꺾임은 최대 1개까지만 허용합니다. 괄호 안은 편차 -0.5~+0.5mm
-          구간을 지나가는 비율이며, 낮은 선은 점선으로 흐리게 표시합니다.
-        </p>}
-        {(result.simpleZeroLines || []).map((line) => (
-          <div className="point-list-row" key={`zl-${line.line_id}`}>
-            <span>ZL{line.line_id}</span>
-            <b className={line.tolerance_coverage >= 0.55 ? 'positive' : 'negative'}>{Math.round(line.tolerance_coverage * 100)}%</b>
-            <small>{line.bend_count === 0 ? '직선' : '꺾임 1'} · 0포인트 {line.support_count}개 · {Math.round(line.length_px)}px</small>
-          </div>
-        ))}
-        {(result.greenBelts || []).length > 0 && <p className="anchor-panel__hint">
-          초록 면은 <b>오차가 0에 가깝고(녹색) 동시에 +/− 가 뒤바뀌는</b> 구간입니다 —
-          현업에서 알려주신 영라인 판정 방법 그대로입니다. 측정 근거가 있는
-          자리에만 표시하므로 끊겨 보일 수 있습니다.
-        </p>}
-        {zeroAreaClusters.length > 0 && <p className="anchor-panel__hint">
-          빨간 면은 편차가 0에 가까운 것으로 검출된 구간입니다.
-          점 2개를 이은 선이 이 구간을 다 지나가지 않을 수 있으니 함께 참고하세요.
+        <div className="card-title"><h3>제로라인</h3><span>{(result.approvedProfile || []).length > 0 ? `승인 도면 ${result.approvedProfile.length}개` : `앵커 ${zeroAnchors.length}개`}</span></div>
+        {(result.approvedProfile || []).length > 0 ? <>
+          <p className="anchor-panel__hint">
+            빨간 점선은 <b>승인 도면의 제로라인</b>입니다. 이 품번은 승인된
+            도형이 있어 그대로 표시합니다.
+          </p>
+          <button type="button" className="tool-button" onClick={() => setShowDetection((v) => !v)}>
+            {showDetection ? <EyeOff size={14} /> : <Eye size={14} />} 자동 검출 결과 {showDetection ? '숨기기' : '함께 보기'}
+          </button>
+          {showDetection && result.approvedDistance && <p className="anchor-panel__hint">
+            자동 검출한 직선과 승인 도형 사이 거리는 {result.approvedDistance.to_approved_pct}% /
+            {' '}{result.approvedDistance.to_predicted_pct}% 입니다 (이미지 대각선 대비 중앙값).
+          </p>}
+        </> : <p className="anchor-panel__hint">
+          이 품번은 승인 도면이 없어 <b>자동 검출 결과</b>를 표시합니다.
+          초록 면은 오차가 0에 가까우면서 +/− 가 뒤바뀌는 구간, 주황 직선은
+          주요 0포인트를 이은 제로라인입니다.
         </p>}
         {result.labelZeroLine && valleyLines.some((line) => line.id === 'label-zero-line') && (
           <p className="anchor-panel__status">작업자가 실측한 라벨값이 부호를 바꾸는 지점(0포인트)들을 윤곽선을 따라 이어 검출한 선입니다. 정답지를 베낀 게 아니라 스캔 실측값에서 계산했습니다. 실제와 다르면 아래에서 지우고 앵커 2개를 직접 골라 다시 이으세요.</p>
