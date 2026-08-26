@@ -4,7 +4,7 @@
 
     python -m zero_line_detection.run
     python -m zero_line_detection.run --input "data/sample/sample_deviation_map.png"
-    python -m zero_line_detection.run --vmin -1.5 --vmax 2.0      # 컬러바가 잘린 경우
+    python -m zero_line_detection.run --vmin -1.6 --vmax 2.0      # 컬러바가 잘린 경우(JD_64XX)
     python -m zero_line_detection.run --tolerance 0.3             # 허용오차 고정(mm)
     python -m zero_line_detection.run --all-samples               # 샘플 일괄 처리
 

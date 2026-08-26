@@ -4,7 +4,7 @@
     python -m zero_line_detection.register_sheet \
         --scan  "data/intermediate/JD_64XX2-DR000 3D 스캔.png" \
         --sheet "data/intermediate/JD_64XX2-DR000 보정시트.png" \
-        --vmin -1.5 --vmax 2.0
+        --vmin -1.6 --vmax 2.0
 
 등록해두면 같은 품번의 스캔이 들어왔을 때 서버가 이 선을 그대로 쓴다.
 결과는 zero_line_detection/zero_line_library.json 에 쌓인다.
