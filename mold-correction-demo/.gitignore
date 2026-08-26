@@ -11,6 +11,7 @@ data/output/*
 __pycache__/
 *.py[cod]
 .venv/
+
 AJ_ENV/
 .pytest_cache/
 

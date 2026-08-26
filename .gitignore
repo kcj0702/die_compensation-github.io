@@ -151,6 +151,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.vscode
 env/
 venv/
 ENV/
@@ -234,3 +235,4 @@ __marimo__/
 # Confidential label-removal datasets — never commit or upload.
 /mold-correction-demo/label_removal/input/
 /mold-correction-demo/label_removal/output/
+zero_line_compute/
