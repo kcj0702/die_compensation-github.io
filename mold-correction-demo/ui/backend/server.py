@@ -66,6 +66,9 @@ from zero_line_advance.advance import (  # noqa: E402
 )
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.green_belt import find_green_belts  # noqa: E402
+from zero_line_detection.simple_zero_line import (  # noqa: E402
+    find_simple_zero_lines,
+)
 from zero_line_detection.zero_points import (  # noqa: E402
     cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
     filter_to_key_points, load_key_scores, load_loop_paths, load_zero_points,
@@ -507,9 +510,10 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     # 라벨 실측값 기반 0포인트 -> 군집(점/존) -> 선으로 잇기
     zero_point_clusters: list = []
+    simple_key_points: list = []
     label_zero_line = None
+    part_key = part_no_from_name(filename)
     try:
-        part_key = part_no_from_name(filename)
         points_file = ZERO_POINTS_DIR / f"{part_key}.json"
         if points_file.is_file():
             raw_points = load_zero_points(points_file)
@@ -536,6 +540,15 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
                     break
             zero_point_clusters = cluster_zero_points(
                 raw_points, loop_paths=loop_paths, key_scores=key_scores)
+            # 직선 영라인의 시작·끝점은 반드시 이 주요 0포인트여야 한다
+            # (현업 zero_line_drawing README). 존으로 넓히기 전 중심을 쓴다.
+            if zero_output is not None:
+                for cluster in zero_point_clusters:
+                    x, y, moved = snap_into_mask(
+                        zero_output.part_mask, cluster.center[0], cluster.center[1])
+                    if moved <= 60.0:
+                        simple_key_points.append(
+                            (x, y, max(float(cluster.span) / 2.0, 20.0)))
             if zero_output is not None and zero_point_clusters:
                 line = connect_strongest_pair(
                     zero_point_clusters,
@@ -571,6 +584,19 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             green_belts = find_green_belts(belt_values, zero_output.part_mask)
     except Exception as exc:
         errors["greenBelts"] = str(exc)
+
+    # 현업 zero_line_drawing(2026-08-26) 방식 — 주요 0포인트를 직선
+    # 정렬도로 묶고, 편차 -0.5~+0.5mm 허용범위를 얼마나 지나가는지로
+    # 채점한다. 곡선을 쓰지 않으므로 결과가 시트처럼 깔끔한 직선이다.
+    simple_zero_lines: list = []
+    try:
+        if zero_output is not None and len(simple_key_points) >= 2:
+            simple_zero_lines = find_simple_zero_lines(
+                zero_output.values, zero_output.part_mask,
+                simple_key_points, part_no=part_key,
+            )
+    except Exception as exc:
+        errors["simpleZeroLines"] = str(exc)
 
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
@@ -645,6 +671,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
         "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
         "greenBelts": [b.to_dict() for b in green_belts],
+        "simpleZeroLines": [l.to_dict() for l in simple_zero_lines],
         "labelZeroLine": label_zero_line,
         "referenceLine": reference_line,
         "points": points,
