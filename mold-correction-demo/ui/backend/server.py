@@ -809,6 +809,23 @@ async def analyze(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def _shift_centers(features: list[dict], offset) -> list[dict]:
+    """center 를 offset 만큼 평행이동한다. axis/normal 은 방향이라 두 손 뗀다."""
+    if not offset:
+        return features
+    ox, oy, oz = (float(v) for v in offset)
+    moved = []
+    for feature in features:
+        item = dict(feature)
+        centre = item.get("center")
+        if centre and len(centre) == 3:
+            item["center"] = [round(centre[0] - ox, 4),
+                              round(centre[1] - oy, 4),
+                              round(centre[2] - oz, 4)]
+        moved.append(item)
+    return moved
+
+
 def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
     """업로드된 3D 파일을 읽어 뷰어용 메시 + RPS 후보를 만든다.
 
@@ -827,8 +844,14 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             parsed = step_reader.read_step_full(path)
             web = mesh_io.to_web_mesh(
                 parsed["mesh"], name=path.stem, source_format="step")
-            web["holes"] = parsed["holes"]
-            web["planes"] = parsed["planes"][:50]
+            # to_web_mesh 는 정점을 원점으로 옮긴다(자동차 부품은 차량
+            # 좌표계라 원점에서 수천 mm 떨어져 있다). 홀·평면 좌표도 같은
+            # 만큼 옮겨야 형상 위에 얹힌다 — 안 옮기면 실측 001 REINF SIDE
+            # OTR 기준 중심이 (1584, -653, 491) 이라 홀이 1.8m 밖에 뜬다.
+            # 축과 법선은 방향이라 그대로 둔다.
+            offset = web["summary"]["bounds"]["center"] if web.get("recentered") else None
+            web["holes"] = _shift_centers(parsed["holes"], offset)
+            web["planes"] = _shift_centers(parsed["planes"][:50], offset)
             web["counts"] = parsed["counts"]
             return web
 

@@ -131,13 +131,25 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
     return np.vstack(all_v), np.vstack(all_f)
 
 
-def _face_area(face) -> float:
+def _face_props(face) -> tuple:
+    """면의 넓이와 무게중심을 함께 준다.
+
+    무게중심이 필요한 이유 — 평면의 gp_Pln.Location() 은 그 **무한 평면**의
+    파라미터 원점이지 면이 실제로 놓인 자리가 아니다. 실측(001 REINF SIDE
+    OTR.stp)에서 부품 X 범위가 1337~1830 인데 Location() 이 x=1000 을
+    돌려줬다 — 데이텀 후보 좌표로 쓰면 엉뚱한 곳을 가리킨다.
+    """
     from OCP.BRepGProp import BRepGProp
     from OCP.GProp import GProp_GProps
 
     props = GProp_GProps()
     BRepGProp.SurfaceProperties_s(face, props)
-    return float(props.Mass())
+    centre = props.CentreOfMass()
+    return float(props.Mass()), (centre.X(), centre.Y(), centre.Z())
+
+
+def _face_area(face) -> float:
+    return _face_props(face)[0]
 
 
 def find_cylinders(shape, min_radius: float = MIN_HOLE_RADIUS_MM) -> list:
@@ -220,21 +232,19 @@ def find_planes(shape, min_area: float = MIN_PLANE_AREA_MM2) -> list:
             if surface.GetType() != GeomAbs_SurfaceType.GeomAbs_Plane:
                 explorer.Next()
                 continue
-            area = _face_area(face)
+            area, centroid = _face_props(face)
             if area < min_area:
                 explorer.Next()
                 continue
 
             plane = surface.Plane()
-            position = plane.Location()
             normal = plane.Axis().Direction()
             normal_v = np.array([normal.X(), normal.Y(), normal.Z()], dtype=float)
             if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
                 normal_v = -normal_v
 
             found.append(PlaneFace(
-                center=[round(float(v), 3) for v in
-                        (position.X(), position.Y(), position.Z())],
+                center=[round(float(v), 3) for v in centroid],
                 normal=[round(float(v), 4) for v in normal_v],
                 area=round(float(area), 2),
             ))
@@ -246,10 +256,36 @@ def find_planes(shape, min_area: float = MIN_PLANE_AREA_MM2) -> list:
     return found
 
 
+def _dedupe(features: list, *keys) -> list:
+    """같은 자리에 겹쳐 나온 항목을 하나로 줄인다.
+
+    실제 파일(001 REINF SIDE OTR.stp, CATIA V5 내보내기)에서 지름과
+    중심이 완전히 같은 원통이 반복해 나왔다 — 솔리드와 셸이 함께
+    들어 있어서다. 걸러내지 않으면 개수가 부풀고, max_features 컷에
+    진짜 홀이 밀려난다(원통 220개 중 절반가량이 중복이었다).
+    """
+    seen = set()
+    unique = []
+    for item in features:
+        signature = []
+        for key in keys:
+            value = getattr(item, key)
+            if isinstance(value, (list, tuple)):
+                signature.extend(round(float(v), 2) for v in value)
+            else:
+                signature.append(round(float(value), 2))
+        token = tuple(signature)
+        if token in seen:
+            continue
+        seen.add(token)
+        unique.append(item)
+    return unique
+
+
 def read_step_full(
     path: str | Path,
     deflection: float = DEFAULT_DEFLECTION,
-    max_features: int = 200,
+    max_features: int = 400,
 ) -> dict:
     """STEP 하나를 읽어 메시 + RPS 후보를 한 번에 준다."""
     import trimesh
@@ -258,8 +294,8 @@ def read_step_full(
     vertices, faces = tessellate(shape, deflection)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-    cylinders = find_cylinders(shape)
-    planes = find_planes(shape)
+    cylinders = _dedupe(find_cylinders(shape), "center", "diameter", "axis")
+    planes = _dedupe(find_planes(shape), "center", "normal")
     holes = [c for c in cylinders if c.kind == "hole"]
 
     return {

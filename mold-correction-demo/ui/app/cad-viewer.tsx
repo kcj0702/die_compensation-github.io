@@ -1,18 +1,26 @@
 'use client';
 
 /**
- * 3D CAD/스캔 뷰어 — 외부 라이브러리 없이 WebGL2 로 직접 그린다.
+ * 3D CAD 뷰어 — three.js.
  *
- * three.js 를 쓰려 했으나 이 저장소의 node_modules 가 pnpm 트리라
- * npm/pnpm 양쪽 다 설치가 깨졌다. 뷰어에 필요한 건 삼각망 하나를
- * 셰이딩해서 돌려보는 것뿐이라 의존성을 늘리는 대신 직접 그린다 —
- * "모든 처리는 이 PC 안에서" 원칙에도 이쪽이 맞다.
+ * 처음엔 WebGL2 로 직접 그렸다. 그때는 node_modules 트리가 깨져
+ * three 설치가 안 됐고, 필요한 것도 삼각망 셰이딩 하나뿐이었다.
+ * 지금은 실제 부품이 들어오면서 요구가 늘었다 —
  *
- * 평면 셰이딩은 dFdx/dFdy 로 화면공간 미분을 써서 면 법선을 만든다.
- * 정점 법선을 CPU 에서 계산해 보낼 필요가 없어 전송량이 준다.
+ *   001 REINF SIDE OTR.stp (CATIA V5 내보내기, 12.4MB)
+ *     삼각형 45,224  정점 36,772
+ *     크기 493.5 x 215.2 x 1062.4 mm
+ *     원통 220개, 평면 30개
+ *
+ * 홀 220개를 축 방향에 맞춰 링으로 세우고, 평면 30개를 법선과 함께
+ * 보여주고, 삼각망 자체를 눈으로 확인해야 한다. 직접 그리기로는
+ * 감당이 안 돼 three 를 설치했다(로컬 node_modules, CDN 아님 —
+ * "모든 처리는 이 PC 안에서" 원칙).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 export type CadHole = {
   kind: string; radius: number; diameter: number;
@@ -35,281 +43,225 @@ export type CadMesh = {
   note?: string;
 };
 
-// ─── 행렬 (열 우선, WebGL 관례) ──────────────────────────────────
-function perspective(fovY: number, aspect: number, near: number, far: number) {
-  const f = 1 / Math.tan(fovY / 2);
-  const nf = 1 / (near - far);
-  return new Float32Array([
-    f / aspect, 0, 0, 0,
-    0, f, 0, 0,
-    0, 0, (far + near) * nf, -1,
-    0, 0, 2 * far * near * nf, 0,
-  ]);
-}
+export type CadDetail = 'solid' | 'edges' | 'wire';
 
-function lookAt(eye: number[], target: number[], up: number[]) {
-  const z = norm([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
-  const x = norm(cross(up, z));
-  const y = cross(z, x);
-  return new Float32Array([
-    x[0], y[0], z[0], 0,
-    x[1], y[1], z[1], 0,
-    x[2], y[2], z[2], 0,
-    -dot(x, eye), -dot(y, eye), -dot(z, eye), 1,
-  ]);
-}
-
-const cross = (a: number[], b: number[]) => [
-  a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0],
-];
-const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-function norm(v: number[]) {
-  const l = Math.hypot(v[0], v[1], v[2]) || 1;
-  return [v[0] / l, v[1] / l, v[2] / l];
-}
-
-const VERTEX_SHADER = `#version 300 es
-in vec3 aPosition;
-uniform mat4 uProjection;
-uniform mat4 uView;
-out vec3 vViewPos;
-void main() {
-  vec4 viewPos = uView * vec4(aPosition, 1.0);
-  vViewPos = viewPos.xyz;
-  gl_Position = uProjection * viewPos;
-}`;
-
-// 면 법선을 화면공간 미분으로 만든다 — 정점 법선 전송이 필요 없다.
-const FRAGMENT_SHADER = `#version 300 es
-precision highp float;
-in vec3 vViewPos;
-uniform vec3 uColor;
-out vec4 outColor;
-void main() {
-  vec3 normal = normalize(cross(dFdx(vViewPos), dFdy(vViewPos)));
-  if (!gl_FrontFacing) normal = -normal;
-  vec3 lightDir = normalize(vec3(0.4, 0.7, 1.0));
-  float diffuse = max(dot(normal, lightDir), 0.0);
-  float rim = pow(1.0 - max(dot(normal, vec3(0.0, 0.0, 1.0)), 0.0), 2.0);
-  vec3 color = uColor * (0.34 + 0.66 * diffuse) + vec3(0.16) * rim;
-  outColor = vec4(color, 1.0);
-}`;
-
-const LINE_VERTEX = `#version 300 es
-in vec3 aPosition;
-uniform mat4 uProjection;
-uniform mat4 uView;
-void main() { gl_Position = uProjection * uView * vec4(aPosition, 1.0); }`;
-
-const LINE_FRAGMENT = `#version 300 es
-precision highp float;
-uniform vec3 uColor;
-out vec4 outColor;
-void main() { outColor = vec4(uColor, 1.0); }`;
-
-function compile(gl: WebGL2RenderingContext, vsSource: string, fsSource: string) {
-  const make = (type: number, source: string) => {
-    const shader = gl.createShader(type)!;
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      throw new Error(`셰이더 컴파일 실패: ${gl.getShaderInfoLog(shader)}`);
-    }
-    return shader;
-  };
-  const program = gl.createProgram()!;
-  gl.attachShader(program, make(gl.VERTEX_SHADER, vsSource));
-  gl.attachShader(program, make(gl.FRAGMENT_SHADER, fsSource));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(`프로그램 링크 실패: ${gl.getProgramInfoLog(program)}`);
-  }
-  return program;
-}
-
-/** 홀 위치에 그릴 원형 마커의 정점을 만든다 (축에 수직인 원). */
-function holeRings(holes: CadHole[], centre: number[], scale: number) {
-  const points: number[] = [];
-  const SEGMENTS = 32;
-  for (const hole of holes) {
-    const axis = norm(hole.axis as unknown as number[]);
-    // 축에 수직인 임의의 두 벡터
-    const helper = Math.abs(axis[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
-    const u = norm(cross(axis, helper));
-    const v = cross(axis, u);
-    const r = hole.radius * scale;
-    const c = [
-      (hole.center[0] - centre[0]),
-      (hole.center[1] - centre[1]),
-      (hole.center[2] - centre[2]),
-    ];
-    for (let i = 0; i < SEGMENTS; i += 1) {
-      for (const t of [i, i + 1]) {
-        const a = (t / SEGMENTS) * Math.PI * 2;
-        points.push(
-          c[0] + (u[0] * Math.cos(a) + v[0] * Math.sin(a)) * r,
-          c[1] + (u[1] * Math.cos(a) + v[1] * Math.sin(a)) * r,
-          c[2] + (u[2] * Math.cos(a) + v[2] * Math.sin(a)) * r,
-        );
-      }
-    }
-  }
-  return new Float32Array(points);
-}
+const SURFACE = 0x8fa3b4;
+const HOLE_BIG = 0xff8b3d;
+const HOLE_SMALL = 0x4dc3ff;
+const PLANE_TINT = 0x35d68a;
 
 export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
-  // 카메라 상태는 리렌더를 유발하면 안 되므로 ref 로 들고 있는다.
-  const camera = useRef({ theta: 0.9, phi: 1.1, distance: 2.4, panX: 0, panY: 0 });
-  const showHolesRef = useRef(showHoles);
-  showHolesRef.current = showHoles;
+  const [detail, setDetail] = useState<CadDetail>('edges');
+  const [showPlanes, setShowPlanes] = useState(false);
+
+  // 씬 안에서 켜고 끌 그룹들은 ref 로 들고 있어야 리렌더 없이 토글된다.
+  const holeGroup = useRef<THREE.Group | null>(null);
+  const planeGroup = useRef<THREE.Group | null>(null);
+  const edgeLines = useRef<THREE.LineSegments | null>(null);
+  const solidMesh = useRef<THREE.Mesh | null>(null);
+
+  // 중복 제거는 백엔드(step_reader._dedupe)가 이미 했다.
+  const holes = useMemo(() => mesh.holes || [], [mesh.holes]);
+  const diameters = useMemo(
+    () => holes.map((h) => h.diameter).sort((a, b) => a - b), [holes]);
+  const medianDiameter = diameters.length
+    ? diameters[Math.floor(diameters.length / 2)] : 0;
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const gl = canvas.getContext('webgl2', { antialias: true });
-    if (!gl) { setError('이 브라우저에서 WebGL2를 쓸 수 없습니다.'); return; }
+    const mount = mountRef.current;
+    if (!mount) return;
 
-    let program: WebGLProgram;
-    let lineProgram: WebGLProgram;
+    let renderer: THREE.WebGLRenderer;
     try {
-      program = compile(gl, VERTEX_SHADER, FRAGMENT_SHADER);
-      lineProgram = compile(gl, LINE_VERTEX, LINE_FRAGMENT);
-    } catch (err) { setError(String(err)); return; }
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    } catch {
+      setError('이 브라우저에서 WebGL 을 쓸 수 없습니다.');
+      return;
+    }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(mount.clientWidth, mount.clientHeight);
+    renderer.setClearColor(0x16202a);
+    mount.appendChild(renderer.domElement);
 
-    const positions = new Float32Array(mesh.positions);
-    const indices = new Uint32Array(mesh.indices);
-    // 부품이 크므로 화면 좌표로 정규화한다 (가장 긴 변이 1이 되도록)
-    const size = mesh.summary.bounds.size;
-    const longest = Math.max(size[0], size[1], size[2]) || 1;
-    const scale = 1 / longest;
-    for (let i = 0; i < positions.length; i += 1) positions[i] *= scale;
+    const scene = new THREE.Scene();
 
-    const vao = gl.createVertexArray();
-    gl.bindVertexArray(vao);
-    const positionBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
-    const positionLocation = gl.getAttribLocation(program, 'aPosition');
-    gl.enableVertexAttribArray(positionLocation);
-    gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
-    const indexBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
-    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, indices, gl.STATIC_DRAW);
-    gl.bindVertexArray(null);
+    // ── 형상 ─────────────────────────────────────────────────
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position', new THREE.Float32BufferAttribute(mesh.positions, 3));
+    geometry.setIndex(mesh.indices);
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
 
-    // 홀 마커 — 백엔드가 준 좌표는 원본 위치라 메시와 같은 기준으로 옮긴다
-    const ringData = holeRings(mesh.holes || [], mesh.summary.bounds.center, scale);
-    const ringVao = gl.createVertexArray();
-    gl.bindVertexArray(ringVao);
-    const ringBuffer = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, ringBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, ringData, gl.STATIC_DRAW);
-    const ringLocation = gl.getAttribLocation(lineProgram, 'aPosition');
-    gl.enableVertexAttribArray(ringLocation);
-    gl.vertexAttribPointer(ringLocation, 3, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
+    const radius = geometry.boundingSphere?.radius ?? 1;
+    const centre = geometry.boundingSphere?.center ?? new THREE.Vector3();
 
-    gl.enable(gl.DEPTH_TEST);
-    gl.clearColor(0.086, 0.114, 0.153, 1);
+    const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+      color: SURFACE, metalness: 0.55, roughness: 0.42,
+      side: THREE.DoubleSide, flatShading: false,
+    }));
+    scene.add(surface);
+    solidMesh.current = surface;
 
+    // 삼각망을 눈으로 확인하는 층. 45,224개라 선이 촘촘하다 —
+    // 그래서 기본값은 '모서리'(각진 곳만)로 두고 전체 와이어는 선택이다.
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geometry, 24),
+      new THREE.LineBasicMaterial({ color: 0x2f4256, transparent: true, opacity: 0.85 }),
+    );
+    scene.add(edges);
+    edgeLines.current = edges;
+
+    const wire = new THREE.LineSegments(
+      new THREE.WireframeGeometry(geometry),
+      new THREE.LineBasicMaterial({ color: 0x33566f, transparent: true, opacity: 0.28 }),
+    );
+    wire.visible = false;
+    wire.name = 'wire';
+    scene.add(wire);
+
+    // ── 홀 ───────────────────────────────────────────────────
+    const holesRoot = new THREE.Group();
+    const axisUp = new THREE.Vector3(0, 0, 1);
+    for (const hole of holes) {
+      const r = Math.max(hole.radius, radius * 0.002);
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(r, Math.max(r * 0.11, radius * 0.0016), 8, 28),
+        new THREE.MeshStandardMaterial({
+          color: hole.diameter >= medianDiameter ? HOLE_BIG : HOLE_SMALL,
+          metalness: 0.3, roughness: 0.5,
+        }),
+      );
+      ring.position.set(...hole.center);
+      const axis = new THREE.Vector3(...hole.axis).normalize();
+      ring.quaternion.setFromUnitVectors(axisUp, axis);
+      holesRoot.add(ring);
+    }
+    holesRoot.visible = showHoles;
+    scene.add(holesRoot);
+    holeGroup.current = holesRoot;
+
+    // ── 평면(데이텀 후보) ────────────────────────────────────
+    const planesRoot = new THREE.Group();
+    for (const plane of mesh.planes || []) {
+      const side = Math.sqrt(Math.max(plane.area, 1));
+      const patch = new THREE.Mesh(
+        new THREE.PlaneGeometry(side, side),
+        new THREE.MeshBasicMaterial({
+          color: PLANE_TINT, transparent: true, opacity: 0.22,
+          side: THREE.DoubleSide, depthWrite: false,
+        }),
+      );
+      patch.position.set(plane.center[0], plane.center[1], plane.center[2]);
+      const normal = new THREE.Vector3(...plane.normal).normalize();
+      patch.quaternion.setFromUnitVectors(axisUp, normal);
+      planesRoot.add(patch);
+
+      const arrow = new THREE.ArrowHelper(
+        normal, new THREE.Vector3(...plane.center),
+        Math.max(side * 0.6, radius * 0.05), PLANE_TINT, undefined, undefined);
+      planesRoot.add(arrow);
+    }
+    planesRoot.visible = false;
+    scene.add(planesRoot);
+    planeGroup.current = planesRoot;
+
+    // ── 조명 ─────────────────────────────────────────────────
+    scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 1.15));
+    const key = new THREE.DirectionalLight(0xffffff, 1.5);
+    key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
+    scene.add(key);
+    const fill = new THREE.DirectionalLight(0x9fc4e0, 0.7);
+    fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
+    scene.add(fill);
+
+    // ── 카메라 ───────────────────────────────────────────────
+    const camera = new THREE.PerspectiveCamera(
+      42, mount.clientWidth / mount.clientHeight, radius * 0.01, radius * 60);
+    camera.position.copy(centre).add(
+      new THREE.Vector3(radius * 1.5, radius * 1.1, radius * 1.9));
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.copy(centre);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.update();
+
+    // ── 루프 ─────────────────────────────────────────────────
     let frame = 0;
-    const render = () => {
-      const width = canvas.clientWidth || 1;
-      const height = canvas.clientHeight || 1;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
-        canvas.width = width * dpr;
-        canvas.height = height * dpr;
-      }
-      gl.viewport(0, 0, canvas.width, canvas.height);
-      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-      const { theta, phi, distance, panX, panY } = camera.current;
-      const eye = [
-        distance * Math.sin(phi) * Math.cos(theta),
-        distance * Math.cos(phi),
-        distance * Math.sin(phi) * Math.sin(theta),
-      ];
-      const target = [panX, panY, 0];
-      const view = lookAt([eye[0] + panX, eye[1] + panY, eye[2]], target, [0, 1, 0]);
-      const projection = perspective(Math.PI / 4, width / height, 0.01, 100);
-
-      gl.useProgram(program);
-      gl.uniformMatrix4fv(gl.getUniformLocation(program, 'uProjection'), false, projection);
-      gl.uniformMatrix4fv(gl.getUniformLocation(program, 'uView'), false, view);
-      gl.uniform3f(gl.getUniformLocation(program, 'uColor'), 0.42, 0.62, 0.78);
-      gl.bindVertexArray(vao);
-      gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_INT, 0);
-
-      if (showHolesRef.current && ringData.length > 0) {
-        gl.useProgram(lineProgram);
-        gl.uniformMatrix4fv(gl.getUniformLocation(lineProgram, 'uProjection'), false, projection);
-        gl.uniformMatrix4fv(gl.getUniformLocation(lineProgram, 'uView'), false, view);
-        gl.uniform3f(gl.getUniformLocation(lineProgram, 'uColor'), 1.0, 0.35, 0.2);
-        gl.bindVertexArray(ringVao);
-        gl.disable(gl.DEPTH_TEST);
-        gl.drawArrays(gl.LINES, 0, ringData.length / 3);
-        gl.enable(gl.DEPTH_TEST);
-      }
-      gl.bindVertexArray(null);
-      frame = requestAnimationFrame(render);
+    const tick = () => {
+      frame = requestAnimationFrame(tick);
+      controls.update();
+      renderer.render(scene, camera);
     };
-    frame = requestAnimationFrame(render);
+    tick();
 
-    // ─── 마우스 조작 ───
-    let dragging: 'rotate' | 'pan' | null = null;
-    let lastX = 0;
-    let lastY = 0;
-    const onDown = (e: PointerEvent) => {
-      dragging = e.button === 2 || e.shiftKey ? 'pan' : 'rotate';
-      lastX = e.clientX; lastY = e.clientY;
-      canvas.setPointerCapture(e.pointerId);
-    };
-    const onMove = (e: PointerEvent) => {
-      if (!dragging) return;
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX; lastY = e.clientY;
-      const cam = camera.current;
-      if (dragging === 'rotate') {
-        cam.theta -= dx * 0.008;
-        cam.phi = Math.min(Math.PI - 0.05, Math.max(0.05, cam.phi - dy * 0.008));
-      } else {
-        cam.panX -= dx * 0.0022 * cam.distance;
-        cam.panY += dy * 0.0022 * cam.distance;
-      }
-    };
-    const onUp = (e: PointerEvent) => {
-      dragging = null;
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
-    };
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const cam = camera.current;
-      cam.distance = Math.min(20, Math.max(0.25, cam.distance * (1 + Math.sign(e.deltaY) * 0.12)));
-    };
-    const onContext = (e: Event) => e.preventDefault();
-
-    canvas.addEventListener('pointerdown', onDown);
-    canvas.addEventListener('pointermove', onMove);
-    canvas.addEventListener('pointerup', onUp);
-    canvas.addEventListener('wheel', onWheel, { passive: false });
-    canvas.addEventListener('contextmenu', onContext);
+    const resize = new ResizeObserver(() => {
+      const w = mount.clientWidth, h = mount.clientHeight;
+      if (!w || !h) return;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    });
+    resize.observe(mount);
 
     return () => {
       cancelAnimationFrame(frame);
-      canvas.removeEventListener('pointerdown', onDown);
-      canvas.removeEventListener('pointermove', onMove);
-      canvas.removeEventListener('pointerup', onUp);
-      canvas.removeEventListener('wheel', onWheel);
-      canvas.removeEventListener('contextmenu', onContext);
-      gl.deleteProgram(program);
-      gl.deleteProgram(lineProgram);
+      resize.disconnect();
+      controls.dispose();
+      renderer.dispose();
+      scene.traverse((node) => {
+        const any = node as THREE.Mesh;
+        any.geometry?.dispose?.();
+        const material = any.material as THREE.Material | THREE.Material[] | undefined;
+        if (Array.isArray(material)) material.forEach((m) => m.dispose());
+        else material?.dispose?.();
+      });
+      mount.removeChild(renderer.domElement);
     };
-  }, [mesh]);
+  }, [mesh, holes, medianDiameter, showHoles]);
+
+  // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
+  useEffect(() => {
+    if (holeGroup.current) holeGroup.current.visible = showHoles;
+  }, [showHoles]);
+
+  useEffect(() => {
+    if (planeGroup.current) planeGroup.current.visible = showPlanes;
+  }, [showPlanes]);
+
+  useEffect(() => {
+    const solid = solidMesh.current;
+    const edges = edgeLines.current;
+    if (!solid || !edges) return;
+    const wire = solid.parent?.getObjectByName('wire');
+    solid.visible = detail !== 'wire';
+    edges.visible = detail === 'edges';
+    if (wire) wire.visible = detail === 'wire';
+  }, [detail]);
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
-  return <canvas ref={canvasRef} className="cad-viewer__canvas" />;
+
+  return <>
+    <div ref={mountRef} className="cad-viewer__stage" />
+    <div className="cad-viewer__hud">
+      <div className="cad-viewer__seg" role="group" aria-label="표시 방식">
+        {([['solid', '표면'], ['edges', '모서리'], ['wire', '삼각망']] as const).map(
+          ([value, label]) => (
+            <button key={value} type="button"
+              className={detail === value ? 'is-on' : ''}
+              onClick={() => setDetail(value)}>{label}</button>
+          ))}
+      </div>
+      <button type="button" className={showPlanes ? 'is-on' : ''}
+        onClick={() => setShowPlanes((v) => !v)}>
+        평면 {mesh.planes?.length ?? 0}
+      </button>
+      <span className="cad-viewer__stat">
+        삼각형 {mesh.summary.n_faces.toLocaleString()} · 홀 {holes.length}
+      </span>
+    </div>
+  </>;
 }
