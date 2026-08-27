@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -41,13 +42,15 @@ MIN_PLANE_AREA_MM2 = 400.0
 class Cylinder:
     """원통면 하나. 홀이면 조립 기준(Datum Hole) 후보가 된다."""
 
-    kind: str              # "hole"(안쪽) | "boss"(바깥쪽) | "unknown"
+    kind: str              # "hole"(안쪽) | "boss"(바깥쪽) | "fillet"(굽힘 R)
     radius: float
     diameter: float
     center: list           # 원통 축 위 중심점 [x,y,z]
     axis: list             # 축 방향 단위벡터
     height: float
     area: float
+    wrap: float = 1.0      # 원통을 몇 바퀴 감았나 (1.0 이면 360도)
+    faces: int = 1         # 이 원통을 이루는 면 개수
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -211,8 +214,65 @@ def find_cylinders(shape, min_radius: float = MIN_HOLE_RADIUS_MM) -> list:
             pass
         explorer.Next()
 
-    found.sort(key=lambda c: -c.diameter)
-    return found
+    merged = _merge_cylinder_faces(found)
+    merged.sort(key=lambda c: -c.diameter)
+    return merged
+
+
+def _merge_cylinder_faces(faces: list, closed_wrap: float = 0.8) -> list:
+    """쪼개진 원통면을 하나로 합치고, 감긴 정도로 다시 분류한다.
+
+    [왜 필요한가 — 실측 001 REINF SIDE OTR.stp]
+    CAD 는 원통면을 이음매에서 반으로 자른다. 면 하나만 보면 감김이
+    50% 라 굽힘 R 과 구분이 안 된다. 실제로 이 부품에서 원통면 220개가
+    나왔는데 감김이 85% 를 넘는 면이 **하나도 없었다.**
+
+    같은 축·중심·지름끼리 묶어 넓이를 더하면 그림이 완전히 달라진다 —
+
+        묶음 110개 중 감김 80% 이상  15개  전부 Ø6.00mm, 높이 3.00mm
+                    감김 80% 미만  95개  높이 중앙값 15mm, 최대 437mm
+
+    15개가 진짜 홀이다. 그중 6개는 Z=-32.0 에 X 좌표 50mm 간격으로
+    늘어서 있다 — 볼트홀 열이다. 95개는 굽힘 R 과 모서리다(높이 437mm
+    짜리 원통이 홀일 리 없다).
+
+    합치기 전에는 "홀 58개" 라고 내놨는데, 대부분 굽힘 R 이었다.
+    """
+    groups: dict = {}
+    for face in faces:
+        key = (
+            tuple(round(v, 1) for v in face.center),
+            round(face.diameter, 1),
+            tuple(round(abs(v), 2) for v in face.axis),   # 축 부호는 무시
+        )
+        groups.setdefault(key, []).append(face)
+
+    merged: list = []
+    for members in groups.values():
+        head = members[0]
+        height = max(m.height for m in members)
+        area = sum(m.area for m in members)
+        full = math.pi * head.diameter * height
+        wrap = (area / full) if full > 0 else 0.0
+
+        if wrap >= closed_wrap:
+            # 닫힌 원통 — 안쪽을 보면 홀, 바깥쪽을 보면 보스
+            kind = "hole" if any(m.kind == "hole" for m in members) else "boss"
+        else:
+            kind = "fillet"     # 굽힘 R·모서리. 조립 기준이 아니다
+
+        merged.append(Cylinder(
+            kind=kind,
+            radius=head.radius,
+            diameter=head.diameter,
+            center=head.center,
+            axis=head.axis,
+            height=round(height, 3),
+            area=round(area, 2),
+            wrap=round(min(wrap, 1.0), 3),
+            faces=len(members),
+        ))
+    return merged
 
 
 def find_planes(shape, min_area: float = MIN_PLANE_AREA_MM2) -> list:
@@ -294,7 +354,8 @@ def read_step_full(
     vertices, faces = tessellate(shape, deflection)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-    cylinders = _dedupe(find_cylinders(shape), "center", "diameter", "axis")
+    # 원통은 find_cylinders 안에서 이미 면을 합쳐 놓았다(_merge_cylinder_faces).
+    cylinders = find_cylinders(shape)
     planes = _dedupe(find_planes(shape), "center", "normal")
     holes = [c for c in cylinders if c.kind == "hole"]
 

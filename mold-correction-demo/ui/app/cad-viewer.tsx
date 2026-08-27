@@ -26,6 +26,7 @@ export type CadHole = {
   kind: string; radius: number; diameter: number;
   center: [number, number, number]; axis: [number, number, number];
   height: number; area: number;
+  wrap?: number; faces?: number;
 };
 
 export type CadMesh = {
@@ -46,8 +47,7 @@ export type CadMesh = {
 export type CadDetail = 'solid' | 'edges' | 'wire';
 
 const SURFACE = 0x8fa3b4;
-const HOLE_BIG = 0xff8b3d;
-const HOLE_SMALL = 0x4dc3ff;
+const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
 
 export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boolean }) {
@@ -62,12 +62,15 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
   const edgeLines = useRef<THREE.LineSegments | null>(null);
   const solidMesh = useRef<THREE.Mesh | null>(null);
 
-  // 중복 제거는 백엔드(step_reader._dedupe)가 이미 했다.
+  // 쪼개진 원통면 합치기와 굽힘 R 걸러내기는 백엔드가 이미 했다
+  // (step_reader._merge_cylinder_faces). 여기 오는 건 닫힌 원통뿐이다.
   const holes = useMemo(() => mesh.holes || [], [mesh.holes]);
-  const diameters = useMemo(
-    () => holes.map((h) => h.diameter).sort((a, b) => a - b), [holes]);
-  const medianDiameter = diameters.length
-    ? diameters[Math.floor(diameters.length / 2)] : 0;
+  const holeLabel = useMemo(() => {
+    const sizes = [...new Set(holes.map((h) => h.diameter.toFixed(2)))];
+    if (!sizes.length) return '홀 없음';
+    if (sizes.length === 1) return `홀 ${holes.length} · Ø${sizes[0]}`;
+    return `홀 ${holes.length} · ${sizes.length}종`;
+  }, [holes]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -123,21 +126,33 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
     scene.add(wire);
 
     // ── 홀 ───────────────────────────────────────────────────
+    // 실측 부품은 Ø6mm 홀이 1062mm 짜리 형상에 박혀 있다. 실제 크기대로
+    // 링만 그리면 점만 해서 안 보인다. 그래서 두 겹으로 그린다 —
+    //   (1) 실제 지름 링: 위치와 크기를 정직하게 보여준다
+    //   (2) 축 핀: 홀 축을 따라 부품 크기에 비례한 선을 뚫어 놓는다.
+    //       어느 각도에서 봐도 홀이 어디 있는지 바로 찾을 수 있다.
     const holesRoot = new THREE.Group();
     const axisUp = new THREE.Vector3(0, 0, 1);
+    const pinLength = radius * 0.16;
+    const holeMaterial = new THREE.MeshBasicMaterial({ color: HOLE_TINT });
     for (const hole of holes) {
-      const r = Math.max(hole.radius, radius * 0.002);
+      const r = Math.max(hole.radius, radius * 0.0015);
+      const tube = Math.max(r * 0.18, radius * 0.0022);
+
       const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(r, Math.max(r * 0.11, radius * 0.0016), 8, 28),
-        new THREE.MeshStandardMaterial({
-          color: hole.diameter >= medianDiameter ? HOLE_BIG : HOLE_SMALL,
-          metalness: 0.3, roughness: 0.5,
-        }),
-      );
+        new THREE.TorusGeometry(r, tube, 10, 32), holeMaterial);
       ring.position.set(...hole.center);
       const axis = new THREE.Vector3(...hole.axis).normalize();
       ring.quaternion.setFromUnitVectors(axisUp, axis);
       holesRoot.add(ring);
+
+      const pin = new THREE.Mesh(
+        new THREE.CylinderGeometry(tube * 0.75, tube * 0.75, pinLength, 6),
+        holeMaterial);
+      pin.position.set(...hole.center);
+      // CylinderGeometry 는 Y 축을 따라 서 있다
+      pin.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
+      holesRoot.add(pin);
     }
     holesRoot.visible = showHoles;
     scene.add(holesRoot);
@@ -221,7 +236,7 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, medianDiameter, showHoles]);
+  }, [mesh, holes, showHoles]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -260,7 +275,10 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
         평면 {mesh.planes?.length ?? 0}
       </button>
       <span className="cad-viewer__stat">
-        삼각형 {mesh.summary.n_faces.toLocaleString()} · 홀 {holes.length}
+        삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
+        {mesh.counts?.cylinders
+          ? ` · 굽힘 R ${mesh.counts.cylinders - holes.length}`
+          : ''}
       </span>
     </div>
   </>;
