@@ -342,13 +342,65 @@ def _dedupe(features: list, *keys) -> list:
     return unique
 
 
+CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
+CACHE_VERSION = 2      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+
+
+def _cache_key(path: Path, deflection: float) -> str:
+    """파일 내용이 같으면 같은 키. 앞뒤 조각과 크기만 본다 —
+    200MB 를 통째로 해시하면 그것만으로 몇 초가 걸린다."""
+    import hashlib
+
+    size = path.stat().st_size
+    digest = hashlib.sha1()
+    digest.update(f"{CACHE_VERSION}|{size}|{deflection}".encode())
+    with path.open("rb") as handle:
+        digest.update(handle.read(262144))
+        if size > 524288:
+            handle.seek(-262144, 2)
+            digest.update(handle.read(262144))
+    return digest.hexdigest()[:16]
+
+
 def read_step_full(
     path: str | Path,
     deflection: float = DEFAULT_DEFLECTION,
     max_features: int = 400,
+    use_cache: bool = True,
 ) -> dict:
-    """STEP 하나를 읽어 메시 + RPS 후보를 한 번에 준다."""
+    """STEP 하나를 읽어 메시 + RPS 후보를 한 번에 준다.
+
+    [디스크 캐시를 두는 이유]
+    실측 파싱 시간 — 12.4MB 11초, 119MB 32초, 163MB 43초, 215MB 48초.
+    파일이 큰 이유는 자유곡면이 많아서다(163MB 파일에서 B-spline 면
+    5,461개, CARTESIAN_POINT 160만개로 전체 줄의 87%). 프레스 판넬은
+    전체가 곡면이라 정상이고 줄일 방법이 없다.
+
+    대신 한 번 읽은 결과를 디스크에 남긴다. 서버를 다시 켜도 다시
+    읽지 않는다.
+    """
+    import json
     import trimesh
+
+    path = Path(path)
+    cached = None
+    if use_cache:
+        try:
+            CACHE_DIR.mkdir(exist_ok=True)
+            cached = CACHE_DIR / f"{path.stem}_{_cache_key(path, deflection)}.npz"
+            if cached.exists():
+                blob = np.load(cached, allow_pickle=False)
+                meta = json.loads(str(blob["meta"]))
+                return {
+                    "mesh": trimesh.Trimesh(vertices=blob["vertices"],
+                                            faces=blob["faces"], process=False),
+                    "cylinders": meta["cylinders"],
+                    "holes": meta["holes"],
+                    "planes": meta["planes"],
+                    "counts": meta["counts"],
+                }
+        except Exception:
+            cached = None      # 캐시가 깨져도 그냥 다시 읽으면 된다
 
     shape = load_step(path)
     vertices, faces = tessellate(shape, deflection)
@@ -359,7 +411,7 @@ def read_step_full(
     planes = _dedupe(find_planes(shape), "center", "normal")
     holes = [c for c in cylinders if c.kind == "hole"]
 
-    return {
+    result = {
         "mesh": mesh,
         "cylinders": [c.to_dict() for c in cylinders[:max_features]],
         "holes": [c.to_dict() for c in holes[:max_features]],
@@ -370,6 +422,15 @@ def read_step_full(
             "planes": len(planes),
         },
     }
+    if cached is not None:
+        try:
+            meta = {k: v for k, v in result.items() if k != "mesh"}
+            np.savez_compressed(
+                cached, vertices=vertices, faces=faces,
+                meta=np.array(json.dumps(meta, ensure_ascii=False)))
+        except Exception:
+            pass       # 캐시를 못 써도 결과는 그대로 돌려준다
+    return result
 
 
 __all__ = [

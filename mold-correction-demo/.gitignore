@@ -20,3 +20,6 @@ label_removal/output/*
 
 !label_removal/input/.gitkeep
 !label_removal/output/.gitkeep
+
+# 파싱한 STEP 캐시 — 파일당 수 MB 라 저장소에 넣지 않는다
+cad_import/_parsed/
