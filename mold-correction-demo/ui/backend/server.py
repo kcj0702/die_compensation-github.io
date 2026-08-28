@@ -84,7 +84,9 @@ DEFAULT_FOLDER_ROOT = Path(
     r"C:\Users\KDT013\Desktop\금형보정치\경북대KDT(14기) 자료\품번별 폴더 정리 자료_예시"
 )
 FOLDER_ROOT = Path(os.environ.get("AJIN_FOLDER_ROOT", DEFAULT_FOLDER_ROOT)).resolve()
-MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+# 금형 STEP 은 CATIA 가 삼각망을 통째로 끼워 넣어 파일이 크다 —
+# 실측 64XX1 이 215MB, 67XX6 이 170MB, 71XX1 이 119MB 였다.
+MAX_UPLOAD_BYTES = 300 * 1024 * 1024
 QWEN_CACHE_DIR = (
     Path.home()
     / ".cache"
@@ -120,6 +122,20 @@ _reader_lock = threading.Lock()
 # VLM 라벨 판독도 다시 안 돌리려는 목적.
 _analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _ANALYSIS_CACHE_MAX = 5
+
+
+_cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_CAD_CACHE_MAX = 3      # 하나가 수백 MB 라 많이 들고 있으면 안 된다
+
+
+def _cache_cad(entry: dict[str, Any]) -> str:
+    """파싱한 CAD 를 들고 있는다. 215MB STEP 이 42~100초 걸려서
+    오버레이를 그릴 때마다 다시 읽을 수는 없다."""
+    cad_id = uuid.uuid4().hex
+    _cad_cache[cad_id] = entry
+    while len(_cad_cache) > _CAD_CACHE_MAX:
+        _cad_cache.popitem(last=False)
+    return cad_id
 
 
 def _cache_analysis(entry: dict[str, Any]) -> str:
@@ -671,6 +687,9 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             "overlay_base": cv2.cvtColor(
                 clean_image if clean_image is not None else image, cv2.COLOR_BGR2RGB
             ),
+            # /api/cad-overlay 가 3D 표면 위로 옮길 대상들
+            "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
+            "deviation_points": points,
         })
 
     return {
@@ -853,6 +872,15 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             web["holes"] = _shift_centers(parsed["holes"], offset)
             web["planes"] = _shift_centers(parsed["planes"][:50], offset)
             web["counts"] = parsed["counts"]
+
+            # 오버레이(제로라인·보정량)를 그리려면 원본 삼각망이 필요하다.
+            # 화면용 메시는 간략화돼 있어 광선 교차에 쓰면 어긋난다.
+            mesh_full = parsed["mesh"]
+            web["cadId"] = _cache_cad({
+                "mesh": mesh_full,
+                "offset": np.asarray(offset, dtype=float) if offset else np.zeros(3),
+                "name": path.stem,
+            })
             return web
 
         if mesh_io.is_mesh_file(path):
@@ -879,6 +907,74 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
         f"지원하지 않는 형식입니다: {suffix or '확장자 없음'} "
         f"(지원: STEP/STP, STL, PLY, OBJ, GLB/GLTF, 3MF)"
     )
+
+
+def cad_overlay_for(cad_id: str, analysis_id: str,
+                    coefficient: float = 1.0) -> dict[str, Any]:
+    """스캔에서 뽑은 제로라인·보정 포인트를 CAD 표면 위로 옮긴다.
+
+    실루엣을 맞춰 어느 방향에서 본 그림인지 찾고, 그 방향으로 광선을
+    쏴서 표면에 얹는다. 데이텀 정합이 아니라 겉모양 정합이라
+    fit.iou 를 같이 내보낸다 — 낮으면 화면에서 경고해야 한다.
+    """
+    from cad_import import overlay as ov
+
+    cad_entry = _cad_cache.get(cad_id)
+    if cad_entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+    analysis = _analysis_cache.get(analysis_id)
+    if analysis is None:
+        raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
+
+    mesh = cad_entry["mesh"]
+    offset = cad_entry["offset"]
+    vertices = np.asarray(mesh.vertices, dtype=float) - offset
+    faces = np.asarray(mesh.faces)
+
+    import trimesh
+    shifted = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+    fit = ov.fit_view(vertices, faces, analysis["part_mask"])
+
+    lines = []
+    for line in analysis.get("simple_zero_lines", []):
+        placed = ov.unproject(line["points"], vertices, faces, fit, shifted)
+        if placed:
+            lines.append({"line_id": line.get("line_id"), "points": placed})
+
+    points = []
+    for point in analysis.get("deviation_points", []):
+        placed = ov.unproject([[point["xPx"], point["yPx"]]],
+                              vertices, faces, fit, shifted)
+        if not placed:
+            continue
+        value = float(point.get("value", 0.0))
+        points.append({
+            "id": point.get("id"),
+            "position": placed[0],
+            "value": round(value, 3),
+            # 보정은 편차를 뒤집는 것이 기본이다. 계수는 화면에서 조절한다.
+            "correction": round(-value * coefficient, 3),
+        })
+
+    return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
+            "coefficient": coefficient}
+
+
+async def cad_overlay(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            cad_overlay_for,
+            str(body.get("cadId") or ""),
+            str(body.get("analysisId") or ""),
+            float(body.get("coefficient") or 1.0),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
 
 
 async def cad(request: Request) -> JSONResponse:
@@ -1045,6 +1141,7 @@ app = Starlette(
         Route("/api/sheet-values", sheet_values, methods=["POST"]),
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
+        Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
         Route("/api/sample", sample, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]

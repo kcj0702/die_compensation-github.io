@@ -139,6 +139,15 @@ button { cursor: pointer; }
 .cad-viewer__seg button:last-child{border-radius:0 6px 6px 0}
 .cad-viewer__seg button+button{border-left:0}
 .cad-viewer__stat{padding:5px 10px;border-radius:6px;background:rgba(14,22,30,.6);color:#8fa3b4;font-size:9px;letter-spacing:.02em;backdrop-filter:blur(6px)}
+.cad-viewer__hint{color:#6f8395}
+.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;gap:0;z-index:2}
+.cad-viewer__views button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
+.cad-viewer__views button:first-child{border-radius:6px 0 0 6px}
+.cad-viewer__views button:last-child{border-radius:0 6px 6px 0}
+.cad-viewer__views button+button{border-left:0}
+.cad-viewer__views button:hover{border-color:rgba(255,255,255,.4);color:#eaf2f8}
+.cad-viewer__views button:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-viewer__warn{position:absolute;left:12px;right:12px;top:12px;margin:0;padding:8px 12px;border:1px solid rgba(255,168,80,.45);border-radius:6px;background:rgba(60,34,10,.86);color:#ffcb92;font-size:9px;line-height:1.5;z-index:2;backdrop-filter:blur(6px)}
 .cad-viewer__canvas:active{cursor:grabbing}
 .cad-viewer__error{display:grid;place-items:center;height:100%;padding:20px;color:#bd4650;font-size:10px;text-align:center}
 .cad-drop{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-height:470px;margin:16px;border:1.5px dashed #d3dae1;border-radius:12px;color:#8b95a2;background:#fafbfc;text-align:center}
@@ -148,6 +157,12 @@ button { cursor: pointer; }
 .cad-drop small{max-width:330px;margin-top:5px;color:#a4adb8;font-size:8px;line-height:1.5}
 .cad-error{padding:14px;border-color:#f0c9c9;background:#fdf5f5}
 .cad-error b{color:#bd4650;font-size:10px}
+.cad-overlay-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #e6ebf0;background:#fafbfc}
+.cad-overlay-bar label{color:#5d6c80;font-size:9px;font-weight:600;letter-spacing:.02em}
+.cad-overlay-bar select{padding:5px 9px;border:1px solid #d3dae1;border-radius:6px;background:#fff;color:#3d4c60;font-size:9px;font-family:inherit;cursor:pointer}
+.cad-overlay-bar select:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-overlay-bar__note{color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
+.cad-overlay-bar__err{color:#bd4650;font-size:8.5px}
 .cad-error p{margin:5px 0 0;color:#95626a;font-size:9px;line-height:1.5}
 @media(max-width:900px){.cad-layout{grid-template-columns:1fr}}
 .anchor-layer{z-index:8}

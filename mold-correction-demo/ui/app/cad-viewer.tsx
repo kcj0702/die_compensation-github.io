@@ -29,6 +29,18 @@ export type CadHole = {
   wrap?: number; faces?: number;
 };
 
+/** /api/cad-overlay 가 돌려주는, CAD 표면 위로 옮겨진 스캔 결과. */
+export type CadOverlay = {
+  fit: {
+    axis: number; sign: number; flip_u: boolean; flip_v: boolean;
+    mm_per_px: number; iou: number; reliable: boolean;
+  };
+  zeroLines: { line_id: number | null; points: [number, number, number][] }[];
+  points: { id: string; position: [number, number, number];
+            value: number; correction: number }[];
+  coefficient: number;
+};
+
 export type CadMesh = {
   summary: {
     name: string; source_format: string; units: string;
@@ -41,6 +53,7 @@ export type CadMesh = {
   planes: { center: number[]; normal: number[]; area: number }[];
   counts: { cylinders: number; holes: number; planes: number };
   recentered: boolean;
+  cadId?: string;
   note?: string;
 };
 
@@ -49,16 +62,65 @@ export type CadDetail = 'solid' | 'edges' | 'wire';
 const SURFACE = 0x8fa3b4;
 const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
+const ZERO_TINT = 0xff3b30;      // 제로라인 — 보정시트의 빨간 선과 맞춘다
+const PLUS_TINT = 0xe0483f;      // 살이 많다 (깎아낸다)
+const MINUS_TINT = 0x2f7fe0;     // 살이 부족하다 (붙인다)
 
-export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boolean }) {
+/** 표준 뷰 — CATIA 의 정면/우측/평면/등각과 같은 자리. */
+const VIEWS: { id: string; label: string; dir: [number, number, number] }[] = [
+  { id: 'iso', label: '등각', dir: [1, 0.85, 1.25] },
+  { id: 'front', label: '정면', dir: [0, -1, 0] },
+  { id: 'right', label: '우측', dir: [1, 0, 0] },
+  { id: 'top', label: '평면', dir: [0, 0, 1] },
+];
+
+/** 캔버스에 글자를 구워 스프라이트로 만든다.
+ *  three 의 텍스트 지오메트리는 폰트 파일을 받아야 해서 쓰지 않는다
+ *  (사내망 원칙 — 바깥에서 아무것도 안 받는다). */
+function makeLabel(text: string, color: string, height: number): THREE.Sprite {
+  const pad = 8;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  if (!context) return new THREE.Sprite();
+  context.font = '600 44px ui-sans-serif, system-ui, sans-serif';
+  const width = Math.ceil(context.measureText(text).width) + pad * 2;
+  canvas.width = width;
+  canvas.height = 64;
+
+  const ctx = canvas.getContext('2d')!;
+  ctx.font = '600 44px ui-sans-serif, system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(10,16,22,.82)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, pad, canvas.height / 2 + 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture, depthTest: false, transparent: true,
+  }));
+  sprite.scale.set(height * canvas.width / canvas.height, height, 1);
+  return sprite;
+}
+
+export function CadViewer({ mesh, showHoles, overlay }: {
+  mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
+}) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<CadDetail>('edges');
   const [showPlanes, setShowPlanes] = useState(false);
+  const [showOverlay, setShowOverlay] = useState(true);
 
   // 씬 안에서 켜고 끌 그룹들은 ref 로 들고 있어야 리렌더 없이 토글된다.
   const holeGroup = useRef<THREE.Group | null>(null);
   const planeGroup = useRef<THREE.Group | null>(null);
+  const overlayGroup = useRef<THREE.Group | null>(null);
+  const viewApi = useRef<{
+    frame: (direction: THREE.Vector3) => void;
+    centre: THREE.Vector3; radius: number;
+  } | null>(null);
   const edgeLines = useRef<THREE.LineSegments | null>(null);
   const solidMesh = useRef<THREE.Mesh | null>(null);
 
@@ -183,6 +245,50 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
     scene.add(planesRoot);
     planeGroup.current = planesRoot;
 
+    // ── 스캔에서 옮겨온 것들 (제로라인·보정량) ───────────────
+    const overlayRoot = new THREE.Group();
+    if (overlay) {
+      // 제로라인 — 표면에 살짝 띄워 z-파이팅을 피한다
+      const lift = radius * 0.004;
+      for (const line of overlay.zeroLines || []) {
+        if (!line.points?.length) continue;
+        const pts = line.points.map(([x, y, z]) => new THREE.Vector3(x, y, z));
+        const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
+        const tube = new THREE.Mesh(
+          new THREE.TubeGeometry(curve, Math.max(pts.length * 4, 32), lift, 6, false),
+          new THREE.MeshBasicMaterial({ color: ZERO_TINT }),
+        );
+        overlayRoot.add(tube);
+      }
+
+      // 보정량 — 표면에서 화살표를 세우고 값을 붙인다.
+      // 길이는 보정량에 비례하되 최소 길이를 둬서 작은 값도 보이게 한다.
+      const scale = radius * 0.05;
+      const maxCorrection = Math.max(
+        ...overlay.points.map((p) => Math.abs(p.correction)), 0.5);
+      for (const point of overlay.points) {
+        const magnitude = Math.abs(point.correction);
+        if (magnitude < 0.05) continue;      // 손댈 필요 없는 자리
+        const positive = point.correction > 0;
+        const colour = positive ? PLUS_TINT : MINUS_TINT;
+        const origin = new THREE.Vector3(...point.position);
+        const length = scale * (0.35 + 0.65 * magnitude / maxCorrection);
+        const up = new THREE.Vector3(0, 0, positive ? 1 : -1);
+
+        const arrow = new THREE.ArrowHelper(
+          up, origin, length, colour, length * 0.34, length * 0.2);
+        overlayRoot.add(arrow);
+
+        const label = makeLabel(
+          `${point.correction > 0 ? '+' : ''}${point.correction.toFixed(1)}`,
+          positive ? '#ffb4ad' : '#a8ccf5', radius * 0.028);
+        label.position.copy(origin).add(up.clone().multiplyScalar(length * 1.25));
+        overlayRoot.add(label);
+      }
+    }
+    scene.add(overlayRoot);
+    overlayGroup.current = overlayRoot;
+
     // ── 조명 ─────────────────────────────────────────────────
     scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 1.15));
     const key = new THREE.DirectionalLight(0xffffff, 1.5);
@@ -204,10 +310,44 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
     controls.dampingFactor = 0.08;
     controls.update();
 
+    // ── CATIA 식 마우스 ──────────────────────────────────────
+    //   가운데 버튼 끌기        = 이동  (CATIA 와 같다)
+    //   가운데 + 오른쪽 끌기    = 회전  (CATIA 와 같다)
+    //   Ctrl + 가운데 끌기      = 확대·축소
+    //   왼쪽 끌기               = 회전  (웹에서 흔한 방식이라 같이 둔다)
+    //   휠                      = 확대·축소
+    // OrbitControls 는 버튼 조합을 모르니, 누르는 순간 buttons 비트를
+    // 보고 가운데 버튼의 역할을 바꿔 준다.
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.PAN,
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 1) return;
+      const rightHeld = (event.buttons & 2) !== 0;
+      controls.mouseButtons.MIDDLE = (rightHeld || event.ctrlKey)
+        ? (event.ctrlKey ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE)
+        : THREE.MOUSE.PAN;
+    };
+    const blockMenu = (event: Event) => event.preventDefault();
+    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+    renderer.domElement.addEventListener('contextmenu', blockMenu);
+
+    // 표준 뷰와 전체 맞춤을 밖에서 부를 수 있게 걸어 둔다
+    const frame = (direction: THREE.Vector3) => {
+      const distance = radius * 2.6;
+      camera.position.copy(centre).add(direction.clone().normalize()
+        .multiplyScalar(distance));
+      controls.target.copy(centre);
+      controls.update();
+    };
+    viewApi.current = { frame, centre: centre.clone(), radius };
+
     // ── 루프 ─────────────────────────────────────────────────
-    let frame = 0;
+    let loop = 0;
     const tick = () => {
-      frame = requestAnimationFrame(tick);
+      loop = requestAnimationFrame(tick);
       controls.update();
       renderer.render(scene, camera);
     };
@@ -223,8 +363,10 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
     resize.observe(mount);
 
     return () => {
-      cancelAnimationFrame(frame);
+      cancelAnimationFrame(loop);
       resize.disconnect();
+      renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('contextmenu', blockMenu);
       controls.dispose();
       renderer.dispose();
       scene.traverse((node) => {
@@ -236,7 +378,7 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, showHoles]);
+  }, [mesh, holes, showHoles, overlay]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -246,6 +388,14 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
   useEffect(() => {
     if (planeGroup.current) planeGroup.current.visible = showPlanes;
   }, [showPlanes]);
+
+  useEffect(() => {
+    if (overlayGroup.current) overlayGroup.current.visible = showOverlay;
+  }, [showOverlay]);
+
+  const goToView = (dir: [number, number, number]) => {
+    viewApi.current?.frame(new THREE.Vector3(...dir));
+  };
 
   useEffect(() => {
     const solid = solidMesh.current;
@@ -259,8 +409,19 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
 
+  const overlayPoints = overlay?.points?.length ?? 0;
+
   return <>
     <div ref={mountRef} className="cad-viewer__stage" />
+
+    <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
+      {VIEWS.map((view) => (
+        <button key={view.id} type="button" onClick={() => goToView(view.dir)}>
+          {view.label}
+        </button>
+      ))}
+    </div>
+
     <div className="cad-viewer__hud">
       <div className="cad-viewer__seg" role="group" aria-label="표시 방식">
         {([['solid', '표면'], ['edges', '모서리'], ['wire', '삼각망']] as const).map(
@@ -274,12 +435,26 @@ export function CadViewer({ mesh, showHoles }: { mesh: CadMesh; showHoles: boole
         onClick={() => setShowPlanes((v) => !v)}>
         평면 {mesh.planes?.length ?? 0}
       </button>
+      {overlay && <button type="button" className={showOverlay ? 'is-on' : ''}
+        onClick={() => setShowOverlay((v) => !v)}>
+        제로라인·보정량 {overlayPoints}
+      </button>}
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
         {mesh.counts?.cylinders
           ? ` · 굽힘 R ${mesh.counts.cylinders - holes.length}`
           : ''}
       </span>
+      <span className="cad-viewer__stat cad-viewer__hint">
+        가운데 버튼 이동 · 가운데+오른쪽 회전 · 휠 확대
+      </span>
     </div>
+
+    {overlay && !overlay.fit.reliable && (
+      <p className="cad-viewer__warn">
+        CAD 겉모양과 스캔이 {Math.round(overlay.fit.iou * 100)}% 만 겹칩니다.
+        위치가 어긋날 수 있어 참고용으로만 보세요.
+      </p>
+    )}
   </>;
 }

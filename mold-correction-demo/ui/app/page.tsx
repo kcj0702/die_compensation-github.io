@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CadViewer, type CadMesh } from './cad-viewer';
+import { CadViewer, type CadMesh, type CadOverlay } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -1286,12 +1286,54 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace() {
+function CadWorkspace({ scans }: { scans: ScanItem[] }) {
   const [mesh, setMesh] = useState<CadMesh | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
   const [showHoles, setShowHoles] = useState(true);
+  const [overlay, setOverlay] = useState<CadOverlay | null>(null);
+  const [overlayScanId, setOverlayScanId] = useState<string>('');
+  const [overlayStatus, setOverlayStatus] =
+    useState<'idle' | 'loading' | 'error'>('idle');
+  const [overlayError, setOverlayError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // 분석이 끝나 analysisId 를 가진 스캔만 3D 로 올릴 수 있다.
+  const analysed = useMemo(
+    () => scans.filter((s) => s.result?.analysisId), [scans]);
+
+  // 파일명 품번이 같은 스캔을 먼저 권한다 — 다른 부품에 얹으면 뜻이 없다.
+  const suggested = useMemo(() => {
+    const name = (mesh?.summary.name || '').toUpperCase();
+    return analysed.find((s) => s.partNo && name.includes(s.partNo.toUpperCase()));
+  }, [analysed, mesh]);
+
+  useEffect(() => {
+    if (!overlayScanId && suggested) setOverlayScanId(suggested.id);
+  }, [suggested, overlayScanId]);
+
+  const requestOverlay = (scanId: string) => {
+    setOverlayScanId(scanId);
+    setOverlay(null); setOverlayError(null);
+    const scan = scans.find((s) => s.id === scanId);
+    const analysisId = scan?.result?.analysisId;
+    if (!mesh?.cadId || !analysisId) return;
+    setOverlayStatus('loading');
+    fetch(`${API_BASE}/api/cad-overlay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cadId: mesh.cadId, analysisId }),
+    })
+      .then(async (response) => {
+        const data = await response.json() as CadOverlay & { error?: string };
+        if (!response.ok) throw new Error(data.error || '올리지 못했습니다.');
+        return data;
+      })
+      .then((data) => { setOverlay(data); setOverlayStatus('idle'); })
+      .catch((err) => {
+        setOverlayError(String(err.message || err));
+        setOverlayStatus('error');
+      });
+  };
 
   const upload = (file: File) => {
     setStatus('loading'); setError(null);
@@ -1303,7 +1345,10 @@ function CadWorkspace() {
         if (!response.ok) throw new Error(data.error || '읽지 못했습니다.');
         return data;
       })
-      .then((data) => { setMesh(data); setStatus('idle'); })
+      .then((data) => {
+        setMesh(data); setStatus('idle');
+        setOverlay(null); setOverlayScanId(''); setOverlayError(null);
+      })
       .catch((err) => { setError(String(err.message || err)); setStatus('error'); setMesh(null); });
   };
 
@@ -1345,11 +1390,37 @@ function CadWorkspace() {
                   {showHoles ? <EyeOff size={14} /> : <Eye size={14} />} 홀 표시 {showHoles ? 'OFF' : 'ON'}
                 </button>}
               </div>
-              <div className="cad-viewer"><CadViewer mesh={mesh} showHoles={showHoles} /></div>
+              <div className="cad-viewer">
+                <CadViewer mesh={mesh} showHoles={showHoles} overlay={overlay} />
+              </div>
               <div className="viewer-legend">
-                <span>드래그: 회전 · 휠: 확대 · 오른쪽 드래그(또는 Shift+드래그): 이동</span>
+                <span>
+                  {analysed.length > 0
+                    ? '분석한 스캔을 골라 제로라인과 보정량을 형상 위에 올릴 수 있습니다'
+                    : '스캔을 먼저 분석하면 제로라인과 보정량을 여기에 올릴 수 있습니다'}
+                </span>
                 <span>{summary?.n_faces.toLocaleString()} 삼각형</span>
               </div>
+              {analysed.length > 0 && <div className="cad-overlay-bar">
+                <label htmlFor="cad-overlay-scan">스캔 결과 올리기</label>
+                <select id="cad-overlay-scan" value={overlayScanId}
+                  onChange={(e) => requestOverlay(e.target.value)}>
+                  <option value="">선택 안 함</option>
+                  {analysed.map((scan) => (
+                    <option key={scan.id} value={scan.id}>
+                      {scan.partNo || scan.name}
+                      {suggested?.id === scan.id ? '  (품번 일치)' : ''}
+                    </option>
+                  ))}
+                </select>
+                {overlayStatus === 'loading' && <span className="cad-overlay-bar__note">올리는 중…</span>}
+                {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
+                {overlay && <span className="cad-overlay-bar__note">
+                  {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
+                  {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
+                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px
+                </span>}
+              </div>}
             </>
           : <div className="cad-drop">
               {status === 'loading'
@@ -1543,5 +1614,5 @@ export default function Home() {
   const setAnnotations = (updater: (current: Annotation[]) => Annotation[]) => completedScan && setAnnotationsByScan((current) => ({ ...current, [completedScan.id]: updater(current[completedScan.id] || []) }));
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || next === 'cad' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} />}{view === 'cad' && <CadWorkspace />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} />}{view === 'cad' && <CadWorkspace scans={scans} />}</div></main>;
 }
