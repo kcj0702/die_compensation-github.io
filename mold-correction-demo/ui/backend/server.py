@@ -690,6 +690,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             # /api/cad-overlay 가 3D 표면 위로 옮길 대상들
             "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
             "deviation_points": points,
+            "part_no": part_key,
         })
 
     return {
@@ -942,13 +943,24 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         if placed:
             lines.append({"line_id": line.get("line_id"), "points": placed})
 
-    points = []
+    # 컬러바 범위 밖의 값은 판독 오류다. 실측(JD_67XX6, 컬러바 +3.0~-3.0)
+    # 에서 +9.00 이 5건 나왔다. 그대로 두면 화살표 길이 기준을 잡아먹어
+    # 진짜 보정량(0.1~3mm)이 전부 점만 해진다.
+    from zero_line_detection.simple_zero_line import PRODUCT_COLORBAR_MM
+    folded = str(analysis.get("part_no") or "").upper().replace("-", "")
+    span = next((v for k, v in PRODUCT_COLORBAR_MM.items() if k in folded), None)
+    limit = max(abs(span[0]), abs(span[1])) * 1.05 if span else None
+
+    points, rejected = [], []
     for point in analysis.get("deviation_points", []):
+        value = float(point.get("value", 0.0))
+        if limit is not None and abs(value) > limit:
+            rejected.append({"id": point.get("id"), "value": round(value, 3)})
+            continue
         placed = ov.unproject([[point["xPx"], point["yPx"]]],
                               vertices, faces, fit, shifted)
         if not placed:
             continue
-        value = float(point.get("value", 0.0))
         points.append({
             "id": point.get("id"),
             "position": placed[0],
@@ -958,7 +970,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         })
 
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
-            "coefficient": coefficient}
+            "coefficient": coefficient, "rejected": rejected,
+            "colorbarLimit": round(limit, 2) if limit else None}
 
 
 async def cad_overlay(request: Request) -> JSONResponse:

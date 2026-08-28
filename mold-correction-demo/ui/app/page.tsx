@@ -1418,8 +1418,16 @@ function CadWorkspace({ scans }: { scans: ScanItem[] }) {
                 {overlay && <span className="cad-overlay-bar__note">
                   {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
                   {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
-                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px
+                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px ·
+                  {' '}보정 포인트 {overlay.points.length}개
                 </span>}
+                {overlay && overlay.rejected && overlay.rejected.length > 0 &&
+                  <span className="cad-overlay-bar__err">
+                    판독값 {overlay.rejected.length}개 제외 — 컬러바 범위
+                    ±{overlay.colorbarLimit}mm 를 벗어납니다
+                    ({overlay.rejected.slice(0, 4).map((r) => r.id).join(', ')}
+                    {overlay.rejected.length > 4 ? ' 외' : ''})
+                  </span>}
               </div>}
             </>
           : <div className="cad-drop">

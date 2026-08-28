@@ -39,6 +39,10 @@ export type CadOverlay = {
   points: { id: string; position: [number, number, number];
             value: number; correction: number }[];
   coefficient: number;
+  /* 컬러바 범위를 벗어나 제외한 판독. 실측 JD_67XX6 에서 +9.00 이
+     5건 나왔는데 그 부품 컬러바는 +3.0~-3.0 이다. */
+  rejected?: { id: string; value: number }[];
+  colorbarLimit?: number | null;
 };
 
 export type CadMesh = {
@@ -119,6 +123,7 @@ export function CadViewer({ mesh, showHoles, overlay }: {
   const overlayGroup = useRef<THREE.Group | null>(null);
   const viewApi = useRef<{
     frame: (direction: THREE.Vector3) => void;
+    snapshot: () => string;
     centre: THREE.Vector3; radius: number;
   } | null>(null);
   const edgeLines = useRef<THREE.LineSegments | null>(null);
@@ -140,7 +145,9 @@ export function CadViewer({ mesh, showHoles, overlay }: {
 
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      // preserveDrawingBuffer: 화면 저장을 하려면 버퍼가 남아 있어야 한다
+      renderer = new THREE.WebGLRenderer({
+        antialias: true, alpha: false, preserveDrawingBuffer: true });
     } catch {
       setError('이 브라우저에서 WebGL 을 쓸 수 없습니다.');
       return;
@@ -342,7 +349,12 @@ export function CadViewer({ mesh, showHoles, overlay }: {
       controls.target.copy(centre);
       controls.update();
     };
-    viewApi.current = { frame, centre: centre.clone(), radius };
+    const snapshot = () => {
+      // preserveDrawingBuffer 를 켜지 않았으므로 저장 직전에 한 번 더 그린다
+      renderer.render(scene, camera);
+      return renderer.domElement.toDataURL('image/png');
+    };
+    viewApi.current = { frame, snapshot, centre: centre.clone(), radius };
 
     // ── 루프 ─────────────────────────────────────────────────
     let loop = 0;
@@ -397,6 +409,15 @@ export function CadViewer({ mesh, showHoles, overlay }: {
     viewApi.current?.frame(new THREE.Vector3(...dir));
   };
 
+  const saveImage = () => {
+    const url = viewApi.current?.snapshot();
+    if (!url) return;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${mesh.summary.name || 'part'}.png`;
+    link.click();
+  };
+
   useEffect(() => {
     const solid = solidMesh.current;
     const edges = edgeLines.current;
@@ -420,7 +441,19 @@ export function CadViewer({ mesh, showHoles, overlay }: {
           {view.label}
         </button>
       ))}
+      <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
+        저장
+      </button>
     </div>
+
+    {overlay && showOverlay && overlay.points.length > 0 && (
+      <div className="cad-viewer__legend">
+        <span><i style={{ background: '#e0483f' }} />살이 많다 · 깎아낸다</span>
+        <span><i style={{ background: '#2f7fe0' }} />살이 부족하다 · 붙인다</span>
+        <span><i style={{ background: '#ff3b30' }} />제로라인</span>
+        <small>화살표 길이는 보정량에 비례합니다</small>
+      </div>
+    )}
 
     <div className="cad-viewer__hud">
       <div className="cad-viewer__seg" role="group" aria-label="표시 방식">

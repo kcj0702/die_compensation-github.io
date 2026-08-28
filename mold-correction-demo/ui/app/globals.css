@@ -148,6 +148,10 @@ button { cursor: pointer; }
 .cad-viewer__views button:hover{border-color:rgba(255,255,255,.4);color:#eaf2f8}
 .cad-viewer__views button:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
 .cad-viewer__warn{position:absolute;left:12px;right:12px;top:12px;margin:0;padding:8px 12px;border:1px solid rgba(255,168,80,.45);border-radius:6px;background:rgba(60,34,10,.86);color:#ffcb92;font-size:9px;line-height:1.5;z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__legend{position:absolute;right:12px;bottom:12px;display:flex;flex-direction:column;gap:5px;padding:9px 12px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__legend span{display:flex;align-items:center;gap:7px;color:#c6d4e0;font-size:9px;letter-spacing:.02em}
+.cad-viewer__legend i{width:13px;height:3px;border-radius:2px;flex:none}
+.cad-viewer__legend small{margin-top:2px;color:#7d90a2;font-size:8px}
 .cad-viewer__canvas:active{cursor:grabbing}
 .cad-viewer__error{display:grid;place-items:center;height:100%;padding:20px;color:#bd4650;font-size:10px;text-align:center}
 .cad-drop{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-height:470px;margin:16px;border:1.5px dashed #d3dae1;border-radius:12px;color:#8b95a2;background:#fafbfc;text-align:center}
