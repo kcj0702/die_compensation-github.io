@@ -118,6 +118,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   const [detail, setDetail] = useState<CadDetail>('edges');
   const [showPlanes, setShowPlanes] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
+  /* 홀을 누르면 지름과 좌표를 띄운다 — 데이텀을 고를 때 필요하다. */
+  const [picked, setPicked] = useState<CadHole | null>(null);
 
   // 씬 안에서 켜고 끌 그룹들은 ref 로 들고 있어야 리렌더 없이 토글된다.
   const holeGroup = useRef<THREE.Group | null>(null);
@@ -224,6 +226,14 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       // CylinderGeometry 는 Y 축을 따라 서 있다
       pin.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
       holesRoot.add(pin);
+
+      // 클릭 판정용. 실제 링은 너무 얇아 못 누른다.
+      const target = new THREE.Mesh(
+        new THREE.SphereGeometry(Math.max(r * 1.6, radius * 0.006), 8, 6),
+        new THREE.MeshBasicMaterial({ visible: false }));
+      target.position.set(...hole.center);
+      target.userData.hole = hole;
+      holesRoot.add(target);
     }
     holesRoot.visible = showHoles;
     scene.add(holesRoot);
@@ -348,6 +358,28 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     renderer.domElement.addEventListener('pointerdown', onPointerDown);
     renderer.domElement.addEventListener('contextmenu', blockMenu);
 
+    // 왼쪽 버튼을 끌지 않고 놓았을 때만 선택으로 본다(회전과 겹치지 않게).
+    const raycaster = new THREE.Raycaster();
+    let downAt: { x: number; y: number } | null = null;
+    const onDown = (event: PointerEvent) => {
+      if (event.button === 0) downAt = { x: event.clientX, y: event.clientY };
+    };
+    const onUp = (event: PointerEvent) => {
+      if (event.button !== 0 || !downAt) return;
+      const moved = Math.hypot(event.clientX - downAt.x, event.clientY - downAt.y);
+      downAt = null;
+      if (moved > 4) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      raycaster.setFromCamera(new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1), camera);
+      const hit = raycaster.intersectObjects(holesRoot.children, false)
+        .find((entry) => entry.object.userData?.hole);
+      setPicked(hit ? (hit.object.userData.hole as CadHole) : null);
+    };
+    renderer.domElement.addEventListener('pointerdown', onDown);
+    renderer.domElement.addEventListener('pointerup', onUp);
+
     // 표준 뷰와 전체 맞춤을 밖에서 부를 수 있게 걸어 둔다
     const frame = (direction: THREE.Vector3) => {
       const distance = radius * 2.6;
@@ -386,6 +418,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       resize.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onPointerDown);
       renderer.domElement.removeEventListener('contextmenu', blockMenu);
+      renderer.domElement.removeEventListener('pointerdown', onDown);
+      renderer.domElement.removeEventListener('pointerup', onUp);
       controls.dispose();
       renderer.dispose();
       scene.traverse((node) => {
@@ -490,6 +524,16 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
         가운데 버튼 이동 · 가운데+오른쪽 회전 · 휠 확대
       </span>
     </div>
+
+    {picked && (
+      <div className="cad-viewer__pick">
+        <b>Ø{picked.diameter.toFixed(2)} mm</b>
+        <span>깊이 {picked.height.toFixed(2)} mm</span>
+        <span>중심 {picked.center.map((v) => v.toFixed(1)).join(', ')}</span>
+        <span>축 {picked.axis.map((v) => v.toFixed(2)).join(', ')}</span>
+        <button type="button" onClick={() => setPicked(null)}>닫기</button>
+      </div>
+    )}
 
     {overlay && !overlay.fit.reliable && (
       <p className="cad-viewer__warn">

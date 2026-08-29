@@ -512,3 +512,9 @@ button { cursor: pointer; }
 
 
 .sheet-excel-error{margin-left:8px;color:#bd4650;font-size:8.5px}
+
+.cad-viewer__pick{position:absolute;left:12px;top:12px;display:flex;flex-direction:column;gap:3px;padding:10px 13px;border:1px solid rgba(255,139,61,.5);border-radius:7px;background:rgba(14,22,30,.86);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__pick b{color:#ff8b3d;font-size:11px;letter-spacing:.02em}
+.cad-viewer__pick span{color:#c6d4e0;font-size:9px;font-variant-numeric:tabular-nums}
+.cad-viewer__pick button{margin-top:5px;padding:3px 8px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:transparent;color:#8fa3b4;font-size:8.5px;cursor:pointer}
+.cad-viewer__pick button:hover{color:#eaf2f8;border-color:rgba(255,255,255,.4)}
