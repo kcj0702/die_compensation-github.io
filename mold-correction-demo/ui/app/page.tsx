@@ -1286,7 +1286,12 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace({ scans }: { scans: ScanItem[] }) {
+function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan }: {
+  scans: ScanItem[];
+  coefficientByScan: Record<string, number>;
+  hiddenPointIdsByScan: Record<string, Set<string>>;
+  pointOverridesByScan: Record<string, Record<string, number>>;
+}) {
   const [mesh, setMesh] = useState<CadMesh | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -1302,11 +1307,40 @@ function CadWorkspace({ scans }: { scans: ScanItem[] }) {
   const analysed = useMemo(
     () => scans.filter((s) => s.result?.analysisId), [scans]);
 
-  // 파일명 품번이 같은 스캔을 먼저 권한다 — 다른 부품에 얹으면 뜻이 없다.
+  /* CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
+     64XX1 CAD 는 64XX2 스캔과, 71XX1 은 71XX2 와 짝이다(좌우 대칭품이라
+     CAD 가 한쪽만 온다). 백엔드 CAD_TO_SCAN_PART 과 같은 표다. */
   const suggested = useMemo(() => {
-    const name = (mesh?.summary.name || '').toUpperCase();
-    return analysed.find((s) => s.partNo && name.includes(s.partNo.toUpperCase()));
+    const name = (mesh?.summary.name || '').toUpperCase().replace(/[-_]/g, '');
+    const pairs: [string, string][] = [
+      ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
+    ];
+    const wanted = pairs.find(([cad]) => name.includes(cad))?.[1];
+    return analysed.find((s) => {
+      const part = (s.partNo || '').toUpperCase().replace(/[-_]/g, '');
+      return wanted ? part.includes(wanted) : part && name.includes(part);
+    });
   }, [analysed, mesh]);
+
+  /* 3D 에 얹을 값은 최종 보정시트가 정한다 — 작업자가 고친 값과 숨긴
+     포인트, 보정 계수를 그대로 따른다. 여기서 따로 계산하면 시트와
+     3D 가 어긋난다. 시트의 displayFor 와 같은 식이다. */
+  const sheetValues = useMemo(() => {
+    const scan = scans.find((s) => s.id === overlayScanId);
+    if (!scan?.result) return null;
+    const coefficient = coefficientByScan[scan.id] ?? 1;
+    const overrides = pointOverridesByScan[scan.id] || {};
+    const hidden = hiddenPointIdsByScan[scan.id] || new Set<string>();
+    const values: Record<string, number> = {};
+    for (const point of scan.result.points) {
+      if (hidden.has(point.id)) continue;
+      values[point.id] = overrides[point.id] !== undefined
+        ? overrides[point.id] : -(point.value * coefficient);
+    }
+    return { values, coefficient, hiddenCount: hidden.size,
+             overrideCount: Object.keys(overrides).length };
+  }, [scans, overlayScanId, coefficientByScan,
+      pointOverridesByScan, hiddenPointIdsByScan]);
 
   useEffect(() => {
     if (!overlayScanId && suggested) setOverlayScanId(suggested.id);
@@ -1391,7 +1425,8 @@ function CadWorkspace({ scans }: { scans: ScanItem[] }) {
                 </button>}
               </div>
               <div className="cad-viewer">
-                <CadViewer mesh={mesh} showHoles={showHoles} overlay={overlay} />
+                <CadViewer mesh={mesh} showHoles={showHoles} overlay={overlay}
+                  sheetValues={sheetValues?.values ?? null} />
               </div>
               <div className="viewer-legend">
                 <span>
@@ -1418,8 +1453,14 @@ function CadWorkspace({ scans }: { scans: ScanItem[] }) {
                 {overlay && <span className="cad-overlay-bar__note">
                   {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
                   {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
-                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px ·
-                  {' '}보정 포인트 {overlay.points.length}개
+                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px
+                </span>}
+                {overlay && sheetValues && <span className="cad-overlay-bar__note">
+                  보정시트 기준 · 계수 {sheetValues.coefficient.toFixed(2)}×
+                  {sheetValues.overrideCount > 0
+                    ? ` · 작업자 수정 ${sheetValues.overrideCount}개` : ''}
+                  {sheetValues.hiddenCount > 0
+                    ? ` · 숨긴 포인트 ${sheetValues.hiddenCount}개 제외` : ''}
                 </span>}
                 {overlay && overlay.rejected && overlay.rejected.length > 0 &&
                   <span className="cad-overlay-bar__err">
@@ -1480,8 +1521,8 @@ function CadWorkspace({ scans }: { scans: ScanItem[] }) {
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void }) {
-  const result = scan.result!; const points = result.points; const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void }) {
+  const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
@@ -1575,13 +1616,18 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({});
+  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); /* 보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 스캔별로 위에서 들고 있는다. */ const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({});
   const [valleyLinesByScan, setValleyLinesByScan] = useState<Record<string, ValleyLine[]>>({});
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const pointOverrides = completedScan ? pointOverridesByScan[completedScan.id] || {} : {};
+  const coefficient = completedScan ? coefficientByScan[completedScan.id] ?? 1 : 1;
+  const setCoefficient = (value: number) => {
+    if (!completedScan) return;
+    setCoefficientByScan((current) => ({ ...current, [completedScan.id]: value }));
+  };
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
   // 스캔이 새로 분석되면 제로라인을 미리 채워둔다. 우선순위는 "실제
@@ -1622,5 +1668,5 @@ export default function Home() {
   const setAnnotations = (updater: (current: Annotation[]) => Annotation[]) => completedScan && setAnnotationsByScan((current) => ({ ...current, [completedScan.id]: updater(current[completedScan.id] || []) }));
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || next === 'cad' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} />}{view === 'cad' && <CadWorkspace scans={scans} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} />}</div></main>;
 }

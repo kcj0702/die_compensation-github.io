@@ -910,9 +910,33 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
     )
 
 
-def cad_overlay_for(cad_id: str, analysis_id: str,
-                    coefficient: float = 1.0) -> dict[str, Any]:
-    """스캔에서 뽑은 제로라인·보정 포인트를 CAD 표면 위로 옮긴다.
+# CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
+#   64XX1-DR000_HDCT1860.CATPart  <->  64XX2-DR000 제품데이터.png (LH/RH)
+#   67XX6-DR050_HDCT1750.CATPart  <->  67XX6-DR050 제품데이터.png
+#   71XX1-DR000_HDCT0458.CATPart  <->  71XX2-DR000 제품데이터.png
+# 끝자리 1/2 는 좌우 대칭품이라 CAD 는 한쪽만 온다.
+CAD_TO_SCAN_PART = {
+    "64XX1": "64XX2",
+    "71XX1": "71XX2",
+    "67XX6": "67XX6",
+}
+
+
+def scan_part_for_cad(cad_name: str) -> str | None:
+    """CAD 파일명에서 짝이 되는 스캔 품번을 찾는다."""
+    folded = str(cad_name or "").upper().replace("-", "").replace("_", "")
+    for cad_key, scan_key in CAD_TO_SCAN_PART.items():
+        if cad_key in folded:
+            return scan_key
+    return None
+
+
+def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
+    """스캔에서 뽑은 제로라인·포인트를 CAD 표면 위의 3D 좌표로 옮긴다.
+
+    보정량은 여기서 계산하지 않는다. 최종 보정시트는 작업자가 값을
+    고치고 포인트를 빼기도 하는데, 그 상태는 화면이 들고 있다. 백엔드가
+    따로 계산하면 3D 와 시트가 어긋난다 — 위치만 주고 값은 화면이 정한다.
 
     실루엣을 맞춰 어느 방향에서 본 그림인지 찾고, 그 방향으로 광선을
     쏴서 표면에 얹는다. 데이텀 정합이 아니라 겉모양 정합이라
@@ -944,34 +968,34 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
             lines.append({"line_id": line.get("line_id"), "points": placed})
 
     # 컬러바 범위 밖의 값은 판독 오류다. 실측(JD_67XX6, 컬러바 +3.0~-3.0)
-    # 에서 +9.00 이 5건 나왔다. 그대로 두면 화살표 길이 기준을 잡아먹어
+    # 에서 +9.00 이 5건 나왔다. 3D 에 얹으면 화살표 길이 기준을 잡아먹어
     # 진짜 보정량(0.1~3mm)이 전부 점만 해진다.
     from zero_line_detection.simple_zero_line import PRODUCT_COLORBAR_MM
     folded = str(analysis.get("part_no") or "").upper().replace("-", "")
     span = next((v for k, v in PRODUCT_COLORBAR_MM.items() if k in folded), None)
     limit = max(abs(span[0]), abs(span[1])) * 1.05 if span else None
 
-    points, rejected = [], []
+    wanted, rejected = [], []
     for point in analysis.get("deviation_points", []):
         value = float(point.get("value", 0.0))
         if limit is not None and abs(value) > limit:
             rejected.append({"id": point.get("id"), "value": round(value, 3)})
             continue
-        placed = ov.unproject([[point["xPx"], point["yPx"]]],
-                              vertices, faces, fit, shifted)
-        if not placed:
-            continue
-        points.append({
-            "id": point.get("id"),
-            "position": placed[0],
-            "value": round(value, 3),
-            # 보정은 편차를 뒤집는 것이 기본이다. 계수는 화면에서 조절한다.
-            "correction": round(-value * coefficient, 3),
-        })
+        wanted.append(point)
+
+    # 광선은 한 번에 쏘는 게 훨씬 빠르다
+    placed = ov.unproject([[p["xPx"], p["yPx"]] for p in wanted],
+                          vertices, faces, fit, shifted)
+    points = [
+        {"id": point.get("id"), "position": spot,
+         "value": round(float(point.get("value", 0.0)), 3)}
+        for point, spot in zip(wanted, placed)
+    ]
 
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
-            "coefficient": coefficient, "rejected": rejected,
-            "colorbarLimit": round(limit, 2) if limit else None}
+            "rejected": rejected,
+            "colorbarLimit": round(limit, 2) if limit else None,
+            "scanPart": scan_part_for_cad(cad_entry.get("name", ""))}
 
 
 async def cad_overlay(request: Request) -> JSONResponse:
@@ -981,7 +1005,6 @@ async def cad_overlay(request: Request) -> JSONResponse:
             cad_overlay_for,
             str(body.get("cadId") or ""),
             str(body.get("analysisId") or ""),
-            float(body.get("coefficient") or 1.0),
         )
         return JSONResponse(result)
     except ValueError as exc:

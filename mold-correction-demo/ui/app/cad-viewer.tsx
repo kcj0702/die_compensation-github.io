@@ -36,9 +36,9 @@ export type CadOverlay = {
     mm_per_px: number; iou: number; reliable: boolean;
   };
   zeroLines: { line_id: number | null; points: [number, number, number][] }[];
-  points: { id: string; position: [number, number, number];
-            value: number; correction: number }[];
-  coefficient: number;
+  /* 위치만 준다. 보정량은 최종 보정시트가 정하므로 화면이 넣는다. */
+  points: { id: string; position: [number, number, number]; value: number }[];
+  scanPart?: string | null;
   /* 컬러바 범위를 벗어나 제외한 판독. 실측 JD_67XX6 에서 +9.00 이
      5건 나왔는데 그 부품 컬러바는 +3.0~-3.0 이다. */
   rejected?: { id: string; value: number }[];
@@ -108,8 +108,10 @@ function makeLabel(text: string, color: string, height: number): THREE.Sprite {
   return sprite;
 }
 
-export function CadViewer({ mesh, showHoles, overlay }: {
+export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
+  /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
+  sheetValues?: Record<string, number> | null;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -269,14 +271,19 @@ export function CadViewer({ mesh, showHoles, overlay }: {
       }
 
       // 보정량 — 표면에서 화살표를 세우고 값을 붙인다.
-      // 길이는 보정량에 비례하되 최소 길이를 둬서 작은 값도 보이게 한다.
+      // 값은 최종 보정시트에서 온다. 시트에 없는 포인트(작업자가 숨긴 것)는
+      // 3D 에도 안 나온다 — 두 화면이 항상 같은 것을 보여줘야 한다.
       const scale = radius * 0.05;
+      const shown = overlay.points
+        .map((p) => ({ point: p, correction: sheetValues?.[p.id] }))
+        .filter((entry): entry is { point: typeof entry.point; correction: number } =>
+          typeof entry.correction === 'number');
       const maxCorrection = Math.max(
-        ...overlay.points.map((p) => Math.abs(p.correction)), 0.5);
-      for (const point of overlay.points) {
-        const magnitude = Math.abs(point.correction);
+        ...shown.map((e) => Math.abs(e.correction)), 0.5);
+      for (const { point, correction } of shown) {
+        const magnitude = Math.abs(correction);
         if (magnitude < 0.05) continue;      // 손댈 필요 없는 자리
-        const positive = point.correction > 0;
+        const positive = correction > 0;
         const colour = positive ? PLUS_TINT : MINUS_TINT;
         const origin = new THREE.Vector3(...point.position);
         const length = scale * (0.35 + 0.65 * magnitude / maxCorrection);
@@ -287,7 +294,7 @@ export function CadViewer({ mesh, showHoles, overlay }: {
         overlayRoot.add(arrow);
 
         const label = makeLabel(
-          `${point.correction > 0 ? '+' : ''}${point.correction.toFixed(1)}`,
+          `${correction > 0 ? '+' : ''}${correction.toFixed(1)}`,
           positive ? '#ffb4ad' : '#a8ccf5', radius * 0.028);
         label.position.copy(origin).add(up.clone().multiplyScalar(length * 1.25));
         overlayRoot.add(label);
@@ -390,7 +397,7 @@ export function CadViewer({ mesh, showHoles, overlay }: {
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, showHoles, overlay]);
+  }, [mesh, holes, showHoles, overlay, sheetValues]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -430,7 +437,8 @@ export function CadViewer({ mesh, showHoles, overlay }: {
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
 
-  const overlayPoints = overlay?.points?.length ?? 0;
+  const overlayPoints = overlay?.points
+    ?.filter((p) => typeof sheetValues?.[p.id] === 'number').length ?? 0;
 
   return <>
     <div ref={mountRef} className="cad-viewer__stage" />
