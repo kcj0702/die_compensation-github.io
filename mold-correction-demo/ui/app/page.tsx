@@ -3,13 +3,7 @@
 /* Blob/data URLs are local engine outputs and cannot use Next's remote image loader. */
 /* eslint-disable @next/next/no-img-element */
 
-import {
-  Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown,
-  ChevronRight, Circle, CircleHelp, Crosshair, Eye, EyeOff, File, Folder, FolderOpen, Gauge,
-  Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight,
-  PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type,
-  UploadCloud, X, ZoomIn, ZoomOut,
-} from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown, ChevronRight, Circle, CircleHelp, Crosshair, Download, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { CadViewer, type CadMesh, type CadOverlay } from './cad-viewer';
@@ -1571,6 +1565,46 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const clearAnnotations = () => { setAnnotations(() => []); setSelectedAnnotationId(null); setTool('select'); };
   /* 브라우저 인쇄를 그대로 쓴다. 캔버스로 굽지 않아 글자가 벡터로 남고 추가 의존성도 없다.
      인쇄 대화상자에서 '대상: PDF로 저장'을 고르면 된다. */
+  /* 현업 엑셀 양식으로 내보낸다. 보정량은 화면이 들고 있는 최종값을
+     그대로 보내야 시트와 엑셀이 어긋나지 않는다. */
+  const [excelState, setExcelState] = useState<'idle' | 'saving' | 'error'>('idle');
+  const [excelError, setExcelError] = useState<string | null>(null);
+  const saveExcel = async () => {
+    const analysisId = result.analysisId;
+    if (!analysisId) { setExcelError('분석 결과가 없습니다.'); return; }
+    setExcelState('saving'); setExcelError(null);
+    const corrections: Record<string, number> = {};
+    for (const point of sheetPoints) {
+      if (!visiblePointIds.has(point.id)) continue;
+      corrections[point.id] = displayFor(point);
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/sheet-excel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          analysisId, corrections,
+          filename: `${scan.partNo || 'ADC'}_보정시트`,
+          meta: { partNo: scan.partNo, coefficient },
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error || '엑셀을 만들지 못했습니다.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${scan.partNo || 'ADC'}_보정시트.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setExcelState('idle');
+    } catch (err) {
+      setExcelError(String((err as Error).message || err));
+      setExcelState('error');
+    }
+  };
+
   const sheetRef = useRef<HTMLDivElement>(null);
   const savePdf = () => {
     setSelectedAnnotationId(null);
@@ -1610,7 +1644,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
       <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
-      <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button></div>
+      <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button><button type="button" className="sheet-print" onClick={saveExcel} disabled={excelState === 'saving'}><Download size={14} /> {excelState === 'saving' ? '엑셀 만드는 중…' : '기업 양식 엑셀 저장'}</button>{excelError && <span className="sheet-excel-error">{excelError}</span>}</div>
     </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
   </section>;
 }

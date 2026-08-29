@@ -510,3 +510,5 @@ button { cursor: pointer; }
   box-shadow:0 1px 4px rgba(0,0,0,.3); }
 .add-point-remove:hover { background:#c8341f; transform:scale(1.15); }
 
+
+.sheet-excel-error{margin-left:8px;color:#bd4650;font-size:8.5px}

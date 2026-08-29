@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import threading
+import urllib.parse
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -21,7 +22,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.concurrency import run_in_threadpool
 
@@ -998,6 +999,79 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
             "scanPart": scan_part_for_cad(cad_entry.get("name", ""))}
 
 
+def sheet_excel_for(analysis_id: str, corrections: dict,
+                    meta: dict) -> bytes:
+    """최종 보정시트를 현업 엑셀 양식으로 만든다.
+
+    보정량은 화면이 준다 — 작업자가 고친 값과 계수가 반영된 최종값이다.
+    여기서 다시 계산하면 시트와 엑셀이 어긋난다.
+    """
+    from zero_line_detection.sheet_excel import (
+        SheetPoint, build_workbook, draw_sheet_image,
+    )
+
+    entry = _analysis_cache.get(analysis_id)
+    if entry is None:
+        raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
+
+    base_rgb = entry.get("overlay_base")
+    if base_rgb is None:
+        raise ValueError("시트에 쓸 그림이 없습니다.")
+    base_bgr = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2BGR)
+
+    points = []
+    for point in entry.get("deviation_points", []):
+        point_id = point.get("id")
+        if point_id not in corrections:      # 작업자가 숨긴 포인트
+            continue
+        points.append(SheetPoint(
+            point_id=point_id,
+            x_px=int(point.get("xPx", 0)),
+            y_px=int(point.get("yPx", 0)),
+            deviation=float(point.get("value", 0.0)),
+            correction=float(corrections[point_id]),
+        ))
+    points.sort(key=lambda p: p.point_id)
+
+    image = draw_sheet_image(base_bgr, points)
+    return build_workbook(
+        image, points,
+        part_no=str(meta.get("partNo") or entry.get("part_no") or ""),
+        part_name=str(meta.get("partName") or ""),
+        process=str(meta.get("process") or ""),
+        material=str(meta.get("material") or ""),
+        control_no=str(meta.get("controlNo") or ""),
+        applied_at=str(meta.get("appliedAt") or "") or None,
+        coefficient=float(meta.get("coefficient") or 1.0),
+    )
+
+
+async def sheet_excel(request: Request) -> Response:
+    try:
+        body = await request.json()
+        corrections = body.get("corrections") or {}
+        if not isinstance(corrections, dict) or not corrections:
+            return JSONResponse({"error": "보정량이 비어 있습니다."}, status_code=400)
+        payload = await run_in_threadpool(
+            sheet_excel_for, str(body.get("analysisId") or ""),
+            {str(k): float(v) for k, v in corrections.items()},
+            body.get("meta") or {},
+        )
+        name = str(body.get("filename") or "보정시트") + ".xlsx"
+        quoted = urllib.parse.quote(name)
+        return Response(
+            payload,
+            media_type=("application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet"),
+            headers={"Content-Disposition":
+                     f"attachment; filename*=UTF-8''{quoted}"},
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_overlay(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -1178,6 +1252,7 @@ app = Starlette(
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/sample", sample, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]
