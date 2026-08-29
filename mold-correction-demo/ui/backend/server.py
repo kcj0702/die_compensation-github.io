@@ -882,6 +882,10 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
                 "mesh": mesh_full,
                 "offset": np.asarray(offset, dtype=float) if offset else np.zeros(3),
                 "name": path.stem,
+                # 히트맵은 화면에 그리는 정점에 입혀야 한다. 원본 삼각망은
+                # 간략화 전이라 개수가 달라서 그대로 쓰면 어긋난다.
+                "display_vertices": np.asarray(
+                    web["positions"], dtype=float).reshape(-1, 3),
             })
             return web
 
@@ -993,10 +997,23 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
         for point, spot in zip(wanted, placed)
     ]
 
+    # 표면에 입힐 편차 — 화면용 정점 하나하나에 스캔 값을 찍는다.
+    surface = []
+    display = cad_entry.get("display_vertices")
+    if display is not None:
+        surface = ov.sample_deviation(
+            np.asarray(display, dtype=float), fit,
+            analysis["values"], analysis["part_mask"])
+
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
             "colorbarLimit": round(limit, 2) if limit else None,
-            "scanPart": scan_part_for_cad(cad_entry.get("name", ""))}
+            "scanPart": scan_part_for_cad(cad_entry.get("name", "")),
+            "surfaceDeviation": surface,
+            "deviationRange": (
+                [round(float(np.nanmin(analysis["values"][analysis["part_mask"] > 0])), 2),
+                 round(float(np.nanmax(analysis["values"][analysis["part_mask"] > 0])), 2)]
+                if analysis.get("part_mask") is not None else None)}
 
 
 def sheet_excel_for(analysis_id: str, corrections: dict,

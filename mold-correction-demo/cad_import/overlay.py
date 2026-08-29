@@ -230,4 +230,33 @@ def unproject(points_px, vertices: np.ndarray, faces: np.ndarray,
     return hits
 
 
-__all__ = ["ViewFit", "MIN_IOU", "fit_view", "unproject"]
+def sample_deviation(vertices: np.ndarray, fit: ViewFit,
+                    values: np.ndarray, part_mask) -> list:
+    """정점마다 스캔 편차값을 찍어 준다 — 3D 표면에 히트맵을 입히려고.
+
+    unproject 의 반대 방향이다. 부품 좌표를 화면 픽셀로 되돌린 뒤
+    그 자리의 편차를 읽는다. 부품 밖이면 None 을 넣어 화면에서
+    회색으로 남긴다.
+    """
+    u_axis, v_axis = _plane_axes(fit.axis)
+    mask = np.asarray(part_mask) > 0
+    height, width = mask.shape
+
+    # unproject 가 부품 좌표를 만들 때 쓴 부호를 그대로 뒤집는다
+    u_part = vertices[:, u_axis] * (fit.sign if not fit.flip_u else -fit.sign)
+    v_part = vertices[:, v_axis] * (-1 if fit.flip_v else 1)
+    xs = np.rint((u_part - fit.origin_u) / fit.mm_per_px).astype(int)
+    ys = np.rint((v_part - fit.origin_v) / fit.mm_per_px).astype(int)
+
+    inside = (xs >= 0) & (xs < width) & (ys >= 0) & (ys < height)
+    inside[inside] &= mask[ys[inside], xs[inside]]
+
+    out: list = [None] * len(vertices)
+    if inside.any():
+        picked = np.asarray(values)[ys[inside], xs[inside]]
+        for slot, value in zip(np.nonzero(inside)[0], picked):
+            out[int(slot)] = round(float(value), 3)
+    return out
+
+
+__all__ = ["ViewFit", "MIN_IOU", "fit_view", "unproject", "sample_deviation"]

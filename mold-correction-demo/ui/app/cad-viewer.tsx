@@ -39,6 +39,9 @@ export type CadOverlay = {
   /* 위치만 준다. 보정량은 최종 보정시트가 정하므로 화면이 넣는다. */
   points: { id: string; position: [number, number, number]; value: number }[];
   scanPart?: string | null;
+  /* 화면용 정점 하나하나의 스캔 편차(mm). 부품 밖이면 null. */
+  surfaceDeviation?: (number | null)[];
+  deviationRange?: [number, number] | null;
   /* 컬러바 범위를 벗어나 제외한 판독. 실측 JD_67XX6 에서 +9.00 이
      5건 나왔는데 그 부품 컬러바는 +3.0~-3.0 이다. */
   rejected?: { id: string; value: number }[];
@@ -66,9 +69,40 @@ export type CadDetail = 'solid' | 'edges' | 'wire';
 const SURFACE = 0x8fa3b4;
 const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
-const ZERO_TINT = 0xff3b30;      // 제로라인 — 보정시트의 빨간 선과 맞춘다
-const PLUS_TINT = 0xe0483f;      // 살이 많다 (깎아낸다)
-const MINUS_TINT = 0x2f7fe0;     // 살이 부족하다 (붙인다)
+const ZERO_TINT = 0xff3b30;      // 제로라인
+// 최종 보정시트("보정 적용 내용")의 표기 — 노란 콜아웃, 빨간 점과 지시선.
+const CALLOUT_FILL = '#ffef3a';
+const CALLOUT_EDGE = '#3a3a3a';
+const CALLOUT_TEXT = '#141414';
+const MARK_TINT = 0xe01b1b;      // 보정 지점 빨간 점 · 지시선
+const NO_DATA = new THREE.Color(0x55606b);   // 스캔 밖 — 회색으로 남긴다
+
+/** 스캔 히트맵과 같은 색 순서: 파랑(-) → 청록 → 초록(0) → 노랑 → 빨강(+).
+ *  검사 소프트웨어가 쓰는 배열이라 현업이 바로 알아본다. */
+const RAMP: [number, [number, number, number]][] = [
+  [0.00, [0.25, 0.13, 0.62]],
+  [0.20, [0.13, 0.45, 0.85]],
+  [0.38, [0.15, 0.78, 0.78]],
+  [0.50, [0.20, 0.78, 0.35]],
+  [0.62, [0.85, 0.90, 0.20]],
+  [0.80, [0.95, 0.55, 0.12]],
+  [1.00, [0.75, 0.10, 0.10]],
+];
+
+function rampColor(t: number): [number, number, number] {
+  const x = Math.min(Math.max(t, 0), 1);
+  for (let i = 1; i < RAMP.length; i += 1) {
+    const [stop, colour] = RAMP[i];
+    if (x <= stop) {
+      const [prevStop, prev] = RAMP[i - 1];
+      const k = (x - prevStop) / (stop - prevStop || 1);
+      return [prev[0] + (colour[0] - prev[0]) * k,
+              prev[1] + (colour[1] - prev[1]) * k,
+              prev[2] + (colour[2] - prev[2]) * k];
+    }
+  }
+  return RAMP[RAMP.length - 1][1];
+}
 
 /** 표준 뷰 — CATIA 의 정면/우측/평면/등각과 같은 자리. */
 const VIEWS: { id: string; label: string; dir: [number, number, number] }[] = [
@@ -81,30 +115,50 @@ const VIEWS: { id: string; label: string; dir: [number, number, number] }[] = [
 /** 캔버스에 글자를 구워 스프라이트로 만든다.
  *  three 의 텍스트 지오메트리는 폰트 파일을 받아야 해서 쓰지 않는다
  *  (사내망 원칙 — 바깥에서 아무것도 안 받는다). */
-function makeLabel(text: string, color: string, height: number): THREE.Sprite {
-  const pad = 8;
-  const canvas = document.createElement('canvas');
-  const context = canvas.getContext('2d');
-  if (!context) return new THREE.Sprite();
-  context.font = '600 44px ui-sans-serif, system-ui, sans-serif';
-  const width = Math.ceil(context.measureText(text).width) + pad * 2;
-  canvas.width = width;
-  canvas.height = 64;
+function makeLabel(text: string, height: number): THREE.Sprite {
+  /* 최종 보정시트("보정 적용 내용")의 표기를 그대로 옮긴다 —
+     노란 박스에 검은 숫자, 얇은 검은 테두리. 현업이 시트에서 보던
+     모양이라 설명이 필요 없다. */
+  const pad = 14;
+  const measure = document.createElement('canvas').getContext('2d');
+  if (!measure) return new THREE.Sprite();
+  const font = '700 52px ui-sans-serif, system-ui, sans-serif';
+  measure.font = font;
+  const textWidth = Math.ceil(measure.measureText(text).width);
 
+  const canvas = document.createElement('canvas');
+  canvas.width = textWidth + pad * 2;
+  canvas.height = 76;
   const ctx = canvas.getContext('2d')!;
-  ctx.font = '600 44px ui-sans-serif, system-ui, sans-serif';
-  ctx.fillStyle = 'rgba(10,16,22,.82)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = color;
+  const radius = 14;
+  const w = canvas.width;
+  const h = canvas.height;
+
+  ctx.beginPath();
+  ctx.moveTo(radius, 2);
+  ctx.arcTo(w - 2, 2, w - 2, h - 2, radius);
+  ctx.arcTo(w - 2, h - 2, 2, h - 2, radius);
+  ctx.arcTo(2, h - 2, 2, 2, radius);
+  ctx.arcTo(2, 2, w - 2, 2, radius);
+  ctx.closePath();
+  ctx.fillStyle = CALLOUT_FILL;
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = CALLOUT_EDGE;
+  ctx.stroke();
+
+  ctx.font = font;
+  ctx.fillStyle = CALLOUT_TEXT;
   ctx.textBaseline = 'middle';
-  ctx.fillText(text, pad, canvas.height / 2 + 2);
+  ctx.textAlign = 'center';
+  ctx.fillText(text, w / 2, h / 2 + 2);
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.minFilter = THREE.LinearFilter;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
     map: texture, depthTest: false, transparent: true,
   }));
-  sprite.scale.set(height * canvas.width / canvas.height, height, 1);
+  sprite.scale.set(height * w / h, height, 1);
   return sprite;
 }
 
@@ -120,6 +174,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   const [showOverlay, setShowOverlay] = useState(true);
   /* 홀을 누르면 지름과 좌표를 띄운다 — 데이텀을 고를 때 필요하다. */
   const [picked, setPicked] = useState<CadHole | null>(null);
+  /* 편차를 표면에 입힐지. 부품이 회색 덩어리로만 보이면 편차 프로젝트에서
+     3D 가 할 일이 없다. */
+  const [showHeat, setShowHeat] = useState(true);
 
   // 씬 안에서 켜고 끌 그룹들은 ref 로 들고 있어야 리렌더 없이 토글된다.
   const holeGroup = useRef<THREE.Group | null>(null);
@@ -174,8 +231,36 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     const radius = geometry.boundingSphere?.radius ?? 1;
     const centre = geometry.boundingSphere?.center ?? new THREE.Vector3();
 
+    // ── 편차를 표면 색으로 ───────────────────────────────────
+    // 값의 절대 크기가 아니라 컬러바 범위에 맞춰 칠한다. 그래야 스캔
+    // 히트맵과 같은 색이 같은 편차를 뜻한다.
+    const deviations = overlay?.surfaceDeviation;
+    const range = overlay?.deviationRange;
+    let painted = false;
+    if (showHeat && deviations && deviations.length === mesh.positions.length / 3) {
+      const span = Math.max(
+        Math.abs(range?.[0] ?? -1), Math.abs(range?.[1] ?? 1), 0.01);
+      const colours = new Float32Array(deviations.length * 3);
+      for (let i = 0; i < deviations.length; i += 1) {
+        const value = deviations[i];
+        if (value === null || value === undefined) {
+          colours[i * 3] = NO_DATA.r;
+          colours[i * 3 + 1] = NO_DATA.g;
+          colours[i * 3 + 2] = NO_DATA.b;
+          continue;
+        }
+        const [r, g, b] = rampColor((value / span + 1) / 2);
+        colours[i * 3] = r; colours[i * 3 + 1] = g; colours[i * 3 + 2] = b;
+      }
+      geometry.setAttribute('color', new THREE.BufferAttribute(colours, 3));
+      painted = true;
+    }
+
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-      color: SURFACE, metalness: 0.55, roughness: 0.42,
+      color: painted ? 0xffffff : SURFACE,
+      vertexColors: painted,
+      metalness: painted ? 0.15 : 0.55,
+      roughness: painted ? 0.75 : 0.42,
       side: THREE.DoubleSide, flatShading: false,
     }));
     scene.add(surface);
@@ -268,7 +353,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     const overlayRoot = new THREE.Group();
     if (overlay) {
       // 제로라인 — 표면에 살짝 띄워 z-파이팅을 피한다
-      const lift = radius * 0.004;
+      const lift = radius * 0.006;   // 형상에 묻히지 않게 굵게
       for (const line of overlay.zeroLines || []) {
         if (!line.points?.length) continue;
         const pts = line.points.map(([x, y, z]) => new THREE.Vector3(x, y, z));
@@ -290,23 +375,60 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           typeof entry.correction === 'number');
       const maxCorrection = Math.max(
         ...shown.map((e) => Math.abs(e.correction)), 0.5);
+      // 화살표는 표면 법선을 따라야 한다. 월드 축으로 세우면 곡면에서
+      // 엉뚱한 쪽을 가리킨다 — 판넬은 전체가 곡면이다.
+      const normalAt = (spot: THREE.Vector3) => {
+        const normals = geometry.getAttribute('normal');
+        const positions = geometry.getAttribute('position');
+        let best = -1;
+        let bestDistance = Infinity;
+        // 가까운 정점의 법선을 쓴다. 정확한 면을 찾을 필요까진 없다.
+        for (let i = 0; i < positions.count; i += 7) {
+          const dx = positions.getX(i) - spot.x;
+          const dy = positions.getY(i) - spot.y;
+          const dz = positions.getZ(i) - spot.z;
+          const distance = dx * dx + dy * dy + dz * dz;
+          if (distance < bestDistance) { bestDistance = distance; best = i; }
+        }
+        if (best < 0) return new THREE.Vector3(0, 0, 1);
+        return new THREE.Vector3(
+          normals.getX(best), normals.getY(best), normals.getZ(best)).normalize();
+      };
+
+      // 시트와 같은 표기 — 보정 지점에 빨간 점, 거기서 빨간 점선을 뽑아
+      // 끝에 노란 숫자 박스를 단다. 0 인 자리도 시트에는 적히므로 남긴다.
+      const markMaterial = new THREE.MeshBasicMaterial({ color: MARK_TINT });
+      const leaderMaterial = new THREE.LineDashedMaterial({
+        color: MARK_TINT, dashSize: radius * 0.012, gapSize: radius * 0.009,
+        depthTest: false,
+      });
       for (const { point, correction } of shown) {
         const magnitude = Math.abs(correction);
-        if (magnitude < 0.05) continue;      // 손댈 필요 없는 자리
-        const positive = correction > 0;
-        const colour = positive ? PLUS_TINT : MINUS_TINT;
         const origin = new THREE.Vector3(...point.position);
-        const length = scale * (0.35 + 0.65 * magnitude / maxCorrection);
-        const up = new THREE.Vector3(0, 0, positive ? 1 : -1);
+        const normal = normalAt(origin);
+        // 지시선은 형상 밖으로 뽑아야 읽힌다. 보정량이 클수록 멀리 뽑아
+        // 큰 값이 겹쳐 가려지지 않게 한다.
+        const reach = scale * (1.1 + 1.3 * magnitude / maxCorrection);
+        const tip = origin.clone().add(normal.clone().multiplyScalar(reach));
 
-        const arrow = new THREE.ArrowHelper(
-          up, origin, length, colour, length * 0.34, length * 0.2);
-        overlayRoot.add(arrow);
+        const dot = new THREE.Mesh(
+          new THREE.SphereGeometry(radius * 0.006, 10, 8), markMaterial);
+        dot.position.copy(origin);
+        dot.renderOrder = 8;
+        overlayRoot.add(dot);
+
+        const leader = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([origin, tip]),
+          leaderMaterial);
+        leader.computeLineDistances();     // 점선은 이걸 해야 보인다
+        leader.renderOrder = 9;
+        overlayRoot.add(leader);
 
         const label = makeLabel(
           `${correction > 0 ? '+' : ''}${correction.toFixed(1)}`,
-          positive ? '#ffb4ad' : '#a8ccf5', radius * 0.028);
-        label.position.copy(origin).add(up.clone().multiplyScalar(length * 1.25));
+          radius * 0.038);
+        label.position.copy(tip);
+        label.renderOrder = 10;
         overlayRoot.add(label);
       }
     }
@@ -431,7 +553,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, showHoles, overlay, sheetValues]);
+  }, [mesh, holes, showHoles, overlay, sheetValues, showHeat]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -488,12 +610,24 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       </button>
     </div>
 
+    {overlay && showHeat && overlay.deviationRange && (
+      <div className="cad-viewer__bar">
+        <span>{overlay.deviationRange[1].toFixed(1)}</span>
+        <i />
+        <span>0</span>
+        <span className="cad-viewer__bar-low">
+          {overlay.deviationRange[0].toFixed(1)}
+        </span>
+        <small>편차 mm</small>
+      </div>
+    )}
+
     {overlay && showOverlay && overlay.points.length > 0 && (
       <div className="cad-viewer__legend">
-        <span><i style={{ background: '#e0483f' }} />살이 많다 · 깎아낸다</span>
-        <span><i style={{ background: '#2f7fe0' }} />살이 부족하다 · 붙인다</span>
+        <span><i style={{ background: '#ffef3a' }} />보정량 (mm)</span>
+        <span><i style={{ background: '#e01b1b' }} />보정 지점과 지시선</span>
         <span><i style={{ background: '#ff3b30' }} />제로라인</span>
-        <small>화살표 길이는 보정량에 비례합니다</small>
+        <small>보정시트와 같은 표기입니다</small>
       </div>
     )}
 
@@ -514,6 +648,10 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
         onClick={() => setShowOverlay((v) => !v)}>
         제로라인·보정량 {overlayPoints}
       </button>}
+      {overlay?.surfaceDeviation?.length ? (
+        <button type="button" className={showHeat ? 'is-on' : ''}
+          onClick={() => setShowHeat((v) => !v)}>편차 색</button>
+      ) : null}
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
         {mesh.counts?.cylinders
