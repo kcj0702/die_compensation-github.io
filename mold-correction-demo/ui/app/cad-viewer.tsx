@@ -397,40 +397,75 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
 
       // 시트와 같은 표기 — 보정 지점에 빨간 점, 거기서 빨간 점선을 뽑아
       // 끝에 노란 숫자 박스를 단다. 0 인 자리도 시트에는 적히므로 남긴다.
+      //
+      // [겹침을 어떻게 푸는가]
+      // 앞서는 지시선을 표면 법선으로만 뽑았다. 그런데 판넬은 법선이
+      // 대체로 한쪽을 향해서 라벨이 한 곳에 쌓여 값이 안 읽혔다.
+      // 시트는 이 문제를 콜아웃을 **부품 바깥 테두리에 둘러** 푼다.
+      // 같은 방법을 쓴다 — 스캔이 바라본 평면에서 각도로 정렬해 바깥
+      // 링에 고르게 앉히면 순서가 유지되고 서로 겹치지 않는다.
       const markMaterial = new THREE.MeshBasicMaterial({ color: MARK_TINT });
       const leaderMaterial = new THREE.LineDashedMaterial({
         color: MARK_TINT, dashSize: radius * 0.012, gapSize: radius * 0.009,
         depthTest: false,
       });
-      for (const { point, correction } of shown) {
-        const magnitude = Math.abs(correction);
+
+      const viewAxis = overlay.fit?.axis ?? 2;
+      const planeAxes = ([[1, 2], [0, 2], [0, 1]] as const)[viewAxis];
+      const toArray = (v: THREE.Vector3) => [v.x, v.y, v.z];
+      const flat = (v: THREE.Vector3) => {
+        const a = toArray(v);
+        return new THREE.Vector2(a[planeAxes[0]], a[planeAxes[1]]);
+      };
+
+      const spots = shown.map(({ point, correction }) => {
         const origin = new THREE.Vector3(...point.position);
-        const normal = normalAt(origin);
-        // 지시선은 형상 밖으로 뽑아야 읽힌다. 보정량이 클수록 멀리 뽑아
-        // 큰 값이 겹쳐 가려지지 않게 한다.
-        const reach = scale * (1.1 + 1.3 * magnitude / maxCorrection);
-        const tip = origin.clone().add(normal.clone().multiplyScalar(reach));
+        return { origin, correction, plane: flat(origin) };
+      });
+      const middle = spots.reduce(
+        (sum, s) => sum.add(s.plane), new THREE.Vector2()).divideScalar(
+          Math.max(spots.length, 1));
+      const spread = Math.max(
+        ...spots.map((s) => s.plane.distanceTo(middle)), radius * 0.2);
+      const ring = spread * 1.32;      // 형상 바깥으로 밀어낸다
+      // 라벨은 한 평면에 모아 둔다. 깊이가 제각각이면 다른 각도에서
+      // 흩어져 보인다.
+      const labelDepth = toArray(centre)[viewAxis]
+        + (geometry.boundingSphere?.radius ?? radius) * 0.55;
+
+      spots.sort((a, b) =>
+        Math.atan2(a.plane.y - middle.y, a.plane.x - middle.x)
+        - Math.atan2(b.plane.y - middle.y, b.plane.x - middle.x));
+
+      spots.forEach((spot, index) => {
+        const angle = (index / Math.max(spots.length, 1)) * Math.PI * 2;
+        const seat = new THREE.Vector3();
+        const coords = [0, 0, 0];
+        coords[planeAxes[0]] = middle.x + Math.cos(angle) * ring;
+        coords[planeAxes[1]] = middle.y + Math.sin(angle) * ring;
+        coords[viewAxis] = labelDepth;
+        seat.set(coords[0], coords[1], coords[2]);
 
         const dot = new THREE.Mesh(
           new THREE.SphereGeometry(radius * 0.006, 10, 8), markMaterial);
-        dot.position.copy(origin);
+        dot.position.copy(spot.origin);
         dot.renderOrder = 8;
         overlayRoot.add(dot);
 
         const leader = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints([origin, tip]),
+          new THREE.BufferGeometry().setFromPoints([spot.origin, seat]),
           leaderMaterial);
         leader.computeLineDistances();     // 점선은 이걸 해야 보인다
         leader.renderOrder = 9;
         overlayRoot.add(leader);
 
         const label = makeLabel(
-          `${correction > 0 ? '+' : ''}${correction.toFixed(1)}`,
+          `${spot.correction > 0 ? '+' : ''}${spot.correction.toFixed(1)}`,
           radius * 0.038);
-        label.position.copy(tip);
+        label.position.copy(seat);
         label.renderOrder = 10;
         overlayRoot.add(label);
-      }
+      });
     }
     scene.add(overlayRoot);
     overlayGroup.current = overlayRoot;
@@ -447,8 +482,18 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     // ── 카메라 ───────────────────────────────────────────────
     const camera = new THREE.PerspectiveCamera(
       42, mount.clientWidth / mount.clientHeight, radius * 0.01, radius * 60);
-    camera.position.copy(centre).add(
-      new THREE.Vector3(radius * 1.5, radius * 1.1, radius * 1.9));
+    // 스캔이 바라본 방향이 있으면 그쪽에 세운다. 안 그러면 얇은 쪽에서
+    // 보게 되어 형상이 선처럼 보인다(실측: 판넬이 한 축으로 155mm 다).
+    const start = new THREE.Vector3(radius * 1.5, radius * 1.1, radius * 1.9);
+    if (overlay?.fit) {
+      const along = [0, 0, 0];
+      along[overlay.fit.axis] = overlay.fit.sign >= 0 ? 1 : -1;
+      start.set(along[0], along[1], along[2]).multiplyScalar(radius * 2.4);
+      // 완전히 정면이면 입체감이 없어 살짝 비껴 세운다
+      start.x += radius * 0.12;
+      start.y += radius * 0.1;
+    }
+    camera.position.copy(centre).add(start);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.copy(centre);
