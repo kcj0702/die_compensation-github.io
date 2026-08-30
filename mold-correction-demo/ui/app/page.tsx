@@ -6,6 +6,7 @@
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown, ChevronRight, Circle, CircleHelp, Crosshair, Download, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
+import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
 import { CIRCLED, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
@@ -1008,9 +1009,28 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
   </aside>;
 }
 
-function Header({ scans, activeId, setActiveId }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void }) {
+function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
+  const fileRef = useRef<HTMLInputElement>(null);
   return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span><h1>ADC <small>Ajin Die Compensation</small></h1></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
+    {/* 작업 내용은 자동으로 이 PC 에 남는다. 파일로 빼두면 보관하거나
+        다른 사람에게 넘길 수 있다. */}
+    <div className="topbar__session">
+      {note && <span className="topbar__session-note">{note}</span>}
+      <button type="button" className="tool-button" onClick={onSaveFile}
+        title="고친 보정값과 설정을 파일로 내려받습니다">작업 저장</button>
+      <button type="button" className="tool-button"
+        onClick={() => fileRef.current?.click()}
+        title="저장해 둔 작업 파일을 불러옵니다">작업 불러오기</button>
+      <button type="button" className="tool-button" onClick={onReset}
+        title="이 PC 에 남은 작업 내용을 지웁니다">작업 비우기</button>
+      <input ref={fileRef} type="file" hidden accept="application/json,.json"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) onLoadFile(file);
+          event.target.value = '';
+        }} />
+    </div>
     <button className="icon-button" aria-label="설정"><Settings2 size={19} /></button><div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
   </div></header>;
 }
@@ -1794,6 +1814,12 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
 
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); /* 보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 스캔별로 위에서 들고 있는다. */ const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({});
+  /* 작업 내용을 이 PC 에 남긴다 — 새로고침으로 날아가면 안 된다.
+     스캔 아이디는 파일을 다시 올릴 때마다 바뀌므로 품번으로 묶는다. */
+  const [sessionNote, setSessionNote] = useState<string | null>(null);
+  const sessionRef = useRef<SessionSnapshot>(emptySession());
+  const sessionReady = useRef(false);
+  const sessionFileRef = useRef<HTMLInputElement>(null);
   const [valleyLinesByScan, setValleyLinesByScan] = useState<Record<string, ValleyLine[]>>({});
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
@@ -1841,6 +1867,67 @@ export default function Home() {
   });
   /* 3D 탭은 보고 있는 스캔이 시트와 다를 수 있어 스캔을 지정해 고친다.
      시트와 같은 저장소라 어느 쪽에서 고쳐도 양쪽에 함께 반영된다. */
+  /* 스캔 아이디 -> 품번. 저장은 품번 기준이라 매번 이걸로 옮긴다. */
+  const partOf = (scanId: string) =>
+    scans.find((scan) => scan.id === scanId)?.partNo || scanId;
+
+  /* 저장해 둔 작업을 스캔이 올라오는 대로 되살린다. 같은 품번이 다시
+     분석되면 그때 붙인다 — 스캔 아이디는 매번 새로 생기기 때문이다. */
+  useEffect(() => {
+    if (sessionReady.current) return;
+    const saved = loadSession();
+    if (!saved) { sessionReady.current = true; return; }
+    sessionRef.current = saved;
+    sessionReady.current = true;
+    const parts = Object.keys(saved.byPart).length;
+    if (parts) setSessionNote(`저장된 작업 ${parts}개 품번을 불러왔습니다`);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionReady.current) return;
+    const saved = sessionRef.current;
+    let touched = false;
+    for (const scan of scans) {
+      if (!scan.result) continue;
+      const entry = saved.byPart[scan.partNo];
+      if (!entry) continue;
+      if (entry.coefficient !== undefined
+          && coefficientByScan[scan.id] === undefined) {
+        setCoefficientByScan((c) => ({ ...c, [scan.id]: entry.coefficient! }));
+        touched = true;
+      }
+      if (entry.overrides && !pointOverridesByScan[scan.id]) {
+        setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
+        touched = true;
+      }
+      if (entry.hidden && !hiddenPointIdsByScan[scan.id]) {
+        setHiddenPointIdsByScan((c) => ({ ...c, [scan.id]: new Set(entry.hidden!) }));
+        touched = true;
+      }
+    }
+    if (touched) setSessionNote('저장해 둔 보정 내용을 되살렸습니다');
+  }, [scans, coefficientByScan, pointOverridesByScan, hiddenPointIdsByScan]);
+
+  /* 바뀔 때마다 남긴다. 저장이 막혀 있어도 작업은 계속되어야 한다. */
+  useEffect(() => {
+    if (!sessionReady.current) return;
+    const snapshot = { ...sessionRef.current, byPart: { ...sessionRef.current.byPart } };
+    for (const scan of scans) {
+      if (!scan.result) continue;
+      const overrides = pointOverridesByScan[scan.id];
+      const hidden = hiddenPointIdsByScan[scan.id];
+      const coefficient = coefficientByScan[scan.id];
+      if (!overrides && !hidden && coefficient === undefined) continue;
+      snapshot.byPart[partOf(scan.id)] = {
+        coefficient,
+        overrides: overrides ? { ...overrides } : undefined,
+        hidden: hidden ? [...hidden] : undefined,
+      };
+    }
+    sessionRef.current = snapshot;
+    saveSession(snapshot);
+  }, [scans, pointOverridesByScan, hiddenPointIdsByScan, coefficientByScan]);
+
   const setPointOverrideFor = (scanId: string, id: string, value: number | null) => setPointOverridesByScan((current) => { const next = { ...(current[scanId] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [scanId]: next }; });
   const setPointOverride = (id: string, value: number | null) => { if (completedScan) setPointOverrideFor(completedScan.id, id, value); };
   const clearAllOverrides = () => completedScan && setPointOverridesByScan((current) => ({ ...current, [completedScan.id]: {} }));
@@ -1848,5 +1935,28 @@ export default function Home() {
   const setAnnotations = (updater: (current: Annotation[]) => Annotation[]) => completedScan && setAnnotationsByScan((current) => ({ ...current, [completedScan.id]: updater(current[completedScan.id] || []) }));
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || next === 'cad' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} note={sessionNote}
+      onSaveFile={() => downloadSession(sessionRef.current)}
+      onLoadFile={async (file) => {
+        const parsed = await readSessionFile(file);
+        if (!parsed) { setSessionNote('읽을 수 없는 파일입니다'); return; }
+        sessionRef.current = parsed;
+        saveSession(parsed);
+        /* 이미 올라온 스캔에 바로 붙인다 */
+        for (const scan of scans) {
+          const entry = parsed.byPart[scan.partNo];
+          if (!entry) continue;
+          if (entry.coefficient !== undefined) setCoefficientByScan((c) => ({ ...c, [scan.id]: entry.coefficient! }));
+          if (entry.overrides) setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
+          if (entry.hidden) setHiddenPointIdsByScan((c) => ({ ...c, [scan.id]: new Set(entry.hidden!) }));
+        }
+        setSessionNote(`${Object.keys(parsed.byPart).length}개 품번을 불러왔습니다`);
+      }}
+      onReset={() => {
+        clearSession();
+        sessionRef.current = emptySession();
+        setPointOverridesByScan({}); setHiddenPointIdsByScan({});
+        setCoefficientByScan({});
+        setSessionNote('작업 내용을 비웠습니다');
+      }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} />}</div></main>;
 }

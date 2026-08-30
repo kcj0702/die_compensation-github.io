@@ -571,3 +571,7 @@ button { cursor: pointer; }
 .cad-viewer__zone select:focus-visible{outline:2px solid #ff5fa8;outline-offset:1px}
 .cad-viewer__zone button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
 .cad-viewer__zone button:hover{color:#ff8b8b}
+
+.topbar__session{display:flex;align-items:center;gap:6px}
+.topbar__session .tool-button{padding:5px 9px;font-size:8.5px}
+.topbar__session-note{margin-right:4px;color:#5c8f6b;font-size:8.5px;white-space:nowrap}
