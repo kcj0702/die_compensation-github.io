@@ -6,7 +6,7 @@
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown, ChevronRight, Circle, CircleHelp, Crosshair, Download, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CadViewer, type CadMesh, type CadOverlay } from './cad-viewer';
+import { CadViewer, type CadMesh, type CadNote, type CadOverlay } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -1280,11 +1280,12 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan }: {
+function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange }: {
   scans: ScanItem[];
   coefficientByScan: Record<string, number>;
   hiddenPointIdsByScan: Record<string, Set<string>>;
   pointOverridesByScan: Record<string, Record<string, number>>;
+  onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
 }) {
   const [mesh, setMesh] = useState<CadMesh | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -1297,6 +1298,9 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   const [overlayStatus, setOverlayStatus] =
     useState<'idle' | 'loading' | 'error'>('idle');
   const [overlayError, setOverlayError] = useState<string | null>(null);
+  /* 3D 주석은 CAD 별로 들고 있는다. 시트 주석은 이미지 좌표라 3D 좌표와
+     섞을 수 없어 따로 둔다. */
+  const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 분석이 끝나 analysisId 를 가진 스캔만 3D 로 올릴 수 있다.
@@ -1422,7 +1426,12 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
               </div>
               <div className="cad-viewer">
                 <CadViewer mesh={mesh} showHoles={showHoles} overlay={overlay}
-                  sheetValues={sheetValues?.values ?? null} />
+                  sheetValues={sheetValues?.values ?? null}
+                  onCorrectionChange={(pointId, value) =>
+                    overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
+                  notes={mesh.cadId ? notesByCad[mesh.cadId] ?? [] : []}
+                  onNotesChange={(next) => mesh.cadId && setNotesByCad(
+                    (current) => ({ ...current, [mesh.cadId!]: next }))} />
               </div>
               <div className="viewer-legend">
                 <span>
@@ -1698,11 +1707,14 @@ export default function Home() {
     const next = typeof updater === 'function' ? (updater as (value: ValleyLine[]) => ValleyLine[])(previous) : updater;
     return { ...current, [completedScan.id]: next };
   });
-  const setPointOverride = (id: string, value: number | null) => completedScan && setPointOverridesByScan((current) => { const next = { ...(current[completedScan.id] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [completedScan.id]: next }; });
+  /* 3D 탭은 보고 있는 스캔이 시트와 다를 수 있어 스캔을 지정해 고친다.
+     시트와 같은 저장소라 어느 쪽에서 고쳐도 양쪽에 함께 반영된다. */
+  const setPointOverrideFor = (scanId: string, id: string, value: number | null) => setPointOverridesByScan((current) => { const next = { ...(current[scanId] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [scanId]: next }; });
+  const setPointOverride = (id: string, value: number | null) => { if (completedScan) setPointOverrideFor(completedScan.id, id, value); };
   const clearAllOverrides = () => completedScan && setPointOverridesByScan((current) => ({ ...current, [completedScan.id]: {} }));
   const annotations = completedScan ? annotationsByScan[completedScan.id] || [] : [];
   const setAnnotations = (updater: (current: Annotation[]) => Annotation[]) => completedScan && setAnnotationsByScan((current) => ({ ...current, [completedScan.id]: updater(current[completedScan.id] || []) }));
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || next === 'cad' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} />}</div></main>;
 }

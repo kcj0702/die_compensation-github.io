@@ -65,6 +65,10 @@ export type CadMesh = {
 
 export type CadDetail = 'solid' | 'edges' | 'wire';
 
+/** 3D 주석 — 형상 위 한 점에 붙이는 메모. 시트 주석과 달리 3D 좌표라
+ *  돌려봐도 그 자리에 남는다. */
+export type CadNote = { id: string; at: [number, number, number]; text: string };
+
 const SURFACE = 0x8fa3b4;
 const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
@@ -161,10 +165,47 @@ function makeLabel(text: string, height: number): THREE.Sprite {
   return sprite;
 }
 
-export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
+function makeNote(text: string, height: number): THREE.Sprite {
+  /* 주석 상자 — 보정량 콜아웃과 구분되게 파란 테두리에 흰 바탕이다. */
+  const pad = 16;
+  const measure = document.createElement('canvas').getContext('2d');
+  if (!measure) return new THREE.Sprite();
+  const font = '600 40px ui-sans-serif, system-ui, sans-serif';
+  measure.font = font;
+  const body = text || '(빈 메모)';
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(measure.measureText(body).width) + pad * 2;
+  canvas.height = 62;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(248,251,253,.96)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#3f7fb8';
+  ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+  ctx.font = font;
+  ctx.fillStyle = '#1c2530';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(body, canvas.width / 2, canvas.height / 2 + 1);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture, depthTest: false, transparent: true,
+  }));
+  sprite.scale.set(height * canvas.width / canvas.height, height, 1);
+  return sprite;
+}
+
+export function CadViewer({ mesh, showHoles, overlay, sheetValues,
+                           onCorrectionChange, notes, onNotesChange }: {
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
+  /* 3D 에서 고친 값도 시트와 같은 저장소로 간다 — 양쪽이 어긋나면 안 된다. */
+  onCorrectionChange?: (pointId: string, value: number | null) => void;
+  notes?: CadNote[];
+  onNotesChange?: (notes: CadNote[]) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,6 +225,14 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
      핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
   const [threshold, setThreshold] = useState(0.5);
+  /* 콜아웃을 눌러 값을 고친다. 화면 좌표를 들고 있어야 입력칸을 그 자리에
+     띄울 수 있다. */
+  const [editing, setEditing] = useState<
+    { id: string; value: string; x: number; y: number } | null>(null);
+  /* 주석 달기 — 켜면 형상을 누른 자리에 메모가 생긴다. */
+  const [noting, setNoting] = useState(false);
+  const [noteDraft, setNoteDraft] = useState<
+    { at: [number, number, number]; text: string; x: number; y: number } | null>(null);
   const [measure, setMeasure] = useState<
     { from: [number, number, number]; to?: [number, number, number] } | null>(null);
 
@@ -192,6 +241,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   const planeGroup = useRef<THREE.Group | null>(null);
   const overlayGroup = useRef<THREE.Group | null>(null);
   const clipRef = useRef<THREE.Plane | null>(null);
+  const noteRef = useRef<THREE.Group | null>(null);
+  const notingRef = useRef(noting);
+  notingRef.current = noting;
   const measureRef = useRef<THREE.Group | null>(null);
   const surfaceRef = useRef<THREE.Mesh | null>(null);
   const viewApi = useRef<{
@@ -290,6 +342,10 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     scene.add(measureRoot);
     measureRef.current = measureRoot;
 
+    const noteRoot = new THREE.Group();
+    scene.add(noteRoot);
+    noteRef.current = noteRoot;
+
     // 삼각망을 눈으로 확인하는 층. 45,224개라 선이 촘촘하다 —
     // 그래서 기본값은 '모서리'(각진 곳만)로 두고 전체 와이어는 선택이다.
     const edges = new THREE.LineSegments(
@@ -375,6 +431,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
 
     // ── 스캔에서 옮겨온 것들 (제로라인·보정량) ───────────────
     const overlayRoot = new THREE.Group();
+    const labelPicks: THREE.Sprite[] = [];
     if (overlay) {
       // 제로라인 — 표면에 살짝 띄워 z-파이팅을 피한다
       const lift = radius * 0.006;   // 형상에 묻히지 않게 굵게
@@ -445,7 +502,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
 
       const spots = shown.map(({ point, correction }) => {
         const origin = new THREE.Vector3(...point.position);
-        return { origin, correction, plane: flat(origin) };
+        return { origin, correction, pointId: point.id, plane: flat(origin) };
       });
       const middle = spots.reduce(
         (sum, s) => sum.add(s.plane), new THREE.Vector2()).divideScalar(
@@ -510,6 +567,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           radius * 0.038);
         label.position.copy(seat);
         label.renderOrder = 10;
+        label.userData.pointId = spot.pointId;
+        label.userData.correction = spot.correction;
+        labelPicks.push(label);
         overlayRoot.add(label);
       });
     }
@@ -649,6 +709,31 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       raycaster.setFromCamera(new THREE.Vector2(
         ((event.clientX - rect.left) / rect.width) * 2 - 1,
         -((event.clientY - rect.top) / rect.height) * 2 + 1), camera);
+      // 콜아웃을 눌렀으면 값 고치기로 들어간다
+      const onLabel = raycaster.intersectObjects(labelPicks, false)[0];
+      if (onLabel?.object.userData?.pointId) {
+        const sprite = onLabel.object as THREE.Sprite;
+        const screen = sprite.position.clone().project(camera);
+        setEditing({
+          id: String(sprite.userData.pointId),
+          value: String(sprite.userData.correction ?? 0),
+          x: (screen.x * 0.5 + 0.5) * rect.width,
+          y: (-screen.y * 0.5 + 0.5) * rect.height,
+        });
+        return;
+      }
+      setEditing(null);
+
+      if (notingRef.current) {
+        const spot = raycaster.intersectObject(surface, false)[0];
+        if (spot) {
+          setNoteDraft({
+            at: [spot.point.x, spot.point.y, spot.point.z], text: '',
+            x: event.clientX - rect.left, y: event.clientY - rect.top,
+          });
+        }
+        return;
+      }
       if (measuringRef.current) {
         const spot = raycaster.intersectObject(surface, false)[0];
         if (spot) {
@@ -744,6 +829,33 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     plane.constant = clip;
     material.needsUpdate = true;
   }, [clip]);
+
+  useEffect(() => {
+    const root = noteRef.current;
+    if (!root) return;
+    root.clear();
+    const scale = (viewApi.current?.radius ?? 100);
+    for (const note of notes ?? []) {
+      const at = new THREE.Vector3(...note.at);
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(scale * 0.007, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0x6fb4e8, depthTest: false }));
+      dot.position.copy(at);
+      dot.renderOrder = 12;
+      root.add(dot);
+
+      const sprite = makeNote(note.text, scale * 0.032);
+      sprite.position.copy(at).add(new THREE.Vector3(0, 0, scale * 0.05));
+      sprite.renderOrder = 13;
+      root.add(sprite);
+
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([at, sprite.position]),
+        new THREE.LineBasicMaterial({ color: 0x6fb4e8, depthTest: false }));
+      line.renderOrder = 12;
+      root.add(line);
+    }
+  }, [notes]);
 
   useEffect(() => {
     const root = measureRef.current;
@@ -884,8 +996,12 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           onClick={() => setShowHeat((v) => !v)}>편차 색</button>
       ) : null}
       <button type="button" className={measuring ? 'is-on' : ''}
-        onClick={() => { setMeasuring((v) => !v); setMeasure(null); }}>
+        onClick={() => { setMeasuring((v) => !v); setMeasure(null); setNoting(false); }}>
         측정
+      </button>
+      <button type="button" className={noting ? 'is-on' : ''}
+        onClick={() => { setNoting((v) => !v); setNoteDraft(null); setMeasuring(false); }}>
+        주석 {notes?.length ? notes.length : ''}
       </button>
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
@@ -894,11 +1010,70 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        {measuring
-          ? '형상 위 두 곳을 눌러 거리를 잽니다'
-          : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택'}
+        {noting ? '형상 위를 눌러 메모를 답니다'
+          : measuring ? '형상 위 두 곳을 눌러 거리를 잽니다'
+          : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택 · 콜아웃 눌러 수정'}
       </span>
     </div>
+
+    {noteDraft && (
+      <form className="cad-viewer__note"
+        style={{ left: noteDraft.x, top: noteDraft.y }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const text = noteDraft.text.trim();
+          if (text) {
+            onNotesChange?.([...(notes ?? []), {
+              id: `N-${Date.now().toString(36)}`, at: noteDraft.at, text }]);
+          }
+          setNoteDraft(null);
+        }}>
+        <input autoFocus value={noteDraft.text} placeholder="메모"
+          onChange={(event) => setNoteDraft((current) =>
+            current ? { ...current, text: event.target.value } : current)}
+          onKeyDown={(event) => { if (event.key === 'Escape') setNoteDraft(null); }} />
+        <button type="submit">달기</button>
+        <button type="button" onClick={() => setNoteDraft(null)}>취소</button>
+      </form>
+    )}
+
+    {noting && notes && notes.length > 0 && (
+      <div className="cad-viewer__notes">
+        {notes.map((note) => (
+          <span key={note.id}>
+            {note.text}
+            <button type="button" aria-label={`${note.text} 주석 삭제`}
+              onClick={() => onNotesChange?.(
+                notes.filter((other) => other.id !== note.id))}>×</button>
+          </span>
+        ))}
+      </div>
+    )}
+
+    {editing && (
+      <form className="cad-viewer__edit"
+        style={{ left: editing.x, top: editing.y }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const parsed = Number(editing.value);
+          if (Number.isFinite(parsed)) onCorrectionChange?.(editing.id, parsed);
+          setEditing(null);
+        }}>
+        <label htmlFor="cad-edit">{editing.id}</label>
+        <input id="cad-edit" autoFocus type="number" step="0.1"
+          value={editing.value}
+          onChange={(event) =>
+            setEditing((current) =>
+              current ? { ...current, value: event.target.value } : current)}
+          onKeyDown={(event) => { if (event.key === 'Escape') setEditing(null); }} />
+        <span>mm</span>
+        <button type="submit">확인</button>
+        <button type="button" className="cad-viewer__edit-reset"
+          onClick={() => { onCorrectionChange?.(editing.id, null); setEditing(null); }}>
+          되돌리기
+        </button>
+      </form>
+    )}
 
     {measure?.to && (
       <div className="cad-viewer__measure">

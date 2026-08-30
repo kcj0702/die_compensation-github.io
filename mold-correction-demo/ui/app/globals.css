@@ -540,3 +540,22 @@ button { cursor: pointer; }
 .cad-viewer__pick-level input{width:82px;accent-color:#ffef3a}
 .cad-viewer__pick-level b{color:#c6d4e0;font-size:9px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .cad-viewer__pick-level em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
+
+.cad-viewer__edit{position:absolute;transform:translate(-50%,-140%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #ffef3a;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__edit label{color:#ffef3a;font-size:9px;font-weight:700}
+.cad-viewer__edit input{width:64px;padding:3px 6px;border:1px solid rgba(255,255,255,.24);border-radius:5px;background:#0d151d;color:#eaf2f8;font-size:10px;font-family:inherit;font-variant-numeric:tabular-nums}
+.cad-viewer__edit input:focus-visible{outline:2px solid #ffef3a;outline-offset:1px}
+.cad-viewer__edit span{color:#8fa3b4;font-size:8.5px}
+.cad-viewer__edit button{padding:3px 8px;border:1px solid rgba(255,255,255,.24);border-radius:5px;background:transparent;color:#c6d4e0;font-size:8.5px;cursor:pointer}
+.cad-viewer__edit button:hover{border-color:#ffef3a;color:#fff}
+.cad-viewer__edit-reset{color:#8fa3b4}
+
+.cad-viewer__note{position:absolute;transform:translate(-50%,-130%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #6fb4e8;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__note input{width:148px;padding:3px 7px;border:1px solid rgba(255,255,255,.24);border-radius:5px;background:#0d151d;color:#eaf2f8;font-size:10px;font-family:inherit}
+.cad-viewer__note input:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-viewer__note button{padding:3px 8px;border:1px solid rgba(255,255,255,.24);border-radius:5px;background:transparent;color:#c6d4e0;font-size:8.5px;cursor:pointer}
+.cad-viewer__note button:hover{border-color:#6fb4e8;color:#fff}
+.cad-viewer__notes{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:4px;max-width:260px;padding:9px 11px;border:1px solid rgba(111,180,232,.4);border-radius:7px;background:rgba(14,22,30,.84);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__notes span{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#c6d4e0;font-size:9px}
+.cad-viewer__notes button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
+.cad-viewer__notes button:hover{color:#ff8b8b}
