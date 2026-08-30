@@ -82,6 +82,14 @@ export type CadRegion = {
 export const DIE_CHOICES: CadRegion['die'][] = ['상형', '하형'];
 export const WORK_CHOICES: CadRegion['work'][] = ['용접', '가공', '심고음'];
 /** 시트가 쓰는 원문자. 구역이 열 개를 넘을 일은 없다. */
+/** 보정 후 형상 — 원본과 견줘 보려고 만든다. */
+export type CadMorph = {
+  positions: number[];
+  shift: number[];
+  stats: { moved: number; max_shift: number; mean_shift: number; reach_mm: number };
+  points: number;
+};
+
 export const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
 
 const SURFACE = 0x8fa3b4;
@@ -245,7 +253,8 @@ function makeZoneLabel(text: string, height: number): THREE.Sprite {
 
 export function CadViewer({ mesh, showHoles, overlay, sheetValues,
                            onCorrectionChange, notes, onNotesChange,
-                           onCapture, regions, onRegionsChange }: {
+                           onCapture, regions, onRegionsChange,
+                           morph, morphMode = 'off' }: {
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
@@ -257,6 +266,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
   onCapture?: (dataUrl: string) => void;
   regions?: CadRegion[];
   onRegionsChange?: (regions: CadRegion[]) => void;
+  /* 보정 후 형상. 있으면 원본과 겹쳐 보거나 갈아 끼울 수 있다. */
+  morph?: CadMorph | null;
+  morphMode?: 'off' | 'after' | 'both';
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -386,6 +398,34 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
     clipRef.current = clipPlane;
 
+    // 보정 후 형상 — 원본 위에 겹치거나 원본을 대신한다.
+    if (morph && morphMode !== 'off'
+        && morph.positions.length === mesh.positions.length) {
+      const after = new THREE.BufferGeometry();
+      after.setAttribute('position',
+        new THREE.Float32BufferAttribute(morph.positions, 3));
+      after.setIndex(mesh.indices);
+      after.computeVertexNormals();
+      // 얼마나 밀렸는지 색으로 — 살을 붙인 쪽이 분홍, 깎은 쪽이 하늘색
+      const tint = new Float32Array(morph.shift.length * 3);
+      const peak = Math.max(morph.stats.max_shift, 0.01);
+      for (let i = 0; i < morph.shift.length; i += 1) {
+        const ratio = Math.min(Math.abs(morph.shift[i]) / peak, 1);
+        const warm = morph.shift[i] > 0;
+        tint[i * 3] = warm ? 0.55 + ratio * 0.45 : 0.55 - ratio * 0.3;
+        tint[i * 3 + 1] = 0.62 - ratio * 0.25;
+        tint[i * 3 + 2] = warm ? 0.72 - ratio * 0.3 : 0.72 + ratio * 0.28;
+      }
+      after.setAttribute('color', new THREE.BufferAttribute(tint, 3));
+      const skin = new THREE.Mesh(after, new THREE.MeshStandardMaterial({
+        vertexColors: true, metalness: 0.2, roughness: 0.7,
+        side: THREE.DoubleSide,
+        transparent: morphMode === 'both', opacity: morphMode === 'both' ? 0.85 : 1,
+      }));
+      skin.renderOrder = 2;
+      scene.add(skin);
+    }
+
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : SURFACE,
       vertexColors: painted,
@@ -394,6 +434,13 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       side: THREE.DoubleSide, flatShading: false,
       clippingPlanes: [clipPlane],
     }));
+    // 겹쳐 볼 때는 원본을 반투명 뼈대로 남긴다
+    if (morph && morphMode === 'after') surface.visible = false;
+    else if (morph && morphMode === 'both') {
+      const material = surface.material as THREE.MeshStandardMaterial;
+      material.transparent = true;
+      material.opacity = 0.28;
+    }
     scene.add(surface);
     solidMesh.current = surface;
     surfaceRef.current = surface;
@@ -878,7 +925,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold]);
+  }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
+      morph, morphMode]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {

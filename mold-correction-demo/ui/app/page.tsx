@@ -6,7 +6,7 @@
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown, ChevronRight, Circle, CircleHelp, Crosshair, Download, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CIRCLED, CadViewer, type CadMesh, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
+import { CIRCLED, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -1303,6 +1303,57 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
   /* 공정 구역 — 시트의 "① : 하형 용접" 에 해당한다. CAD 별로 들고 있는다. */
   const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
+  /* 보정 후 형상 — 원본과 견줘 본다. B-Rep 이 아니라 메시를 민 것이라
+     가공용이 아니고 비교용이다. */
+  const [morph, setMorph] = useState<CadMorph | null>(null);
+  const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
+  const [morphState, setMorphState] = useState<'idle' | 'working' | 'error'>('idle');
+  const [morphError, setMorphError] = useState<string | null>(null);
+
+  const morphPayload = () => {
+    const spots: Record<string, [number, number, number]> = {};
+    for (const point of overlay?.points ?? []) {
+      if (typeof sheetValues?.values?.[point.id] === 'number') {
+        spots[point.id] = point.position;
+      }
+    }
+    return { cadId: mesh?.cadId, corrections: sheetValues?.values ?? {}, positions: spots };
+  };
+
+  const buildMorph = async () => {
+    if (!mesh?.cadId || !overlay || !sheetValues) {
+      setMorphError('스캔 결과를 먼저 올리세요.'); return;
+    }
+    setMorphState('working'); setMorphError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-morph`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(morphPayload()),
+      });
+      const data = await response.json() as CadMorph & { error?: string };
+      if (!response.ok) throw new Error(data.error || '만들지 못했습니다.');
+      setMorph(data); setMorphMode('both'); setMorphState('idle');
+    } catch (err) {
+      setMorphError(String((err as Error).message || err));
+      setMorphState('error');
+    }
+  };
+
+  const saveMorphStl = async () => {
+    if (!mesh?.cadId) return;
+    const response = await fetch(`${API_BASE}/api/cad-morph-stl`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(morphPayload()),
+    });
+    if (!response.ok) { setMorphError('STL 을 만들지 못했습니다.'); return; }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${mesh.summary.name}_보정후.stl`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
   /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다. */
   const [shots, setShots] = useState<string[]>([]);
   const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
@@ -1473,6 +1524,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
                   onCapture={(url) => setShots((current) => [...current, url])}
+                  morph={morph} morphMode={morphMode}
                   regions={mesh.cadId ? regionsByCad[mesh.cadId] ?? [] : []}
                   onRegionsChange={(next) => mesh.cadId && setRegionsByCad(
                     (current) => ({ ...current, [mesh.cadId!]: next }))}
@@ -1516,6 +1568,28 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   </button>
                   {shots.length > 0 && <button type="button" className="tool-button"
                     onClick={() => setShots([])}>담은 화면 비우기</button>}
+                  <button type="button" className="tool-button" onClick={buildMorph}
+                    disabled={morphState === 'working'}>
+                    {morphState === 'working' ? '만드는 중…' : '보정 후 형상'}
+                  </button>
+                  {morph && <>
+                    <select aria-label="형상 비교" value={morphMode}
+                      onChange={(event) =>
+                        setMorphMode(event.target.value as typeof morphMode)}>
+                      <option value="off">원본만</option>
+                      <option value="both">겹쳐 보기</option>
+                      <option value="after">보정 후만</option>
+                    </select>
+                    <button type="button" className="tool-button"
+                      onClick={saveMorphStl}>STL 저장</button>
+                    <span className="cad-overlay-bar__note">
+                      최대 {morph.stats.max_shift.toFixed(2)}mm ·
+                      {' '}평균 {morph.stats.mean_shift.toFixed(2)}mm ·
+                      {' '}반경 {morph.stats.reach_mm.toFixed(0)}mm ·
+                      {' '}포인트 {morph.points}개
+                    </span>
+                  </>}
+                  {morphError && <span className="cad-overlay-bar__err">{morphError}</span>}
                   {sheetError && <span className="cad-overlay-bar__err">{sheetError}</span>}
                 </>}
                 {overlay && sheetValues && <span className="cad-overlay-bar__note">

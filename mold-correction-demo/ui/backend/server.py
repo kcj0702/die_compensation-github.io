@@ -886,6 +886,7 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
                 # 간략화 전이라 개수가 달라서 그대로 쓰면 어긋난다.
                 "display_vertices": np.asarray(
                     web["positions"], dtype=float).reshape(-1, 3),
+                "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
             })
             return web
 
@@ -1115,6 +1116,94 @@ async def sheet_excel(request: Request) -> Response:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def cad_morph_for(cad_id: str, corrections: dict, positions: dict,
+                  reach_ratio: float) -> dict[str, Any]:
+    """보정량만큼 민 "보정 후" 형상을 만든다.
+
+    B-Rep 은 건드리지 않는다 — 자유곡면을 연속성 지키며 변형하는 건
+    전용 소프트웨어 영역이고, 어설프게 하면 가공 못 할 형상이 나온다.
+    삼각망만 밀어서 **비교용**으로 쓴다(cad_import/morph.py 참고).
+    """
+    import trimesh
+    from cad_import import morph as mp
+
+    entry = _cad_cache.get(cad_id)
+    if entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+
+    display = entry.get("display_vertices")
+    if display is None:
+        raise ValueError("표시용 형상이 없습니다.")
+    vertices = np.asarray(display, dtype=float)
+    faces = np.asarray(entry["display_faces"])
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    normals = np.asarray(mesh.vertex_normals, dtype=float)
+
+    spots, values = [], []
+    for point_id, value in corrections.items():
+        where = positions.get(point_id)
+        if where and len(where) == 3:
+            spots.append([float(v) for v in where])
+            values.append(float(value))
+    if not spots:
+        raise ValueError("3D 에 올라간 보정 포인트가 없습니다.")
+
+    moved, shift, stats = mp.morph(
+        vertices, faces, normals, spots, values, reach_ratio)
+
+    return {
+        "positions": [round(float(v), 4) for v in moved.ravel()],
+        "shift": [round(float(v), 4) for v in shift],
+        "stats": stats.to_dict(),
+        "points": len(spots),
+    }
+
+
+async def cad_morph(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        corrections = body.get("corrections") or {}
+        positions = body.get("positions") or {}
+        result = await run_in_threadpool(
+            cad_morph_for, str(body.get("cadId") or ""),
+            {str(k): float(v) for k, v in corrections.items()},
+            {str(k): v for k, v in positions.items()},
+            float(body.get("reachRatio") or 0.04),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def cad_morph_stl(request: Request) -> Response:
+    """보정 후 형상을 STL 로 내보낸다."""
+    try:
+        import trimesh
+        body = await request.json()
+        result = await run_in_threadpool(
+            cad_morph_for, str(body.get("cadId") or ""),
+            {str(k): float(v) for k, v in (body.get("corrections") or {}).items()},
+            {str(k): v for k, v in (body.get("positions") or {}).items()},
+            float(body.get("reachRatio") or 0.04),
+        )
+        entry = _cad_cache.get(str(body.get("cadId") or "")) or {}
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(result["positions"], dtype=float).reshape(-1, 3),
+            faces=np.asarray(entry["display_faces"]), process=False)
+        payload = mesh.export(file_type="stl")
+        name = f"{entry.get('name', 'part')}_보정후.stl"
+        quoted = urllib.parse.quote(name)
+        return Response(payload, media_type="model/stl", headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_overlay(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -1295,6 +1384,8 @@ app = Starlette(
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/cad-morph", cad_morph, methods=["POST"]),
+        Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),
         Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/sample", sample, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),
