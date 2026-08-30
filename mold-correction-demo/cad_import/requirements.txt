@@ -1,4 +1,7 @@
 # 3D CAD/스캔 데이터 가져오기
 trimesh>=4.0          # STL/PLY/OBJ 읽기, 메시 간략화
+# trimesh 5.0 부터 간략화가 이 패키지로 빠졌다. 없으면 상한이
+# 조용히 무시돼 22~37만 면짜리 메시가 그대로 브라우저로 간다.
+fast-simplification>=0.1
 cadquery-ocp>=7.8     # OCCT 커널 — STEP 파싱 및 테셀레이션
 numpy>=1.24

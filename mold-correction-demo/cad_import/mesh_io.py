@@ -25,6 +25,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
+import sys
+
 import trimesh
 
 # 웹으로 내보낼 때의 기본 삼각형 상한. 자동차 패널 스캔은 수백만
@@ -102,13 +104,22 @@ def simplify_for_display(
     """표시용으로만 삼각형 수를 줄인다. 실패하면 원본을 그대로 쓴다.
 
     간략화는 없으면 없는 대로 동작해야 한다 — 뷰어가 조금 무거워질 뿐
-    결과가 틀리지는 않는다. 그래서 예외를 삼키고 원본을 돌려준다.
+    결과가 틀리지는 않는다. 그래서 실패해도 원본을 돌려준다.
+
+    [조용히 실패하고 있었다]
+    trimesh 5.0 은 간략화를 fast_simplification 패키지에 맡기는데 그게
+    안 깔려 있었다. 예외를 그냥 삼키고 있어서 상한이 안 걸리는 걸
+    아무도 몰랐다 — 실제로 22~37만 면짜리 메시가 그대로 브라우저로
+    가고 있었다. 이제 왜 실패했는지 로그로 남긴다.
     """
     if len(mesh.faces) <= max_faces:
         return mesh
     try:
         return mesh.simplify_quadric_decimation(face_count=max_faces)
-    except Exception:
+    except Exception as exc:
+        print(f"[cad_import] 표시용 간략화를 건너뜁니다 "
+              f"({len(mesh.faces):,}면 그대로): {type(exc).__name__}: {exc}",
+              file=sys.stderr)
         return mesh
 
 

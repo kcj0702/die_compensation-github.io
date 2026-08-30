@@ -181,6 +181,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   const [clipRatio, setClipRatio] = useState(0);
   /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
   const [measuring, setMeasuring] = useState(false);
+  /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
+     핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
+  const [threshold, setThreshold] = useState(0.5);
   const [measure, setMeasure] = useState<
     { from: [number, number, number]; to?: [number, number, number] } | null>(null);
 
@@ -393,7 +396,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       const shown = overlay.points
         .map((p) => ({ point: p, correction: sheetValues?.[p.id] }))
         .filter((entry): entry is { point: typeof entry.point; correction: number } =>
-          typeof entry.correction === 'number');
+          typeof entry.correction === 'number'
+          && Math.abs(entry.correction) >= threshold);
       const maxCorrection = Math.max(
         ...shown.map((e) => Math.abs(e.correction)), 0.5);
       // 화살표는 표면 법선을 따라야 한다. 월드 축으로 세우면 곡면에서
@@ -448,22 +452,43 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           Math.max(spots.length, 1));
       const spread = Math.max(
         ...spots.map((s) => s.plane.distanceTo(middle)), radius * 0.2);
-      const ring = spread * 1.32;      // 형상 바깥으로 밀어낸다
       // 라벨은 한 평면에 모아 둔다. 깊이가 제각각이면 다른 각도에서
       // 흩어져 보인다.
       const labelDepth = toArray(centre)[viewAxis]
         + (geometry.boundingSphere?.radius ?? radius) * 0.55;
 
-      spots.sort((a, b) =>
-        Math.atan2(a.plane.y - middle.y, a.plane.x - middle.x)
-        - Math.atan2(b.plane.y - middle.y, b.plane.x - middle.x));
+      // [배치] 큰 원에 둘러 놓으니 지시선이 별처럼 퍼져 안 읽혔다.
+      // 시트는 콜아웃을 **자기 점 바로 바깥**에 붙이고 겹칠 때만 조금씩
+      // 밀어낸다. 같은 방법으로, 점에서 바깥쪽으로 짧게 빼고 겹치면
+      // 한 칸씩 더 민다.
+      const labelSize = new THREE.Vector2(spread * 0.20, spread * 0.075);
+      const taken: THREE.Vector2[] = [];
+      const seatFor = (plane: THREE.Vector2) => {
+        const away = plane.clone().sub(middle);
+        if (away.lengthSq() < 1e-9) away.set(1, 0);
+        away.normalize();
+        for (let step = 0; step < 14; step += 1) {
+          const spot = plane.clone().add(
+            away.clone().multiplyScalar(spread * (0.16 + step * 0.085)));
+          const clash = taken.some((other) =>
+            Math.abs(other.x - spot.x) < labelSize.x
+            && Math.abs(other.y - spot.y) < labelSize.y);
+          if (!clash) { taken.push(spot); return spot; }
+        }
+        const fallback = plane.clone().add(away.multiplyScalar(spread * 1.4));
+        taken.push(fallback);
+        return fallback;
+      };
 
-      spots.forEach((spot, index) => {
-        const angle = (index / Math.max(spots.length, 1)) * Math.PI * 2;
+      // 바깥쪽부터 자리를 잡아야 안쪽 라벨이 멀리 밀려나지 않는다
+      spots.sort((a, b) => b.plane.distanceTo(middle) - a.plane.distanceTo(middle));
+
+      spots.forEach((spot) => {
+        const flatSeat = seatFor(spot.plane);
         const seat = new THREE.Vector3();
         const coords = [0, 0, 0];
-        coords[planeAxes[0]] = middle.x + Math.cos(angle) * ring;
-        coords[planeAxes[1]] = middle.y + Math.sin(angle) * ring;
+        coords[planeAxes[0]] = flatSeat.x;
+        coords[planeAxes[1]] = flatSeat.y;
         coords[viewAxis] = labelDepth;
         seat.set(coords[0], coords[1], coords[2]);
 
@@ -691,7 +716,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       });
       mount.removeChild(renderer.domElement);
     };
-  }, [mesh, holes, showHoles, overlay, sheetValues, showHeat]);
+  }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -772,8 +797,12 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
 
-  const overlayPoints = overlay?.points
+  const sheetCount = overlay?.points
     ?.filter((p) => typeof sheetValues?.[p.id] === 'number').length ?? 0;
+  const overlayPoints = overlay?.points?.filter((p) => {
+    const value = sheetValues?.[p.id];
+    return typeof value === 'number' && Math.abs(value) >= threshold;
+  }).length ?? 0;
 
   return <>
     <div ref={mountRef} className="cad-viewer__stage" />
@@ -840,6 +869,16 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
         onClick={() => setShowOverlay((v) => !v)}>
         제로라인·보정량 {overlayPoints}
       </button>}
+      {overlay && showOverlay && <span className="cad-viewer__pick-level">
+        <label htmlFor="cad-threshold">보정량</label>
+        <input id="cad-threshold" type="range" min={0} max={2} step={0.1}
+          value={threshold}
+          onChange={(event) => setThreshold(Number(event.target.value))} />
+        <b>{threshold.toFixed(1)}mm 이상</b>
+        {sheetCount > overlayPoints && (
+          <em>{sheetCount - overlayPoints}개 숨김</em>
+        )}
+      </span>}
       {overlay?.surfaceDeviation?.length ? (
         <button type="button" className={showHeat ? 'is-on' : ''}
           onClick={() => setShowHeat((v) => !v)}>편차 색</button>

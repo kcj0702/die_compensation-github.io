@@ -534,3 +534,9 @@ button { cursor: pointer; }
 .cad-viewer__measure span{color:#8fa3b4;font-size:8.5px}
 .cad-viewer__measure button{margin-top:5px;padding:3px 8px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:transparent;color:#8fa3b4;font-size:8.5px;cursor:pointer}
 .cad-viewer__measure button:hover{color:#eaf2f8;border-color:rgba(255,255,255,.4)}
+
+.cad-viewer__pick-level{display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
+.cad-viewer__pick-level label{color:#8fa3b4;font-size:9px;font-weight:600}
+.cad-viewer__pick-level input{width:82px;accent-color:#ffef3a}
+.cad-viewer__pick-level b{color:#c6d4e0;font-size:9px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cad-viewer__pick-level em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
