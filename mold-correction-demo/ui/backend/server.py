@@ -1081,6 +1081,7 @@ def sheet_excel_for(analysis_id: str, corrections: dict,
         control_no=str(meta.get("controlNo") or ""),
         applied_at=str(meta.get("appliedAt") or "") or None,
         coefficient=float(meta.get("coefficient") or 1.0),
+        processes=[str(x) for x in (meta.get("processes") or [])],
     )
 
 

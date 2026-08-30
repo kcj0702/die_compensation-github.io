@@ -69,6 +69,21 @@ export type CadDetail = 'solid' | 'edges' | 'wire';
  *  돌려봐도 그 자리에 남는다. */
 export type CadNote = { id: string; at: [number, number, number]; text: string };
 
+/** 공정 구역 — 시트의 분홍 영역과 "① : 하형 용접" 표기에 해당한다.
+ *  어느 금형(상형/하형)을 어떻게(용접/가공/심고음) 손볼지 적는다. */
+export type CadRegion = {
+  id: string;
+  at: [number, number, number];
+  radius: number;
+  die: '상형' | '하형';
+  work: '용접' | '가공' | '심고음';
+};
+
+export const DIE_CHOICES: CadRegion['die'][] = ['상형', '하형'];
+export const WORK_CHOICES: CadRegion['work'][] = ['용접', '가공', '심고음'];
+/** 시트가 쓰는 원문자. 구역이 열 개를 넘을 일은 없다. */
+export const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+
 const SURFACE = 0x8fa3b4;
 const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
@@ -197,9 +212,40 @@ function makeNote(text: string, height: number): THREE.Sprite {
   return sprite;
 }
 
+function makeZoneLabel(text: string, height: number): THREE.Sprite {
+  /* 공정 표기 — 시트의 "① : 하형 용접" 과 같게 분홍 글씨로 낸다. */
+  const pad = 16;
+  const measure = document.createElement('canvas').getContext('2d');
+  if (!measure) return new THREE.Sprite();
+  const font = '700 44px ui-sans-serif, system-ui, sans-serif';
+  measure.font = font;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(measure.measureText(text).width) + pad * 2;
+  canvas.height = 66;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = 'rgba(255,246,250,.96)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#d61f77';
+  ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+  ctx.font = font;
+  ctx.fillStyle = '#b31563';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texture, depthTest: false, transparent: true,
+  }));
+  sprite.scale.set(height * canvas.width / canvas.height, height, 1);
+  return sprite;
+}
+
 export function CadViewer({ mesh, showHoles, overlay, sheetValues,
                            onCorrectionChange, notes, onNotesChange,
-                           onCapture }: {
+                           onCapture, regions, onRegionsChange }: {
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
@@ -209,6 +255,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
   onNotesChange?: (notes: CadNote[]) => void;
   /* 지금 보이는 화면을 PNG 로 넘겨준다 — 보정시트에 넣을 그림이다. */
   onCapture?: (dataUrl: string) => void;
+  regions?: CadRegion[];
+  onRegionsChange?: (regions: CadRegion[]) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +284,9 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
   const [noting, setNoting] = useState(false);
   const [noteDraft, setNoteDraft] = useState<
     { at: [number, number, number]; text: string; x: number; y: number } | null>(null);
+  /* 공정 구역 — 시트의 분홍 영역. 찍은 자리 둘레를 칠하고 번호를 붙인다. */
+  const [zoning, setZoning] = useState(false);
+  const [zoneRadius, setZoneRadius] = useState(0.12);   // 부품 크기 대비
   const [measure, setMeasure] = useState<
     { from: [number, number, number]; to?: [number, number, number] } | null>(null);
 
@@ -245,6 +296,12 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
   const overlayGroup = useRef<THREE.Group | null>(null);
   const clipRef = useRef<THREE.Plane | null>(null);
   const noteRef = useRef<THREE.Group | null>(null);
+  const regionRef = useRef<THREE.Group | null>(null);
+  const geometryRef = useRef<THREE.BufferGeometry | null>(null);
+  const zoningRef = useRef(zoning);
+  zoningRef.current = zoning;
+  const zoneRadiusRef = useRef(zoneRadius);
+  zoneRadiusRef.current = zoneRadius;
   const notingRef = useRef(noting);
   notingRef.current = noting;
   const measureRef = useRef<THREE.Group | null>(null);
@@ -348,6 +405,11 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     const noteRoot = new THREE.Group();
     scene.add(noteRoot);
     noteRef.current = noteRoot;
+
+    const regionRoot = new THREE.Group();
+    scene.add(regionRoot);
+    regionRef.current = regionRoot;
+    geometryRef.current = geometry;
 
     // 삼각망을 눈으로 확인하는 층. 45,224개라 선이 촘촘하다 —
     // 그래서 기본값은 '모서리'(각진 곳만)로 두고 전체 와이어는 선택이다.
@@ -727,6 +789,18 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       }
       setEditing(null);
 
+      if (zoningRef.current) {
+        const spot = raycaster.intersectObject(surface, false)[0];
+        if (spot) {
+          onRegionsChange?.([...(regions ?? []), {
+            id: `Z-${Date.now().toString(36)}`,
+            at: [spot.point.x, spot.point.y, spot.point.z],
+            radius: zoneRadiusRef.current * radius,
+            die: '하형', work: '용접',
+          }]);
+        }
+        return;
+      }
       if (notingRef.current) {
         const spot = raycaster.intersectObject(surface, false)[0];
         if (spot) {
@@ -832,6 +906,50 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     plane.constant = clip;
     material.needsUpdate = true;
   }, [clip]);
+
+  // 공정 구역 — 찍은 자리 둘레의 면만 뽑아 분홍으로 덮는다.
+  // 시트가 영역을 분홍으로 칠하고 번호를 붙이는 것과 같은 표기다.
+  useEffect(() => {
+    const root = regionRef.current;
+    const geometry = geometryRef.current;
+    if (!root || !geometry) return;
+    root.clear();
+    const scale = viewApi.current?.radius ?? 100;
+    const position = geometry.getAttribute('position');
+    const index = geometry.getIndex();
+    if (!position || !index) return;
+
+    (regions ?? []).forEach((region, order) => {
+      const centre = new THREE.Vector3(...region.at);
+      const limit = region.radius * region.radius;
+      const keep: number[] = [];
+      const a = new THREE.Vector3();
+      for (let i = 0; i < index.count; i += 3) {
+        const i0 = index.getX(i);
+        a.set(position.getX(i0), position.getY(i0), position.getZ(i0));
+        if (a.distanceToSquared(centre) <= limit) {
+          keep.push(i0, index.getX(i + 1), index.getX(i + 2));
+        }
+      }
+      if (keep.length) {
+        const patch = geometry.clone();
+        patch.setIndex(keep);
+        const skin = new THREE.Mesh(patch, new THREE.MeshBasicMaterial({
+          color: 0xff5fa8, transparent: true, opacity: 0.42,
+          side: THREE.DoubleSide, depthWrite: false,
+        }));
+        skin.renderOrder = 6;
+        root.add(skin);
+      }
+
+      const tag = makeZoneLabel(
+        `${CIRCLED[order] ?? order + 1} ${region.die} ${region.work}`,
+        scale * 0.042);
+      tag.position.copy(centre).add(new THREE.Vector3(0, 0, region.radius * 1.1));
+      tag.renderOrder = 14;
+      root.add(tag);
+    });
+  }, [regions]);
 
   useEffect(() => {
     const root = noteRef.current;
@@ -1008,9 +1126,14 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
         측정
       </button>
       <button type="button" className={noting ? 'is-on' : ''}
-        onClick={() => { setNoting((v) => !v); setNoteDraft(null); setMeasuring(false); }}>
+        onClick={() => { setNoting((v) => !v); setNoteDraft(null);
+                         setMeasuring(false); setZoning(false); }}>
         주석 {notes?.length ? notes.length : ''}
       </button>
+      {onRegionsChange && <button type="button" className={zoning ? 'is-on' : ''}
+        onClick={() => { setZoning((v) => !v); setMeasuring(false); setNoting(false); }}>
+        공정 구역 {regions?.length ? regions.length : ''}
+      </button>}
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
         {mesh.counts?.cylinders
@@ -1018,7 +1141,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        {noting ? '형상 위를 눌러 메모를 답니다'
+        {zoning ? '형상 위를 눌러 공정 구역을 칠합니다'
+          : noting ? '형상 위를 눌러 메모를 답니다'
           : measuring ? '형상 위 두 곳을 눌러 거리를 잽니다'
           : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택 · 콜아웃 눌러 수정'}
       </span>
@@ -1043,6 +1167,40 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
         <button type="submit">달기</button>
         <button type="button" onClick={() => setNoteDraft(null)}>취소</button>
       </form>
+    )}
+
+    {zoning && (
+      <div className="cad-viewer__zones">
+        <div className="cad-viewer__zones-size">
+          <label htmlFor="cad-zone-size">구역 크기</label>
+          <input id="cad-zone-size" type="range" min={0.04} max={0.4} step={0.01}
+            value={zoneRadius}
+            onChange={(event) => setZoneRadius(Number(event.target.value))} />
+        </div>
+        {(regions ?? []).map((region, order) => (
+          <div key={region.id} className="cad-viewer__zone">
+            <b>{CIRCLED[order] ?? order + 1}</b>
+            <select value={region.die} aria-label="금형"
+              onChange={(event) => onRegionsChange?.((regions ?? []).map((other) =>
+                other.id === region.id
+                  ? { ...other, die: event.target.value as CadRegion['die'] }
+                  : other))}>
+              {DIE_CHOICES.map((name) => <option key={name}>{name}</option>)}
+            </select>
+            <select value={region.work} aria-label="공정"
+              onChange={(event) => onRegionsChange?.((regions ?? []).map((other) =>
+                other.id === region.id
+                  ? { ...other, work: event.target.value as CadRegion['work'] }
+                  : other))}>
+              {WORK_CHOICES.map((name) => <option key={name}>{name}</option>)}
+            </select>
+            <button type="button" aria-label={`구역 ${order + 1} 삭제`}
+              onClick={() => onRegionsChange?.(
+                (regions ?? []).filter((other) => other.id !== region.id))}>×</button>
+          </div>
+        ))}
+        {!(regions ?? []).length && <p>형상을 눌러 구역을 만드세요</p>}
+      </div>
     )}
 
     {noting && notes && notes.length > 0 && (

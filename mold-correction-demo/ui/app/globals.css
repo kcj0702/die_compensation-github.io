@@ -559,3 +559,15 @@ button { cursor: pointer; }
 .cad-viewer__notes span{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#c6d4e0;font-size:9px}
 .cad-viewer__notes button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
 .cad-viewer__notes button:hover{color:#ff8b8b}
+
+.cad-viewer__zones{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:5px;max-width:270px;padding:9px 11px;border:1px solid rgba(255,95,168,.45);border-radius:7px;background:rgba(14,22,30,.86);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__zones p{margin:0;color:#8fa3b4;font-size:9px}
+.cad-viewer__zones-size{display:flex;align-items:center;gap:7px}
+.cad-viewer__zones-size label{color:#8fa3b4;font-size:9px;font-weight:600;white-space:nowrap}
+.cad-viewer__zones-size input{width:104px;accent-color:#ff5fa8}
+.cad-viewer__zone{display:flex;align-items:center;gap:5px}
+.cad-viewer__zone b{color:#ff8fc4;font-size:11px;min-width:15px}
+.cad-viewer__zone select{padding:2px 5px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:#0d151d;color:#eaf2f8;font-size:9px;font-family:inherit}
+.cad-viewer__zone select:focus-visible{outline:2px solid #ff5fa8;outline-offset:1px}
+.cad-viewer__zone button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
+.cad-viewer__zone button:hover{color:#ff8b8b}

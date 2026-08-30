@@ -53,6 +53,8 @@ IMAGE_ANCHOR = "A8"
 IMAGE_ROWS = 32           # 8행부터 40행까지
 ROW_POINTS = 14.0         # 양식의 행 높이(pt)
 PAGE_ROWS = 40            # 한 페이지가 40행. 실제 시트도 이만큼씩 반복된다
+PROCESS_ROW = 36          # 공정 표기가 들어갈 자리(그림 아래)
+PROCESS_COL = 2           # B 열
 
 PLUS = (63, 72, 224)      # BGR — 살이 많다(깎는다)
 MINUS = (224, 127, 47)    # BGR — 살이 부족하다(붙인다)
@@ -115,6 +117,7 @@ def build_workbook(
     control_no: str = "",
     applied_at: str | None = None,
     coefficient: float = 1.0,
+    processes: list | None = None,
 ) -> bytes:
     """현업 양식으로 채운 엑셀 파일을 바이트로 준다."""
     import openpyxl
@@ -164,6 +167,14 @@ def build_workbook(
     if len(pages) > 1:
         page.print_area = f"A1:AD{PAGE_ROWS * len(pages)}"
 
+    # 공정 표기 — 실제 시트도 그림 아래에 "① : 하형 용접" 처럼 적는다.
+    if processes:
+        from openpyxl.styles import Font as _Font
+        for order, line in enumerate(processes):
+            cell = page.cell(PROCESS_ROW + order, PROCESS_COL)
+            cell.value = line
+            cell.font = _Font(bold=True, color="B31563", size=11)
+
     # ── 포인트 표 ────────────────────────────────────────────
     table = book.create_sheet("포인트")
     headers = ["포인트", "X(px)", "Y(px)", "편차(mm)", "보정량(mm)", "방향"]
@@ -186,6 +197,11 @@ def build_workbook(
     note.value = (f"보정 계수 {coefficient:.2f}x · 보정량은 작업자 수정을 "
                   f"반영한 최종값입니다.")
     note.font = Font(italic=True, size=9)
+
+    for order, line in enumerate(processes or []):
+        row = table.cell(len(points) + 5 + order, 1)
+        row.value = line
+        row.font = Font(bold=True, size=9)
 
     stream = io.BytesIO()
     book.save(stream)

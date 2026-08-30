@@ -6,7 +6,7 @@
 import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, ChevronDown, ChevronRight, Circle, CircleHelp, Crosshair, Download, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon, Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Printer, Settings2, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { CadViewer, type CadMesh, type CadNote, type CadOverlay } from './cad-viewer';
+import { CIRCLED, CadViewer, type CadMesh, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -1301,6 +1301,8 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   /* 3D 주석은 CAD 별로 들고 있는다. 시트 주석은 이미지 좌표라 3D 좌표와
      섞을 수 없어 따로 둔다. */
   const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
+  /* 공정 구역 — 시트의 "① : 하형 용접" 에 해당한다. CAD 별로 들고 있는다. */
+  const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
   /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다. */
   const [shots, setShots] = useState<string[]>([]);
   const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
@@ -1316,7 +1318,13 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           analysisId, corrections: sheetValues.values, images: shots,
-          meta: { partNo: scan?.partNo, coefficient: sheetValues.coefficient },
+          meta: {
+            partNo: scan?.partNo, coefficient: sheetValues.coefficient,
+            /* 시트 아래쪽 "① : 하형 용접" 줄에 그대로 들어간다. */
+            processes: (mesh?.cadId ? regionsByCad[mesh.cadId] ?? [] : [])
+              .map((region, order) =>
+                `${CIRCLED[order] ?? order + 1} : ${region.die} ${region.work}`),
+          },
         }),
       });
       if (!response.ok) {
@@ -1465,6 +1473,9 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
                   onCapture={(url) => setShots((current) => [...current, url])}
+                  regions={mesh.cadId ? regionsByCad[mesh.cadId] ?? [] : []}
+                  onRegionsChange={(next) => mesh.cadId && setRegionsByCad(
+                    (current) => ({ ...current, [mesh.cadId!]: next }))}
                   notes={mesh.cadId ? notesByCad[mesh.cadId] ?? [] : []}
                   onNotesChange={(next) => mesh.cadId && setNotesByCad(
                     (current) => ({ ...current, [mesh.cadId!]: next }))} />
