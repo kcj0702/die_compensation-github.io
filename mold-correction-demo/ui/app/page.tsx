@@ -1301,6 +1301,41 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   /* 3D 주석은 CAD 별로 들고 있는다. 시트 주석은 이미지 좌표라 3D 좌표와
      섞을 수 없어 따로 둔다. */
   const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
+  /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다. */
+  const [shots, setShots] = useState<string[]>([]);
+  const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
+  const [sheetError, setSheetError] = useState<string | null>(null);
+
+  const makeSheet = async () => {
+    const scan = scans.find((s) => s.id === overlayScanId);
+    const analysisId = scan?.result?.analysisId;
+    if (!analysisId || !sheetValues) { setSheetError('스캔을 먼저 고르세요.'); return; }
+    setSheetState('saving'); setSheetError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/sheet-excel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          analysisId, corrections: sheetValues.values, images: shots,
+          meta: { partNo: scan?.partNo, coefficient: sheetValues.coefficient },
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error || '시트를 만들지 못했습니다.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${scan?.partNo || 'ADC'}_보정시트_3D.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setSheetState('idle');
+    } catch (err) {
+      setSheetError(String((err as Error).message || err));
+      setSheetState('error');
+    }
+  };
   const inputRef = useRef<HTMLInputElement>(null);
 
   // 분석이 끝나 analysisId 를 가진 스캔만 3D 로 올릴 수 있다.
@@ -1429,6 +1464,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   sheetValues={sheetValues?.values ?? null}
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
+                  onCapture={(url) => setShots((current) => [...current, url])}
                   notes={mesh.cadId ? notesByCad[mesh.cadId] ?? [] : []}
                   onNotesChange={(next) => mesh.cadId && setNotesByCad(
                     (current) => ({ ...current, [mesh.cadId!]: next }))} />
@@ -1460,6 +1496,17 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
                   {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px
                 </span>}
+                {overlay && sheetValues && <>
+                  <button type="button" className="tool-button"
+                    onClick={makeSheet} disabled={sheetState === 'saving'}>
+                    <Download size={14} />
+                    {sheetState === 'saving' ? '만드는 중…'
+                      : `보정시트 만들기${shots.length ? ` (화면 ${shots.length}장)` : ''}`}
+                  </button>
+                  {shots.length > 0 && <button type="button" className="tool-button"
+                    onClick={() => setShots([])}>담은 화면 비우기</button>}
+                  {sheetError && <span className="cad-overlay-bar__err">{sheetError}</span>}
+                </>}
                 {overlay && sheetValues && <span className="cad-overlay-bar__note">
                   보정시트 기준 · 계수 {sheetValues.coefficient.toFixed(2)}×
                   {sheetValues.overrideCount > 0

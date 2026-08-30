@@ -1017,11 +1017,18 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
 
 
 def sheet_excel_for(analysis_id: str, corrections: dict,
-                    meta: dict) -> bytes:
+                    meta: dict, images: list | None = None) -> bytes:
     """최종 보정시트를 현업 엑셀 양식으로 만든다.
 
     보정량은 화면이 준다 — 작업자가 고친 값과 계수가 반영된 최종값이다.
     여기서 다시 계산하면 시트와 엑셀이 어긋난다.
+
+    [그림]
+    현업 시트("보정 적용 내용")는 스캔 히트맵이 아니라 **3D 형상 그림**을
+    쓴다. 그래서 화면에서 찍은 3D 뷰를 받으면 그걸 쓰고, 없으면 스캔에
+    콜아웃을 그려 넣은 그림으로 대신한다.
+    여러 장을 주면 페이지를 나눠 넣는다 — 실제 시트도 전체도와 확대도를
+    따로 싣는다.
     """
     from zero_line_detection.sheet_excel import (
         SheetPoint, build_workbook, draw_sheet_image,
@@ -1050,9 +1057,23 @@ def sheet_excel_for(analysis_id: str, corrections: dict,
         ))
     points.sort(key=lambda p: p.point_id)
 
-    image = draw_sheet_image(base_bgr, points)
+    pages: list = []
+    for raw in (images or []):
+        text = str(raw or "")
+        if "," in text:
+            text = text.split(",", 1)[1]
+        try:
+            buffer = np.frombuffer(base64.b64decode(text), dtype=np.uint8)
+            shot = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        except Exception:
+            shot = None
+        if shot is not None:
+            pages.append(shot)
+    if not pages:
+        pages = [draw_sheet_image(base_bgr, points)]
+
     return build_workbook(
-        image, points,
+        pages, points,
         part_no=str(meta.get("partNo") or entry.get("part_no") or ""),
         part_name=str(meta.get("partName") or ""),
         process=str(meta.get("process") or ""),
@@ -1069,10 +1090,14 @@ async def sheet_excel(request: Request) -> Response:
         corrections = body.get("corrections") or {}
         if not isinstance(corrections, dict) or not corrections:
             return JSONResponse({"error": "보정량이 비어 있습니다."}, status_code=400)
+        images = body.get("images")
+        if isinstance(images, str):
+            images = [images]
         payload = await run_in_threadpool(
             sheet_excel_for, str(body.get("analysisId") or ""),
             {str(k): float(v) for k, v in corrections.items()},
             body.get("meta") or {},
+            images if isinstance(images, list) else None,
         )
         name = str(body.get("filename") or "보정시트") + ".xlsx"
         quoted = urllib.parse.quote(name)

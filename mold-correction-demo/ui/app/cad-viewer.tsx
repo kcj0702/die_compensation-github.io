@@ -198,7 +198,8 @@ function makeNote(text: string, height: number): THREE.Sprite {
 }
 
 export function CadViewer({ mesh, showHoles, overlay, sheetValues,
-                           onCorrectionChange, notes, onNotesChange }: {
+                           onCorrectionChange, notes, onNotesChange,
+                           onCapture }: {
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
@@ -206,6 +207,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
   onCorrectionChange?: (pointId: string, value: number | null) => void;
   notes?: CadNote[];
   onNotesChange?: (notes: CadNote[]) => void;
+  /* 지금 보이는 화면을 PNG 로 넘겨준다 — 보정시트에 넣을 그림이다. */
+  onCapture?: (dataUrl: string) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -941,6 +944,11 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장
       </button>
+      {onCapture && <button type="button" title="이 화면을 보정시트에 담습니다"
+        onClick={() => {
+          const url = viewApi.current?.snapshot();
+          if (url) onCapture(url);
+        }}>시트에 담기</button>}
     </div>
 
     {overlay && showHeat && overlay.deviationRange && (

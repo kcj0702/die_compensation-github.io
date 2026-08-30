@@ -52,6 +52,7 @@ HEADER_CELLS = {
 IMAGE_ANCHOR = "A8"
 IMAGE_ROWS = 32           # 8행부터 40행까지
 ROW_POINTS = 14.0         # 양식의 행 높이(pt)
+PAGE_ROWS = 40            # 한 페이지가 40행. 실제 시트도 이만큼씩 반복된다
 
 PLUS = (63, 72, 224)      # BGR — 살이 많다(깎는다)
 MINUS = (224, 127, 47)    # BGR — 살이 부족하다(붙인다)
@@ -105,7 +106,7 @@ def draw_sheet_image(base_bgr: np.ndarray, points: list) -> np.ndarray:
 
 
 def build_workbook(
-    sheet_image_bgr: np.ndarray,
+    pages: list,
     points: list,
     part_no: str = "",
     part_name: str = "",
@@ -127,6 +128,9 @@ def build_workbook(
     book = openpyxl.load_workbook(TEMPLATE)
     page = book["00"]
 
+    if isinstance(pages, np.ndarray):      # 한 장만 준 경우도 받는다
+        pages = [pages]
+
     values = {
         "control_no": control_no or f"{part_no}-01",
         "part_name": part_name,
@@ -135,21 +139,30 @@ def build_workbook(
         "material": material,
         "applied_at": applied_at or date.today().isoformat(),
     }
-    for key, cell in HEADER_CELLS.items():
-        page[cell] = values[key]
-
     # ── 그림 붙이기 ──────────────────────────────────────────
-    # 양식 행 높이 14pt 기준으로 들어갈 자리를 계산한다(1pt = 4/3 px).
+    # 실제 시트는 40행 묶음이 공정마다 반복된다(1행, 41행, 81행 …).
+    # 여러 장을 받으면 같은 방식으로 페이지를 늘린다.
     box_height = int(IMAGE_ROWS * ROW_POINTS * 4 / 3)
-    height, width = sheet_image_bgr.shape[:2]
-    box_width = int(box_height * width / height)
+    for index, image in enumerate(pages):
+        offset = index * PAGE_ROWS
+        for key, cell in HEADER_CELLS.items():
+            column = "".join(ch for ch in cell if ch.isalpha())
+            row = int("".join(ch for ch in cell if ch.isdigit())) + offset
+            page[f"{column}{row}"] = values[key]
 
-    ok, buffer = cv2.imencode(".png", sheet_image_bgr)
-    if not ok:
-        raise ValueError("시트 그림을 PNG 로 만들지 못했습니다.")
-    picture = XlImage(io.BytesIO(buffer.tobytes()))
-    picture.width, picture.height = box_width, box_height
-    page.add_image(picture, IMAGE_ANCHOR)
+        height, width = image.shape[:2]
+        box_width = int(box_height * width / height)
+        ok, buffer = cv2.imencode(".png", image)
+        if not ok:
+            raise ValueError("시트 그림을 PNG 로 만들지 못했습니다.")
+        picture = XlImage(io.BytesIO(buffer.tobytes()))
+        picture.width, picture.height = box_width, box_height
+        anchor_row = int("".join(ch for ch in IMAGE_ANCHOR if ch.isdigit())) + offset
+        anchor_col = "".join(ch for ch in IMAGE_ANCHOR if ch.isalpha())
+        page.add_image(picture, f"{anchor_col}{anchor_row}")
+
+    if len(pages) > 1:
+        page.print_area = f"A1:AD{PAGE_ROWS * len(pages)}"
 
     # ── 포인트 표 ────────────────────────────────────────────
     table = book.create_sheet("포인트")
