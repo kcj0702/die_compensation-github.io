@@ -524,3 +524,13 @@ button { cursor: pointer; }
 .cad-viewer__bar span{color:#c6d4e0;font-size:8.5px;font-variant-numeric:tabular-nums}
 .cad-viewer__bar-low{order:3}
 .cad-viewer__bar small{color:#7d90a2;font-size:8px;letter-spacing:.03em}
+
+.cad-viewer__section{position:absolute;left:12px;bottom:52px;display:flex;align-items:center;gap:8px;padding:6px 11px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__section label{color:#c6d4e0;font-size:9px;font-weight:600}
+.cad-viewer__section input{width:118px;accent-color:#6fb4e8}
+.cad-viewer__section span{min-width:44px;color:#8fa3b4;font-size:8.5px;font-variant-numeric:tabular-nums}
+.cad-viewer__measure{position:absolute;left:12px;top:12px;display:flex;flex-direction:column;gap:3px;padding:10px 13px;border:1px solid rgba(53,214,138,.5);border-radius:7px;background:rgba(14,22,30,.86);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__measure b{color:#35d68a;font-size:13px;font-variant-numeric:tabular-nums}
+.cad-viewer__measure span{color:#8fa3b4;font-size:8.5px}
+.cad-viewer__measure button{margin-top:5px;padding:3px 8px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:transparent;color:#8fa3b4;font-size:8.5px;cursor:pointer}
+.cad-viewer__measure button:hover{color:#eaf2f8;border-color:rgba(255,255,255,.4)}

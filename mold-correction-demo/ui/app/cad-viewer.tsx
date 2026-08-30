@@ -20,7 +20,6 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 export type CadHole = {
   kind: string; radius: number; diameter: number;
@@ -177,11 +176,21 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   /* 편차를 표면에 입힐지. 부품이 회색 덩어리로만 보이면 편차 프로젝트에서
      3D 가 할 일이 없다. */
   const [showHeat, setShowHeat] = useState(true);
+  /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다. */
+  const [clip, setClip] = useState(0);          // 0 이면 끔, 아니면 자르는 위치
+  const [clipRatio, setClipRatio] = useState(0);
+  /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
+  const [measuring, setMeasuring] = useState(false);
+  const [measure, setMeasure] = useState<
+    { from: [number, number, number]; to?: [number, number, number] } | null>(null);
 
   // 씬 안에서 켜고 끌 그룹들은 ref 로 들고 있어야 리렌더 없이 토글된다.
   const holeGroup = useRef<THREE.Group | null>(null);
   const planeGroup = useRef<THREE.Group | null>(null);
   const overlayGroup = useRef<THREE.Group | null>(null);
+  const clipRef = useRef<THREE.Plane | null>(null);
+  const measureRef = useRef<THREE.Group | null>(null);
+  const surfaceRef = useRef<THREE.Mesh | null>(null);
   const viewApi = useRef<{
     frame: (direction: THREE.Vector3) => void;
     snapshot: () => string;
@@ -216,6 +225,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setClearColor(0x16202a);
+    renderer.localClippingEnabled = true;
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -256,15 +266,26 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       painted = true;
     }
 
+    // 단면 — 화면 기준이 아니라 부품 좌표 기준으로 자른다. 돌려봐도
+    // 자른 자리가 그대로 있어야 단면을 읽을 수 있다.
+    const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+    clipRef.current = clipPlane;
+
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : SURFACE,
       vertexColors: painted,
       metalness: painted ? 0.15 : 0.55,
       roughness: painted ? 0.75 : 0.42,
       side: THREE.DoubleSide, flatShading: false,
+      clippingPlanes: [clipPlane],
     }));
     scene.add(surface);
     solidMesh.current = surface;
+    surfaceRef.current = surface;
+
+    const measureRoot = new THREE.Group();
+    scene.add(measureRoot);
+    measureRef.current = measureRoot;
 
     // 삼각망을 눈으로 확인하는 층. 45,224개라 선이 촘촘하다 —
     // 그래서 기본값은 '모서리'(각진 곳만)로 두고 전체 와이어는 선택이다.
@@ -495,37 +516,100 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     }
     camera.position.copy(centre).add(start);
 
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.target.copy(centre);
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    controls.update();
-
     // ── CATIA 식 마우스 ──────────────────────────────────────
-    //   가운데 버튼 끌기        = 이동  (CATIA 와 같다)
-    //   가운데 + 오른쪽 끌기    = 회전  (CATIA 와 같다)
-    //   Ctrl + 가운데 끌기      = 확대·축소
-    //   왼쪽 끌기               = 회전  (웹에서 흔한 방식이라 같이 둔다)
-    //   휠                      = 확대·축소
-    // OrbitControls 는 버튼 조합을 모르니, 누르는 순간 buttons 비트를
-    // 보고 가운데 버튼의 역할을 바꿔 준다.
-    controls.mouseButtons = {
-      LEFT: THREE.MOUSE.ROTATE,
-      MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.PAN,
+    // OrbitControls 로는 CATIA 를 흉내낼 수 없어 직접 만들었다. 두 가지가
+    // 걸렸다 —
+    //   (1) CATIA 는 가운데를 먼저 누르고 오른쪽을 **나중에** 더한다.
+    //       OrbitControls 는 누르는 순간 역할이 정해져 도중에 못 바꾼다.
+    //   (2) 회전 방향이 반대다. CATIA 는 모델이 커서를 따라오는데
+    //       OrbitControls 는 카메라가 도는 느낌이라 반대로 움직인다.
+    //
+    //   가운데 끌기              이동
+    //   가운데 + 오른쪽 끌기      회전   (누르는 도중에 더해도 바뀐다)
+    //   Ctrl + 가운데 끌기        확대·축소
+    //   휠                       확대·축소
+    //   왼쪽                     선택 (CATIA 와 같다. 회전 아님)
+    const target = centre.clone();
+    const spherical = new THREE.Spherical().setFromVector3(
+      camera.position.clone().sub(target));
+    let mode: 'none' | 'pan' | 'rotate' | 'zoom' = 'none';
+    let last = { x: 0, y: 0 };
+
+    const applyCamera = () => {
+      spherical.phi = Math.max(0.001, Math.min(Math.PI - 0.001, spherical.phi));
+      spherical.radius = Math.max(radius * 0.05,
+        Math.min(radius * 40, spherical.radius));
+      camera.position.copy(target).add(
+        new THREE.Vector3().setFromSpherical(spherical));
+      camera.lookAt(target);
     };
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.button !== 1) return;
-      const rightHeld = (event.buttons & 2) !== 0;
-      controls.mouseButtons.MIDDLE = (rightHeld || event.ctrlKey)
-        ? (event.ctrlKey ? THREE.MOUSE.DOLLY : THREE.MOUSE.ROTATE)
-        : THREE.MOUSE.PAN;
+    applyCamera();
+
+    const modeFor = (event: PointerEvent | MouseEvent) => {
+      const middle = (event.buttons & 4) !== 0;
+      if (!middle) return 'none';
+      if (event.ctrlKey) return 'zoom';
+      return (event.buttons & 2) !== 0 ? 'rotate' : 'pan';
+    };
+
+    const onMove = (event: PointerEvent) => {
+      // 버튼 조합이 바뀌면 도중에라도 따라간다 — CATIA 는 가운데를 누른
+      // 채로 오른쪽을 더해 회전으로 넘어간다.
+      const next = modeFor(event);
+      if (next !== mode) {
+        mode = next as typeof mode;
+        last = { x: event.clientX, y: event.clientY };
+        return;
+      }
+      if (mode === 'none') return;
+      const dx = event.clientX - last.x;
+      const dy = event.clientY - last.y;
+      last = { x: event.clientX, y: event.clientY };
+
+      if (mode === 'rotate') {
+        // 부호가 CATIA 기준이다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다.
+        spherical.theta += dx * 0.005;
+        spherical.phi += dy * 0.005;
+      } else if (mode === 'pan') {
+        const height = mount.clientHeight || 1;
+        const perPixel = 2 * spherical.radius
+          * Math.tan((camera.fov * Math.PI / 180) / 2) / height;
+        const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
+        const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
+        target.add(right.multiplyScalar(-dx * perPixel));
+        target.add(up.multiplyScalar(dy * perPixel));
+      } else {
+        spherical.radius *= Math.exp(dy * 0.006);
+      }
+      applyCamera();
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      spherical.radius *= Math.exp(Math.sign(event.deltaY) * 0.12);
+      applyCamera();
+    };
+    const onButtonDown = (event: PointerEvent) => {
+      if (event.button === 1) event.preventDefault();   // 가운데 자동스크롤 막기
+      mode = modeFor(event) as typeof mode;
+      last = { x: event.clientX, y: event.clientY };
+      if (mode !== 'none') renderer.domElement.setPointerCapture(event.pointerId);
+    };
+    const onButtonUp = (event: PointerEvent) => {
+      mode = modeFor(event) as typeof mode;
+      if (mode === 'none' && renderer.domElement.hasPointerCapture(event.pointerId)) {
+        renderer.domElement.releasePointerCapture(event.pointerId);
+      }
     };
     const blockMenu = (event: Event) => event.preventDefault();
-    renderer.domElement.addEventListener('pointerdown', onPointerDown);
+
+    renderer.domElement.addEventListener('pointerdown', onButtonDown);
+    renderer.domElement.addEventListener('pointermove', onMove);
+    renderer.domElement.addEventListener('pointerup', onButtonUp);
+    renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
     renderer.domElement.addEventListener('contextmenu', blockMenu);
 
-    // 왼쪽 버튼을 끌지 않고 놓았을 때만 선택으로 본다(회전과 겹치지 않게).
+    // 왼쪽 버튼을 끌지 않고 놓았을 때만 선택으로 본다.
     const raycaster = new THREE.Raycaster();
     let downAt: { x: number; y: number } | null = null;
     const onDown = (event: PointerEvent) => {
@@ -540,6 +624,16 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
       raycaster.setFromCamera(new THREE.Vector2(
         ((event.clientX - rect.left) / rect.width) * 2 - 1,
         -((event.clientY - rect.top) / rect.height) * 2 + 1), camera);
+      if (measuringRef.current) {
+        const spot = raycaster.intersectObject(surface, false)[0];
+        if (spot) {
+          const point: [number, number, number] =
+            [spot.point.x, spot.point.y, spot.point.z];
+          setMeasure((current) => (current && !current.to)
+            ? { ...current, to: point } : { from: point });
+        }
+        return;
+      }
       const hit = raycaster.intersectObjects(holesRoot.children, false)
         .find((entry) => entry.object.userData?.hole);
       setPicked(hit ? (hit.object.userData.hole as CadHole) : null);
@@ -547,16 +641,14 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     renderer.domElement.addEventListener('pointerdown', onDown);
     renderer.domElement.addEventListener('pointerup', onUp);
 
-    // 표준 뷰와 전체 맞춤을 밖에서 부를 수 있게 걸어 둔다
+    // 표준 뷰와 전체 맞춤
     const frame = (direction: THREE.Vector3) => {
-      const distance = radius * 2.6;
-      camera.position.copy(centre).add(direction.clone().normalize()
-        .multiplyScalar(distance));
-      controls.target.copy(centre);
-      controls.update();
+      target.copy(centre);
+      spherical.setFromVector3(direction.clone().normalize()
+        .multiplyScalar(radius * 2.6));
+      applyCamera();
     };
     const snapshot = () => {
-      // preserveDrawingBuffer 를 켜지 않았으므로 저장 직전에 한 번 더 그린다
       renderer.render(scene, camera);
       return renderer.domElement.toDataURL('image/png');
     };
@@ -566,7 +658,6 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     let loop = 0;
     const tick = () => {
       loop = requestAnimationFrame(tick);
-      controls.update();
       renderer.render(scene, camera);
     };
     tick();
@@ -583,11 +674,13 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
     return () => {
       cancelAnimationFrame(loop);
       resize.disconnect();
-      renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+      renderer.domElement.removeEventListener('pointerdown', onButtonDown);
+      renderer.domElement.removeEventListener('pointermove', onMove);
+      renderer.domElement.removeEventListener('pointerup', onButtonUp);
+      renderer.domElement.removeEventListener('wheel', onWheel);
       renderer.domElement.removeEventListener('contextmenu', blockMenu);
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
-      controls.dispose();
       renderer.dispose();
       scene.traverse((node) => {
         const any = node as THREE.Mesh;
@@ -612,6 +705,47 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
   useEffect(() => {
     if (overlayGroup.current) overlayGroup.current.visible = showOverlay;
   }, [showOverlay]);
+
+  // 클릭 처리는 씬을 다시 만들지 않고 최신 상태를 봐야 한다
+  const measuringRef = useRef(measuring);
+  measuringRef.current = measuring;
+
+  useEffect(() => {
+    const plane = clipRef.current;
+    const surface = surfaceRef.current;
+    if (!plane || !surface) return;
+    const material = surface.material as THREE.MeshStandardMaterial;
+    material.clippingPlanes = clip ? [plane] : [];
+    plane.constant = clip;
+    material.needsUpdate = true;
+  }, [clip]);
+
+  useEffect(() => {
+    const root = measureRef.current;
+    if (!root) return;
+    root.clear();
+    if (!measure) return;
+    const from = new THREE.Vector3(...measure.from);
+    const scale = (viewApi.current?.radius ?? 100) * 0.008;
+    const mark = (spot: THREE.Vector3) => {
+      const dot = new THREE.Mesh(
+        new THREE.SphereGeometry(scale, 10, 8),
+        new THREE.MeshBasicMaterial({ color: 0x35d68a, depthTest: false }));
+      dot.position.copy(spot);
+      dot.renderOrder = 12;
+      root.add(dot);
+    };
+    mark(from);
+    if (measure.to) {
+      const to = new THREE.Vector3(...measure.to);
+      mark(to);
+      const line = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([from, to]),
+        new THREE.LineBasicMaterial({ color: 0x35d68a, depthTest: false }));
+      line.renderOrder = 12;
+      root.add(line);
+    }
+  }, [measure]);
 
   const goToView = (dir: [number, number, number]) => {
     viewApi.current?.frame(new THREE.Vector3(...dir));
@@ -643,6 +777,19 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
 
   return <>
     <div ref={mountRef} className="cad-viewer__stage" />
+
+    <div className="cad-viewer__section">
+      <label htmlFor="cad-clip">단면</label>
+      <input id="cad-clip" type="range" min={-1} max={1} step={0.01}
+        value={clipRatio}
+        onChange={(event) => {
+          const ratio = Number(event.target.value);
+          setClipRatio(ratio);
+          const span = viewApi.current?.radius ?? 100;
+          setClip(ratio === 0 ? 0 : ratio * span);
+        }} />
+      <span>{clip ? `${clip.toFixed(0)} mm` : '끔'}</span>
+    </div>
 
     <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
       {VIEWS.map((view) => (
@@ -697,6 +844,10 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
         <button type="button" className={showHeat ? 'is-on' : ''}
           onClick={() => setShowHeat((v) => !v)}>편차 색</button>
       ) : null}
+      <button type="button" className={measuring ? 'is-on' : ''}
+        onClick={() => { setMeasuring((v) => !v); setMeasure(null); }}>
+        측정
+      </button>
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
         {mesh.counts?.cylinders
@@ -704,9 +855,20 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues }: {
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        가운데 버튼 이동 · 가운데+오른쪽 회전 · 휠 확대
+        {measuring
+          ? '형상 위 두 곳을 눌러 거리를 잽니다'
+          : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택'}
       </span>
     </div>
+
+    {measure?.to && (
+      <div className="cad-viewer__measure">
+        <b>{new THREE.Vector3(...measure.from)
+          .distanceTo(new THREE.Vector3(...measure.to)).toFixed(2)} mm</b>
+        <span>두 점 사이 직선거리</span>
+        <button type="button" onClick={() => setMeasure(null)}>지우기</button>
+      </div>
+    )}
 
     {picked && (
       <div className="cad-viewer__pick">

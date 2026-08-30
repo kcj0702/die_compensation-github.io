@@ -1289,7 +1289,9 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   const [mesh, setMesh] = useState<CadMesh | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [showHoles, setShowHoles] = useState(true);
+  /* 홀 핀은 데이텀 볼 때만 필요하다. 기본으로 켜두면 보정량 콜아웃을
+     가린다(실측 67XX6 은 홀이 180개다). */
+  const [showHoles, setShowHoles] = useState(false);
   const [overlay, setOverlay] = useState<CadOverlay | null>(null);
   const [overlayScanId, setOverlayScanId] = useState<string>('');
   const [overlayStatus, setOverlayStatus] =
