@@ -575,3 +575,32 @@ button { cursor: pointer; }
 .topbar__session{display:flex;align-items:center;gap:6px}
 .topbar__session .tool-button{padding:5px 9px;font-size:8.5px}
 .topbar__session-note{margin-right:4px;color:#5c8f6b;font-size:8.5px;white-space:nowrap}
+
+/* CAD 파일 탭 — 여러 개를 열어 놓고 고른다 */
+.cad-files { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 14px; border-bottom: 1px solid var(--line); background: #fafbfc; }
+.cad-files__tab { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 6px; background: white; overflow: hidden; }
+.cad-files__tab > button { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px; border: 0; background: transparent; color: #6d7988; font-size: 10px; cursor: pointer; }
+.cad-files__tab--on { border-color: #f0a71c; background: #fff8e8; }
+.cad-files__tab--on > button { color: #8a5a04; font-weight: 600; }
+.cad-files__tab--wait > button { color: #9aa5b1; cursor: default; }
+.cad-files__close { padding: 0 6px !important; color: #b0b8c1 !important; border-left: 1px solid var(--line) !important; }
+.cad-files__close:hover { color: #d64545 !important; background: #fff2f2 !important; }
+
+/* 파일 행에서 품번 고르기 — 파일명에 품번이 없으면 제로라인이 안 나온다 */
+.part-pick { height: 20px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; background: white; color: inherit; font-size: 10px; font-family: inherit; }
+.part-pick:hover { border-color: #f0a71c; }
+
+/* 핵심 포인트 카드 — 왜 골랐는지 같이 보여준다 */
+.key-point-card__why { margin: 0 0 9px; color: #6d7988; font-size: 10px; line-height: 1.6; }
+.key-point-card__list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.key-point-card__list > div { display: grid; grid-template-columns: 44px 62px 1fr; align-items: center; gap: 6px; font-size: 10px; }
+.key-point-card__list b { color: #334257; }
+.key-point-card__list span { text-align: right; font-variant-numeric: tabular-nums; }
+.key-point-card__list span.blue { color: #2f6fd0; }
+.key-point-card__list span.orange { color: #d9822b; }
+.key-point-card__list small { color: #9aa5b1; }
+.key-point-card__more { color: #9aa5b1; font-size: 10px; }
+.key-point-card__buttons { display: flex; gap: 6px; }
+.key-point-card__buttons button { flex: 1; height: 28px; border: 1px solid var(--line); border-radius: 6px; background: white; color: #6d7988; font-size: 10px; cursor: pointer; }
+.key-point-card__buttons button:first-child { border-color: #f0a71c; background: #fff8e8; color: #8a5a04; font-weight: 600; }
+.key-point-card__note { margin: 8px 0 0; color: #9aa5b1; font-size: 9px; line-height: 1.5; }

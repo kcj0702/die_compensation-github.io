@@ -20,6 +20,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 
 export type CadHole = {
   kind: string; radius: number; diameter: number;
@@ -353,9 +354,27 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setClearColor(0x16202a);
     renderer.localClippingEnabled = true;
+    // 금속은 밝은 곳을 반사해야 형태가 읽힌다. 톤매핑 없이 두면
+    // 반사 하이라이트가 흰색으로 다 타버린다.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
+
+    // ── 환경 반사 ────────────────────────────────────────────
+    // 이게 없어서 형상이 시커멓게 나왔다. MeshStandardMaterial 은 PBR 이라
+    // metalness 를 올리면 확산광(diffuse)이 그만큼 사라지고 대신 **주변을
+    // 반사**해서 형태를 보여준다. 그런데 환경맵이 없으면 반사할 게 없어
+    // 방향광의 좁은 하이라이트만 남고 나머지는 검게 깔린다. 판넬처럼
+    // 완만한 곡면은 하이라이트가 거의 안 걸려서 통째로 실루엣이 된다.
+    //
+    // RoomEnvironment 는 three 가 들고 있는 절차적 실내 장면이라 파일을
+    // 받아올 필요가 없다 — 로컬 node_modules 안에서 끝난다.
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = environment;
+    pmrem.dispose();
 
     // ── 형상 ─────────────────────────────────────────────────
     const geometry = new THREE.BufferGeometry();
@@ -418,19 +437,23 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       }
       after.setAttribute('color', new THREE.BufferAttribute(tint, 3));
       const skin = new THREE.Mesh(after, new THREE.MeshStandardMaterial({
-        vertexColors: true, metalness: 0.2, roughness: 0.7,
-        side: THREE.DoubleSide,
+        vertexColors: true, metalness: 0.05, roughness: 0.75,
+        envMapIntensity: 0.35, side: THREE.DoubleSide,
         transparent: morphMode === 'both', opacity: morphMode === 'both' ? 0.85 : 1,
       }));
       skin.renderOrder = 2;
       scene.add(skin);
     }
 
+    // metalness 0.55 로 두었더니 환경맵이 없던 시절 형상이 새까맣게 나왔다.
+    // 환경맵을 넣은 지금도 판금은 완전한 거울이 아니므로 0.25 정도가
+    // 실제 강판에 가깝고 곡면 음영이 훨씬 잘 읽힌다.
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : SURFACE,
       vertexColors: painted,
-      metalness: painted ? 0.15 : 0.55,
-      roughness: painted ? 0.75 : 0.42,
+      metalness: painted ? 0.05 : 0.25,
+      roughness: painted ? 0.8 : 0.5,
+      envMapIntensity: painted ? 0.35 : 1.0,
       side: THREE.DoubleSide, flatShading: false,
       clippingPlanes: [clipPlane],
     }));
@@ -702,16 +725,71 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
       42, mount.clientWidth / mount.clientHeight, radius * 0.01, radius * 60);
     // 스캔이 바라본 방향이 있으면 그쪽에 세운다. 안 그러면 얇은 쪽에서
     // 보게 되어 형상이 선처럼 보인다(실측: 판넬이 한 축으로 155mm 다).
-    const start = new THREE.Vector3(radius * 1.5, radius * 1.1, radius * 1.9);
+    // 바운딩 **구**가 아니라 **상자**로 맞춘다.
+    //
+    // 예전에는 방향에 상관없이 구 반지름 x2.6 에 카메라를 세웠다. 부품이
+    // 길쭉하면 이게 방향마다 크게 어긋난다 — 실측 64XX1(220 x 1492.5 x
+    // 555.5mm, 구 반지름 804mm, 뷰어 2.42:1)에서 부품이 화면 세로를
+    // 차지하는 비율을 재보면:
+    //
+    //     방향   예전 거리   차지     새 거리   차지
+    //     등각     2090mm    102%     2212mm    96%   <- 예전엔 잘렸다
+    //     정면     2090mm     54%     1499mm    96%
+    //     우측     2090mm     98%     2132mm    96%
+    //     평면     2090mm    107%     2300mm    96%   <- 예전엔 잘렸다
+    //
+    // 정면은 절반만 쓰고 있었고, 등각·평면은 되레 부품 모서리가 화면
+    // 밖으로 잘려 나가고 있었다. 상자 꼭짓점으로 맞추면 어느 방향에서든
+    // 96% 로 일정하다.
+    geometry.computeBoundingBox();
+    const box = geometry.boundingBox ?? new THREE.Box3();
+    const corners: THREE.Vector3[] = [];
+    for (const x of [box.min.x, box.max.x])
+      for (const y of [box.min.y, box.max.y])
+        for (const z of [box.min.z, box.max.z])
+          corners.push(new THREE.Vector3(x, y, z));
+
+    const fitDistance = (direction: THREE.Vector3) => {
+      // three 의 lookAt 과 같은 축을 써야 화면 크기가 맞는다:
+      //   z = normalize(eye - target),  x = up X z,  y = z X x
+      const back = direction.clone().normalize();
+      const worldUp = new THREE.Vector3(0, 1, 0);
+      // 시선이 up 과 나란하면 축이 무너진다(정면 뷰가 정확히 그렇다)
+      if (Math.abs(back.dot(worldUp)) > 0.999) worldUp.set(0, 0, 1);
+      const right = new THREE.Vector3().crossVectors(worldUp, back).normalize();
+      const up = new THREE.Vector3().crossVectors(back, right).normalize();
+
+      const vFov = (camera.fov * Math.PI) / 180;
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+      // 꼭짓점마다 "이 점이 화면에 들어오려면 얼마나 물러나야 하나" 를
+      // 따로 구해 최댓값을 쓴다. 원근이라 앞으로 튀어나온 점일수록 크게
+      // 보이므로 그 점의 깊이를 그 점에서만 더해야 한다. 가장 큰 반경과
+      // 가장 큰 깊이를 따로 구해 합치면(그렇게 짜봤다) 필요 이상으로
+      // 물러나 부품이 작아진다.
+      const margin = 1.04;
+      let need = 0;
+      for (const corner of corners) {
+        const v = corner.clone().sub(centre);
+        const depth = v.dot(back);
+        need = Math.max(need,
+          (Math.abs(v.dot(up)) * margin) / Math.tan(vFov / 2) + depth,
+          (Math.abs(v.dot(right)) * margin) / Math.tan(hFov / 2) + depth);
+      }
+      return need;
+    };
+
+    const startDir = new THREE.Vector3(0.62, 0.46, 0.79).normalize();
     if (overlay?.fit) {
       const along = [0, 0, 0];
       along[overlay.fit.axis] = overlay.fit.sign >= 0 ? 1 : -1;
-      start.set(along[0], along[1], along[2]).multiplyScalar(radius * 2.4);
+      startDir.set(along[0], along[1], along[2]).normalize();
       // 완전히 정면이면 입체감이 없어 살짝 비껴 세운다
-      start.x += radius * 0.12;
-      start.y += radius * 0.1;
+      startDir.x += 0.12;
+      startDir.y += 0.1;
+      startDir.normalize();
     }
-    camera.position.copy(centre).add(start);
+    camera.position.copy(centre).add(
+      startDir.clone().multiplyScalar(fitDistance(startDir)));
 
     // ── CATIA 식 마우스 ──────────────────────────────────────
     // OrbitControls 로는 CATIA 를 흉내낼 수 없어 직접 만들었다. 두 가지가
@@ -878,8 +956,8 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     // 표준 뷰와 전체 맞춤
     const frame = (direction: THREE.Vector3) => {
       target.copy(centre);
-      spherical.setFromVector3(direction.clone().normalize()
-        .multiplyScalar(radius * 2.6));
+      const dir = direction.clone().normalize();
+      spherical.setFromVector3(dir.multiplyScalar(fitDistance(dir)));
       applyCamera();
     };
     const snapshot = () => {

@@ -68,7 +68,7 @@ from zero_line_advance.advance import (  # noqa: E402
 from zero_line_detection.sheet_reference import load_library  # noqa: E402
 from zero_line_detection.green_belt import find_green_belts  # noqa: E402
 from zero_line_detection.simple_zero_line import (  # noqa: E402
-    find_simple_zero_lines,
+    PRODUCT_COLORBAR_MM, colorbar_span_for, find_simple_zero_lines,
 )
 from zero_line_detection.lab_profile import (  # noqa: E402
     distance_report, lab_shapes_for,
@@ -79,6 +79,7 @@ from zero_line_detection.zero_points import (  # noqa: E402
     snap_into_mask,
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
+from zero_line_detection.key_points import select as select_key_points  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -126,7 +127,11 @@ _ANALYSIS_CACHE_MAX = 5
 
 
 _cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-_CAD_CACHE_MAX = 3      # 하나가 수백 MB 라 많이 들고 있으면 안 된다
+# 여러 개를 열어 놓고 골라 보므로 3개로는 모자란다(파일 4개째를 열면
+# 첫 파일이 밀려나 "CAD 가 만료됐습니다" 가 뜬다). 실측 64XX1 STEP 한 개가
+# 파싱 후 메모리에서 약 40MB(정점 302,340 · 삼각형 369,082)라 6개까지는
+# 감당된다.
+_CAD_CACHE_MAX = 6
 
 
 def _cache_cad(entry: dict[str, Any]) -> str:
@@ -301,9 +306,25 @@ def _decode_image(payload: bytes) -> np.ndarray:
     return image
 
 
-def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
+def analyze_image(image: np.ndarray, filename: str,
+                  part_no: str | None = None) -> dict[str, Any]:
+    """스캔 한 장을 분석한다.
+
+    part_no 를 주면 파일명 대신 그것을 품번으로 쓴다. 품번은 컬러바 범위
+    (PRODUCT_COLORBAR_MM)와 제로라인 파라미터를 고르는 열쇠라, 파일명에
+    품번이 없으면 제로라인 단계가 통째로 비어 버린다 — 실측으로 확인했다.
+
+        _boundary_anchors.png                  제로라인 0개
+        JD_67XX6-DR000 3D 스캔.png (같은 그림)  제로라인 3개
+
+    파일명을 바꾸라고 하는 대신 화면에서 품번을 고를 수 있게 했다.
+    """
     height, width = image.shape[:2]
     errors: dict[str, str] = {}
+    # 품번을 먼저 정한다 — 컬러바 검출이 실패했을 때 대신 쓸 범위를
+    # 고르는 데 필요하다(zero_line.detect_zero_line 의 대체 경로).
+    part_key = (part_no or "").strip().upper() or part_no_from_name(filename)
+    part_span = colorbar_span_for(part_key)
 
     clean_image: np.ndarray | None = None
     label_count = 0
@@ -321,7 +342,14 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_output = None
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
+        zero_output = detect_zero_line(
+            rgb,
+            # PRODUCT_COLORBAR_MM 은 (위, 아래) = (vmax, vmin) 순서다
+            ZeroLineConfig(
+                vmax=part_span[0] if part_span else None,
+                vmin=part_span[1] if part_span else None,
+            ),
+            source_name=filename)
     except Exception as exc:
         errors["zero"] = str(exc)
 
@@ -532,7 +560,6 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     zero_point_clusters: list = []
     simple_key_points: list = []
     label_zero_line = None
-    part_key = part_no_from_name(filename)
     try:
         points_file = ZERO_POINTS_DIR / f"{part_key}.json"
         if points_file.is_file():
@@ -638,7 +665,7 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
     reference_line = None
     try:
-        entry = load_library(ZERO_LINE_LIBRARY).get(part_no_from_name(filename))
+        entry = load_library(ZERO_LINE_LIBRARY).get(part_key)
         if entry:
             # 부품에 따라 시트가 제로를 선으로 그리기도, 여러 존(면)으로
             # 칠하기도 한다 — 등록된 형태 그대로 내보낸다.
@@ -678,6 +705,16 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
         if len(snapped) >= 2:
             zero_anchors = snapped
 
+    # 보정시트에 실제로 적을 포인트를 고른다. 스캔에는 수십~백여 개가
+    # 찍히지만 현업 시트에 적히는 건 열몇 개다(향후 계획 02번).
+    key_points: list = []
+    key_rejected: list = []
+    try:
+        key_points, key_rejected = select_key_points(
+            points, width, height, part_no=part_key)
+    except Exception as exc:
+        errors["keyPoints"] = str(exc)
+
     analysis_id = None
     if zero_output is not None and zero_anchors and calibrated_values is not None:
         analysis_id = _cache_analysis({
@@ -696,6 +733,10 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     return {
         "analysisId": analysis_id,
+        "partNo": part_key,
+        "keyPoints": [k.to_dict() for k in key_points],
+        "keyPointsRejected": key_rejected,
+        "knownParts": sorted(PRODUCT_COLORBAR_MM),
         "source": {"name": filename, "width": width, "height": height},
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
@@ -822,8 +863,10 @@ async def analyze(request: Request) -> JSONResponse:
             return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
         payload = await upload.read()
         image = _decode_image(payload)
+        part_no = form.get("partNo")
         result = await run_in_threadpool(
-            analyze_image, image, getattr(upload, "filename", "scan.png")
+            analyze_image, image, getattr(upload, "filename", "scan.png"),
+            part_no if isinstance(part_no, str) else None,
         )
         return JSONResponse(result)
     except Exception as exc:

@@ -144,6 +144,31 @@ def densify(points, step: float = 3.0) -> np.ndarray:
     return np.asarray(out)
 
 
+def _as_groups(predicted) -> list:
+    """선 하나인지 여러 개인지 가른다.
+
+    [왜 numpy 모양으로 판단하면 안 되나]
+    예전에는 np.asarray(predicted, dtype=object).ndim 을 봤다. 그런데
+    선이 여러 개이고 **길이가 모두 같으면** numpy 가 (선 수, 점 수, 2)
+    짜리 3차원 배열을 만들어 버린다. 그러면 ndim 이 1 이 아니라 3 이라
+    "선 하나" 로 잘못 갈라져 densify 가 터졌다. 실제로 컬러바 없이
+    검출했을 때 선 세 개의 점 수가 우연히 같아져 이 경로를 밟았다.
+
+    파이썬 구조 자체로 판단한다 — 첫 원소가 [x, y] 면 선 하나,
+    [[x, y], ...] 면 선 여러 개다.
+    """
+    if isinstance(predicted, np.ndarray):
+        predicted = predicted.tolist()
+    predicted = list(predicted)
+    if not predicted:
+        return []
+    first = predicted[0]
+    if np.ndim(first) == 1:          # [x, y] -> 선 하나
+        return [np.asarray(predicted, dtype=float)]
+    return [np.asarray(group, dtype=float)
+            for group in predicted if len(group) >= 2]
+
+
 def distance_report(predicted, part_no, width: int, height: int) -> dict | None:
     """검출 결과가 my_lab 도형에서 얼마나 떨어져 있는지 양방향으로 잰다.
 
@@ -157,11 +182,11 @@ def distance_report(predicted, part_no, width: int, height: int) -> dict | None:
     shapes = lab_shapes_for(part_no, width, height)
     if not shapes:
         return None
-    predicted = np.asarray(predicted, dtype=object)
-    groups = predicted if predicted.ndim == 1 and isinstance(
-        predicted[0], (list, np.ndarray)) and np.ndim(predicted[0]) == 2 else [predicted]
+    groups = _as_groups(predicted)
+    if not groups:
+        return None
 
-    ours = np.vstack([densify(np.asarray(g, float)) for g in groups])
+    ours = np.vstack([densify(g) for g in groups])
     theirs = np.vstack([densify(s["points"]) for s in shapes])
     if not len(ours) or not len(theirs):
         return None

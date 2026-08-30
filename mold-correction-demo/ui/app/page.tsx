@@ -35,6 +35,12 @@ type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_d
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
+  partNo?: string;
+  knownParts?: string[];
+  /* 보정시트에 적을 만한 포인트만 골라낸 것. 스캔에는 백여 개가 찍히지만
+     현업 시트에 적히는 건 열몇 개다. */
+  keyPoints?: { point_id: string; x_px: number; y_px: number; value: number; score: number; reason: string }[];
+  keyPointsRejected?: { id: string; value: number }[];
   source: { name: string; width: number; height: number };
   cleanImage: string | null;
   zeroOverlay: string | null;
@@ -1035,6 +1041,10 @@ function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset,
   </div></header>;
 }
 
+/* 컬러바 범위가 등록된 품번. 백엔드 PRODUCT_COLORBAR_MM 과 같은 표이며
+   분석 응답의 knownParts 로도 확인할 수 있다. */
+const KNOWN_PARTS = ['64XX2', '67XX6', '71XX2'];
+
 function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: ScanItem[]; setScans: React.Dispatch<React.SetStateAction<ScanItem[]>>; onOpenResults: (id: string) => void; backendOnline: boolean | null }) {
   const [dragging, setDragging] = useState(false);
   const analyzingCount = scans.filter((scan) => scan.status === 'analyzing').length;
@@ -1055,6 +1065,11 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
       setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'analyzing', error: undefined } : scan));
       try {
         const form = new FormData(); form.append('file', target.file, target.name);
+        /* 품번은 컬러바 범위와 제로라인 파라미터를 고르는 열쇠다. 파일명에
+           품번이 없으면(디버그 출력물 등) 제로라인 단계가 통째로 비어 버린다 —
+           같은 그림을 파일명만 바꿔 넣어 확인했다(0개 -> 3개). 그래서
+           화면에서 고른 품번을 함께 보낸다. */
+        if (KNOWN_PARTS.includes(target.partNo)) form.append('partNo', target.partNo);
         const response = await fetch(`${API_BASE}/api/analyze`, { method: 'POST', body: form });
         const data = await response.json() as AnalysisResult & { error?: string };
         if (!response.ok) throw new Error(data.error || '분석 중 오류가 발생했습니다.');
@@ -1070,7 +1085,23 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
     <div className="page-heading"><div><span className="kicker"><Sparkles size={14} /> 실제 로컬 엔진</span><h2>스캔 이미지를 한 번에 분석하세요</h2><p>업로드한 이미지는 이 PC의 세 엔진으로 처리되며 외부 서버로 전송되지 않습니다.</p></div><div className="step-pills"><span className="done"><Check size={14} /> 1. 이미지 등록</span><span className={analyzingCount ? 'active' : ''}>2. 엔진 분석</span><span>3. 보정 시트</span></div></div>
     <div className="workspace-grid"><div className="upload-panel card"><div className="card-title"><div><h3>스캔 이미지 등록</h3><p>PNG, JPG, WEBP · 여러 파일 동시 선택 가능</p></div><span className="count-chip">{scans.length}개 등록</span></div>
       <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} /><span className="dropzone__icon"><UploadCloud size={29} /></span><b>스캔 이미지를 여기에 놓으세요</b><span>또는 클릭하여 파일 선택</span><em>여러 품번의 이미지를 동시에 올릴 수 있습니다</em></label>
-      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
+      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>
+      <select className="part-pick" aria-label={`${scan.name} 품번`}
+        value={KNOWN_PARTS.includes(scan.partNo) ? scan.partNo : ''}
+        onChange={(event) => {
+          const picked = event.target.value;
+          if (!picked) return;
+          /* 품번이 바뀌면 값의 기준(컬러바 범위)이 달라지므로 이전 결과는
+             버리고 다시 분석해야 한다. */
+          setScans((current) => current.map((item) => item.id === scan.id
+            ? { ...item, partNo: picked, status: 'ready', result: undefined, error: undefined }
+            : item));
+        }}>
+        <option value="">{scan.partNo} · 품번 미지정</option>
+        {KNOWN_PARTS.map((part) => <option key={part} value={part}>{part}</option>)}
+      </select>
+      {' · '}{scan.error || scan.size}
+    </span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
       <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '대기 이미지 전체 분석 시작'}<ArrowRight size={18} /></button>
     </div><aside className="engine-panel"><div className="card engine-overview"><div className="card-title"><div><h3>분석 엔진</h3><p>실제 연결 상태</p></div><span className={`live-dot ${backendOnline === false ? 'offline' : ''}`}>{backendOnline == null ? '확인 중' : backendOnline ? '연결됨' : '연결 안 됨'}</span></div>{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const meta = engineMeta[key]; return <div className="engine-row" key={key}><span className="engine-row__number" style={{ background: `${meta.color}16`, color: meta.color }}>0{index + 1}</span><div><b>{meta.name}</b><span>{meta.short}</span></div>{backendOnline ? <ShieldCheck size={18} color={meta.color} /> : <X size={18} color="#a2aab4" />}</div>; })}</div><div className="tip-card"><span><Gauge size={20} /></span><div><b>편차값 판독 방식</b><p>Qwen2.5-VL-3B를 RTX GPU에서 실행하며, 모델은 인터넷 없이 로컬 파일만 사용합니다.</p></div></div></aside></div>
   </section>;
@@ -1300,16 +1331,34 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange }: {
+function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad }: {
   scans: ScanItem[];
   coefficientByScan: Record<string, number>;
   hiddenPointIdsByScan: Record<string, Set<string>>;
   pointOverridesByScan: Record<string, Record<string, number>>;
   onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
+  /* 주석과 공정 구역은 App 이 들고 있는다 — 새로고침해도 남으려면 세션
+     저장소에 들어가야 하고, 그건 App 에 있다. */
+  notesByCad: Record<string, CadNote[]>;
+  setNotesByCad: React.Dispatch<React.SetStateAction<Record<string, CadNote[]>>>;
+  regionsByCad: Record<string, CadRegion[]>;
+  setRegionsByCad: React.Dispatch<React.SetStateAction<Record<string, CadRegion[]>>>;
 }) {
-  const [mesh, setMesh] = useState<CadMesh | null>(null);
+  /* CAD 를 여러 개 열어 놓고 골라 본다. 좌우 대칭품이나 공정별 형상을
+     번갈아 보려면 파일을 다시 올리게 하면 안 된다 — STEP 파싱이 실측
+     215MB 기준 42~100초다. */
+  const [meshes, setMeshes] = useState<CadMesh[]>([]);
+  const [activeCadId, setActiveCadId] = useState<string>('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [pending, setPending] = useState<string[]>([]);   // 읽는 중인 파일명
   const [error, setError] = useState<string | null>(null);
+  const mesh = useMemo(
+    () => meshes.find((m) => (m.cadId ?? m.summary.name) === activeCadId) ?? null,
+    [meshes, activeCadId]);
+  const keyOf = (item: CadMesh) => item.cadId ?? item.summary.name;
+  /* 한 번 계산한 오버레이는 들고 있는다. CAD 를 바꿔 가며 견줄 때마다
+     실루엣 정합을 다시 돌리면 몇 초씩 멈춘다. */
+  const overlayCache = useRef<Record<string, CadOverlay>>({});
   /* 홀 핀은 데이텀 볼 때만 필요하다. 기본으로 켜두면 보정량 콜아웃을
      가린다(실측 67XX6 은 홀이 180개다). */
   const [showHoles, setShowHoles] = useState(false);
@@ -1318,11 +1367,10 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   const [overlayStatus, setOverlayStatus] =
     useState<'idle' | 'loading' | 'error'>('idle');
   const [overlayError, setOverlayError] = useState<string | null>(null);
-  /* 3D 주석은 CAD 별로 들고 있는다. 시트 주석은 이미지 좌표라 3D 좌표와
-     섞을 수 없어 따로 둔다. */
-  const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
-  /* 공정 구역 — 시트의 "① : 하형 용접" 에 해당한다. CAD 별로 들고 있는다. */
-  const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
+  /* 주석·공정 구역의 열쇠는 cadId 가 아니라 **파일 이름**이다. cadId 는
+     파일을 열 때마다 새로 만드는 uuid 라 새로고침하면 짝을 잃는다.
+     스캔을 품번으로 묶는 것과 같은 이유다. */
+  const notesKey = mesh?.summary.name ?? '';
   /* 보정 후 형상 — 원본과 견줘 본다. B-Rep 이 아니라 메시를 민 것이라
      가공용이 아니고 비교용이다. */
   const [morph, setMorph] = useState<CadMorph | null>(null);
@@ -1392,7 +1440,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
           meta: {
             partNo: scan?.partNo, coefficient: sheetValues.coefficient,
             /* 시트 아래쪽 "① : 하형 용접" 줄에 그대로 들어간다. */
-            processes: (mesh?.cadId ? regionsByCad[mesh.cadId] ?? [] : [])
+            processes: (regionsByCad[notesKey] ?? [])
               .map((region, order) =>
                 `${CIRCLED[order] ?? order + 1} : ${region.die} ${region.work}`),
           },
@@ -1460,55 +1508,95 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
     if (!overlayScanId && suggested) setOverlayScanId(suggested.id);
   }, [suggested, overlayScanId]);
 
-  const requestOverlay = (scanId: string) => {
+  /* 고른 CAD 가 바뀌면 얹어 둔 스캔 결과도 그 CAD 기준으로 다시 잡는다.
+     캐시에 있으면 즉시 돌아온다. */
+  useEffect(() => {
+    setMorph(null); setMorphMode('off'); setMorphError(null);
+    if (overlayScanId) requestOverlay(overlayScanId, mesh?.cadId);
+    else setOverlay(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCadId]);
+
+  const requestOverlay = (scanId: string, forCadId?: string) => {
+    const cadId = forCadId ?? mesh?.cadId;
     setOverlayScanId(scanId);
-    setOverlay(null); setOverlayError(null);
+    setOverlayError(null);
     const scan = scans.find((s) => s.id === scanId);
     const analysisId = scan?.result?.analysisId;
-    if (!mesh?.cadId || !analysisId) return;
+    if (!cadId || !analysisId) { setOverlay(null); return; }
+    // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다
+    const cached = overlayCache.current[`${cadId}:${analysisId}`];
+    if (cached) { setOverlay(cached); setOverlayStatus('idle'); return; }
+    setOverlay(null);
     setOverlayStatus('loading');
     fetch(`${API_BASE}/api/cad-overlay`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cadId: mesh.cadId, analysisId }),
+      body: JSON.stringify({ cadId, analysisId }),
     })
       .then(async (response) => {
         const data = await response.json() as CadOverlay & { error?: string };
         if (!response.ok) throw new Error(data.error || '올리지 못했습니다.');
         return data;
       })
-      .then((data) => { setOverlay(data); setOverlayStatus('idle'); })
+      .then((data) => {
+        const scan = scans.find((item) => item.id === scanId);
+        const analysisId = scan?.result?.analysisId;
+        if (cadId && analysisId) overlayCache.current[`${cadId}:${analysisId}`] = data;
+        setOverlay(data); setOverlayStatus('idle');
+      })
       .catch((err) => {
         setOverlayError(String(err.message || err));
         setOverlayStatus('error');
       });
   };
 
-  const upload = (file: File) => {
+  /* 여러 개를 한꺼번에 받아 차례로 읽는다. 동시에 보내면 큰 STEP 두
+     개가 같은 순간 OCCT 를 물어 서버가 몇 배로 느려진다. */
+  const upload = async (files: File[]) => {
+    if (!files.length) return;
     setStatus('loading'); setError(null);
-    const body = new FormData();
-    body.append('file', file);
-    fetch(`${API_BASE}/api/cad`, { method: 'POST', body })
-      .then(async (response) => {
+    setPending(files.map((f) => f.name));
+    const failed: string[] = [];
+    for (const file of files) {
+      const body = new FormData();
+      body.append('file', file);
+      try {
+        const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body });
         const data = await response.json() as CadMesh & { error?: string };
         if (!response.ok) throw new Error(data.error || '읽지 못했습니다.');
-        return data;
-      })
-      .then((data) => {
-        setMesh(data); setStatus('idle');
-        setOverlay(null); setOverlayScanId(''); setOverlayError(null);
-      })
-      .catch((err) => { setError(String(err.message || err)); setStatus('error'); setMesh(null); });
+        setMeshes((current) => {
+          // 같은 파일을 다시 열면 갈아 끼운다 — 목록이 중복으로 불어나지
+          // 않게. 이름이 같으면 같은 파일로 본다.
+          const rest = current.filter((m) => m.summary.name !== data.summary.name);
+          return [...rest, data];
+        });
+        setActiveCadId(data.cadId ?? data.summary.name);
+      } catch (err) {
+        failed.push(`${file.name} — ${String((err as Error).message || err)}`);
+      } finally {
+        setPending((current) => current.filter((n) => n !== file.name));
+      }
+    }
+    setError(failed.length ? failed.join(' / ') : null);
+    setStatus(failed.length ? 'error' : 'idle');
+  };
+
+  /* 목록에서 뺀다. 서버 캐시는 그대로 두어도 곧 밀려난다. */
+  const closeCad = (key: string) => {
+    setMeshes((current) => {
+      const rest = current.filter((m) => keyOf(m) !== key);
+      if (key === activeCadId) setActiveCadId(rest.length ? keyOf(rest[0]) : '');
+      return rest;
+    });
   };
 
   const onPick = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) upload(file);
+    void upload(Array.from(event.target.files ?? []));
     event.target.value = '';
   };
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
-    const file = event.dataTransfer.files?.[0];
-    if (file) upload(file);
+    void upload(Array.from(event.dataTransfer.files ?? []));
   };
 
   const summary = mesh?.summary;
@@ -1522,7 +1610,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
       <button className="primary-button" onClick={() => inputRef.current?.click()}>
         3D 파일 열기 <UploadCloud size={17} />
       </button>
-      <input ref={inputRef} type="file" hidden accept=".step,.stp,.stl,.ply,.obj,.glb,.gltf,.3mf" onChange={onPick} />
+      <input ref={inputRef} type="file" hidden multiple accept=".step,.stp,.stl,.ply,.obj,.glb,.gltf,.3mf" onChange={onPick} />
     </div>
 
     <div className="cad-layout">
@@ -1538,6 +1626,24 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                   {showHoles ? <EyeOff size={14} /> : <Eye size={14} />} 홀 표시 {showHoles ? 'OFF' : 'ON'}
                 </button>}
               </div>
+              {(meshes.length > 1 || pending.length > 0) && <div className="cad-files">
+                {meshes.map((item) => {
+                  const key = keyOf(item);
+                  return <span key={key}
+                    className={`cad-files__tab${key === activeCadId ? ' cad-files__tab--on' : ''}`}>
+                    <button type="button" onClick={() => setActiveCadId(key)}
+                      title={`${item.summary.name} · 삼각형 ${item.summary.n_faces.toLocaleString()}`}>
+                      <Box size={13} /> {item.summary.name}
+                    </button>
+                    <button type="button" className="cad-files__close"
+                      aria-label={`${item.summary.name} 닫기`}
+                      onClick={() => closeCad(key)}><X size={12} /></button>
+                  </span>;
+                })}
+                {pending.map((name) => <span key={name} className="cad-files__tab cad-files__tab--wait">
+                  <button type="button" disabled><Play size={13} /> {name} 읽는 중…</button>
+                </span>)}
+              </div>}
               <div className="cad-viewer">
                 <CadViewer mesh={mesh} showHoles={showHoles} overlay={overlay}
                   sheetValues={sheetValues?.values ?? null}
@@ -1545,12 +1651,12 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
                   onCapture={(url) => setShots((current) => [...current, url])}
                   morph={morph} morphMode={morphMode}
-                  regions={mesh.cadId ? regionsByCad[mesh.cadId] ?? [] : []}
-                  onRegionsChange={(next) => mesh.cadId && setRegionsByCad(
-                    (current) => ({ ...current, [mesh.cadId!]: next }))}
-                  notes={mesh.cadId ? notesByCad[mesh.cadId] ?? [] : []}
-                  onNotesChange={(next) => mesh.cadId && setNotesByCad(
-                    (current) => ({ ...current, [mesh.cadId!]: next }))} />
+                  regions={regionsByCad[notesKey] ?? []}
+                  onRegionsChange={(next) => notesKey && setRegionsByCad(
+                    (current) => ({ ...current, [notesKey]: next }))}
+                  notes={notesByCad[notesKey] ?? []}
+                  onNotesChange={(next) => notesKey && setNotesByCad(
+                    (current) => ({ ...current, [notesKey]: next }))} />
               </div>
               <div className="viewer-legend">
                 <span>
@@ -1577,8 +1683,17 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
                 {overlay && <span className="cad-overlay-bar__note">
                   {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
                   {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
-                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px
+                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px ·
+                  {' '}제로라인 {overlay.zeroLines.length}개
                 </span>}
+                {/* 제로라인이 비어 있으면 이유를 말해 준다. 대개 품번을
+                    못 잡아서다 — 품번이 컬러바 범위를 고르는 열쇠라
+                    파일명에 품번이 없으면 이 단계가 통째로 빈다. */}
+                {overlay && overlay.zeroLines.length === 0 &&
+                  <span className="cad-overlay-bar__err">
+                    이 스캔에서 제로라인이 나오지 않았습니다 — 분석 작업실에서
+                    품번을 지정하고 다시 분석해 보세요
+                  </span>}
                 {overlay && sheetValues && <>
                   <button type="button" className="tool-button"
                     onClick={makeSheet} disabled={sheetState === 'saving'}>
@@ -1632,7 +1747,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
               {status === 'loading'
                 ? <><Play size={30} /><b>읽는 중…</b><span>큰 파일은 시간이 걸립니다.</span></>
                 : <><Box size={30} /><b>3D 파일을 여기에 놓으세요</b>
-                    <span>STEP · STL · PLY · OBJ · GLB · 3MF</span>
+                    <span>STEP · STL · PLY · OBJ · GLB · 3MF · 여러 개를 한 번에 놓아도 됩니다</span>
                     <small>CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다 — STEP(AP214)으로 내보내 주세요.</small></>}
             </div>}
       </div>
@@ -1678,7 +1793,7 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void }) {
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeepKeyPointsOnly, onShowAllPoints, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeepKeyPointsOnly: () => void; onShowAllPoints: () => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
@@ -1808,12 +1923,40 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
       <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button><button type="button" className="sheet-print" onClick={saveExcel} disabled={excelState === 'saving'}><Download size={14} /> {excelState === 'saving' ? '엑셀 만드는 중…' : '기업 양식 엑셀 저장'}</button>{excelError && <span className="sheet-excel-error">{excelError}</span>}</div>
-    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div>{(result.keyPoints?.length ?? 0) > 0 && <div className="card key-point-card">
+      <div className="card-title"><div><h3>핵심 포인트</h3>
+        <p>시트에 적을 만한 것만 골랐습니다.</p></div>
+        <span>{result.keyPoints!.length}개</span></div>
+      <p className="key-point-card__why">
+        전체 {result.points.length}개 중
+        {(result.keyPointsRejected?.length ?? 0) > 0
+          ? ` 판독 범위를 벗어난 ${result.keyPointsRejected!.length}개를 빼고,` : ''}
+        {' '}편차가 크고 주변보다 도드라지며 서로 떨어진 자리를 골랐습니다.
+      </p>
+      <div className="key-point-card__list">
+        {result.keyPoints!.slice(0, 6).map((k) => <div key={k.point_id}>
+          <b>{k.point_id}</b>
+          <span className={k.value < 0 ? 'blue' : 'orange'}>
+            {k.value > 0 ? '+' : ''}{k.value.toFixed(1)} mm</span>
+          <small>{k.reason}</small>
+        </div>)}
+        {result.keyPoints!.length > 6 &&
+          <div className="key-point-card__more">외 {result.keyPoints!.length - 6}개</div>}
+      </div>
+      <div className="key-point-card__buttons">
+        <button type="button" onClick={onKeepKeyPointsOnly}>핵심만 남기기</button>
+        <button type="button" onClick={onShowAllPoints}>전체 되돌리기</button>
+      </div>
+      <p className="key-point-card__note">
+        선별 기준은 아직 현업 확인 전입니다 — 골라낸 뒤 개별로 다시 켜고 끌 수 있습니다.
+      </p>
+    </div>}
+    <div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
   </section>;
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); /* 보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 스캔별로 위에서 들고 있는다. */ const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({});
+  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); /* 보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 스캔별로 위에서 들고 있는다. */ const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); /* 3D 주석과 공정 구역. CAD 파일 이름을 열쇠로 쓴다 — cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다. */ const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({}); const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
   /* 작업 내용을 이 PC 에 남긴다 — 새로고침으로 날아가면 안 된다.
      스캔 아이디는 파일을 다시 올릴 때마다 바뀌므로 품번으로 묶는다. */
   const [sessionNote, setSessionNote] = useState<string | null>(null);
@@ -1833,6 +1976,19 @@ export default function Home() {
   };
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
+  /* 핵심 포인트만 남긴다. 새 상태를 만들지 않고 기존 "숨김" 기능을 그대로
+     쓴다 — 그래야 시트와 3D 가 같은 것을 보고, 작업자가 개별로 다시
+     꺼낼 수도 있다. */
+  const keepKeyPointsOnly = () => {
+    if (!completedScan?.result) return;
+    const keep = new Set((completedScan.result.keyPoints ?? []).map((k) => k.point_id));
+    if (!keep.size) return;
+    setHiddenPointIdsByScan((current) => ({
+      ...current,
+      [completedScan.id]: new Set(
+        completedScan.result!.points.filter((p) => !keep.has(p.id)).map((p) => p.id)),
+    }));
+  };
   // 스캔이 새로 분석되면 제로라인을 미리 채워둔다. 우선순위는 "실제
   // 검출"이 먼저다 — referenceLine(보정시트에서 그대로 베낀 것)은 정답
   // 카피일 뿐 검출이 아니라서 기본 화면에 자동으로 깔지 않는다. 전에는
@@ -1879,8 +2035,20 @@ export default function Home() {
     if (!saved) { sessionReady.current = true; return; }
     sessionRef.current = saved;
     sessionReady.current = true;
+    /* 3D 주석·공정 구역은 CAD 파일 이름이 열쇠라 스캔을 기다릴 필요가
+       없다 — 바로 되살린다. 같은 이름의 파일을 다시 열면 붙는다. */
+    const notes: Record<string, CadNote[]> = {};
+    const regions: Record<string, CadRegion[]> = {};
+    for (const [name, entry] of Object.entries(saved.byCad ?? {})) {
+      if (entry.notes) notes[name] = entry.notes as CadNote[];
+      if (entry.regions) regions[name] = entry.regions as CadRegion[];
+    }
+    if (Object.keys(notes).length) setNotesByCad(notes);
+    if (Object.keys(regions).length) setRegionsByCad(regions);
     const parts = Object.keys(saved.byPart).length;
-    if (parts) setSessionNote(`저장된 작업 ${parts}개 품번을 불러왔습니다`);
+    const cads = Object.keys(saved.byCad ?? {}).length;
+    if (parts || cads) setSessionNote(
+      `저장된 작업을 불러왔습니다 (품번 ${parts}개${cads ? ` · 3D ${cads}개` : ''})`);
   }, []);
 
   useEffect(() => {
@@ -1924,9 +2092,23 @@ export default function Home() {
         hidden: hidden ? [...hidden] : undefined,
       };
     }
+    /* 3D 주석·공정 구역. 빈 것은 담지 않는다 — 지운 뒤에도 되살아나면
+       안 되므로, 내용이 있는 CAD 만 남긴다. */
+    snapshot.byCad = {};
+    for (const name of new Set([...Object.keys(notesByCad),
+                                ...Object.keys(regionsByCad)])) {
+      const notes = notesByCad[name] ?? [];
+      const regions = regionsByCad[name] ?? [];
+      if (!notes.length && !regions.length) continue;
+      snapshot.byCad[name] = {
+        notes: notes.length ? notes : undefined,
+        regions: regions.length ? regions : undefined,
+      };
+    }
     sessionRef.current = snapshot;
     saveSession(snapshot);
-  }, [scans, pointOverridesByScan, hiddenPointIdsByScan, coefficientByScan]);
+  }, [scans, pointOverridesByScan, hiddenPointIdsByScan, coefficientByScan,
+      notesByCad, regionsByCad]);
 
   const setPointOverrideFor = (scanId: string, id: string, value: number | null) => setPointOverridesByScan((current) => { const next = { ...(current[scanId] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [scanId]: next }; });
   const setPointOverride = (id: string, value: number | null) => { if (completedScan) setPointOverrideFor(completedScan.id, id, value); };
@@ -1958,5 +2140,5 @@ export default function Home() {
         setPointOverridesByScan({}); setHiddenPointIdsByScan({});
         setCoefficientByScan({});
         setSessionNote('작업 내용을 비웠습니다');
-      }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} />}</div></main>;
+      }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeepKeyPointsOnly={keepKeyPointsOnly} onShowAllPoints={() => setAllPointsVisible(true)} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{view === 'cad' && <CadWorkspace scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} />}</div></main>;
 }

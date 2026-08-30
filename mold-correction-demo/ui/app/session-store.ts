@@ -29,7 +29,9 @@ export type SessionSnapshot = {
     overrides?: Record<string, number>;
     hidden?: string[];
   }>;
-  /* CAD 별 — 파일 이름으로 묶는다. */
+  /* 3D 주석과 공정 구역 — CAD **파일 이름**으로 묶는다.
+     cadId 는 파일을 열 때마다 새로 만드는 uuid 라 새로고침을 못 넘긴다.
+     스캔을 스캔 아이디가 아니라 품번으로 묶는 것과 같은 이유다. */
   byCad: Record<string, {
     notes?: unknown[];
     regions?: unknown[];

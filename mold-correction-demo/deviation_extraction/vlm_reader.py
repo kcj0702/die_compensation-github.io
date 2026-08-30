@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 from collections import Counter
 from threading import Lock
 from unicodedata import normalize
 
 import torch
+
 from PIL import Image, ImageEnhance, ImageOps
 from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
 from transformers.utils.versions import require_version
@@ -85,18 +87,32 @@ class LabelValueReader:
             "local_files_only": local_files_only,
             "torch_dtype": dtype,
         }
+        # 8비트 양자화는 bitsandbytes 가 있어야 한다. 없으면 transformers 가
+        # 경고가 아니라 ImportError 를 던지고, 그러면 판독기 자체가 안 만들어져
+        # **모든 라벨이 미판독**으로 끝난다. 화면에는 "Qwen이 숫자를 판독하지
+        # 못한 라벨 127개" 만 남아서 원인이 보이지 않는다. 실제로 인터프리터를
+        # 바꿔 실행했다가 이 상태에 빠졌다.
+        #
+        # 양자화는 VRAM 을 아끼려는 것이지 판독에 필수가 아니다. 없으면
+        # 그냥 원래 정밀도로 올린다 — 느리고 메모리를 더 쓰지만 값은 읽는다.
         if self.use_8bit:
-            load_kwargs.update(
-                quantization_config=BitsAndBytesConfig(load_in_8bit=True),
-                device_map={"": self.device},
-            )
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_id, **load_kwargs
-            ).eval()
-        else:
-            self.model = AutoModelForImageTextToText.from_pretrained(
-                model_id, **load_kwargs
-            ).to(self.device).eval()
+            try:
+                self.model = AutoModelForImageTextToText.from_pretrained(
+                    model_id,
+                    **load_kwargs,
+                    quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+                    device_map={"": self.device},
+                ).eval()
+                return
+            except ImportError as exc:
+                print(f"[vlm_reader] 8비트 양자화를 쓸 수 없어 원래 정밀도로 "
+                      f"올립니다 ({exc}). VRAM 이 모자라면 "
+                      f"`pip install bitsandbytes` 하세요.", file=sys.stderr)
+                self.use_8bit = False
+
+        self.model = AutoModelForImageTextToText.from_pretrained(
+            model_id, **load_kwargs
+        ).to(self.device).eval()
 
     def read_value(self, crop: Image.Image) -> float | None:
         """생성문에서 처음 발견한 부호 있는 정수 또는 소수를 반환한다."""

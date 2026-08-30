@@ -32,7 +32,9 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.schemas import ZeroLineRegion, ZeroLineResult  # noqa: E402
 from zero_line_detection.annotations import build_annotation_mask  # noqa: E402
-from zero_line_detection.colorbar import Colorbar, detect_colorbar  # noqa: E402
+from zero_line_detection.colorbar import (  # noqa: E402
+    Colorbar, canonical_colorbar, detect_colorbar,
+)
 
 
 @dataclass
@@ -223,7 +225,22 @@ def detect_zero_line(
     h, w = rgb.shape[:2]
 
     # 1) 컬러바 -------------------------------------------------------
-    cb = detect_colorbar(rgb, vmin=cfg.vmin, vmax=cfg.vmax)
+    # 범례가 잘려 나갔거나 캡처에 안 담긴 이미지가 들어온다. 예전에는
+    # 여기서 예외가 나면 제로라인 단계 전체가 "실행 실패" 로 끝났다.
+    # 컬러바 범위를 아는 품번이면(vmin/vmax 를 받았으면) 표준 램프로
+    # 이어서 진행한다 — 정확도는 떨어지지만 아무것도 못 내는 것보다 낫다.
+    try:
+        cb = detect_colorbar(rgb, vmin=cfg.vmin, vmax=cfg.vmax)
+    except RuntimeError:
+        if cfg.vmin is None or cfg.vmax is None:
+            raise
+        cb = canonical_colorbar(cfg.vmin, cfg.vmax)
+        warnings.append(
+            f"이미지에서 컬러바를 찾지 못해 표준 무지개 램프({cfg.vmin:+.1f} ~ "
+            f"{cfg.vmax:+.1f}mm)를 기준으로 색을 값으로 옮겼습니다. 실제 범례가 "
+            "표준 램프의 일부만 쓰고 있으면 값이 어긋날 수 있으니, 범례가 "
+            "보이는 원본으로 다시 확인하세요."
+        )
 
     if cb.is_clipped and (cfg.vmin is None or cfg.vmax is None):
         lo, hi = cb.endpoint_gaps

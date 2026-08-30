@@ -330,9 +330,49 @@ def detect_colorbar(
     if best is None:
         raise RuntimeError(
             "컬러바를 찾지 못했습니다. 이미지 좌우 여백에 범례가 보이는지 확인하거나, "
-            "--no-colorbar 옵션으로 고정 색상 기준 모드를 사용하세요."
+            "품번을 지정해 고정 색상 기준(canonical_colorbar)으로 처리하세요."
         )
     return best[1]
 
 
-__all__ = ["Colorbar", "detect_colorbar"]
+def canonical_colorbar(
+    vmin: float, vmax: float, n_samples: int = 256,
+) -> Colorbar:
+    """범례 없이, 표준 무지개 램프를 기준으로 삼는 컬러바를 만든다.
+
+    [왜 필요한가]
+    범례가 잘려 나갔거나 캡처에 안 담긴 이미지가 들어온다. 그러면
+    detect_colorbar 가 예외를 던지고 제로라인 단계가 통째로 멈춘다 —
+    화면에는 "실행 실패" 만 남는다. 예전 오류 문구는 이럴 때 쓰라며
+    `--no-colorbar` 옵션을 안내했는데, 그 옵션은 어디에도 구현돼 있지
+    않았다. 이 함수가 그 자리를 메운다.
+
+    [주의 — 이건 차선책이다]
+    실제 이미지의 램프가 표준 램프의 일부만 쓰고 있으면(예: 마젠타
+    구간이 없는 컬러바) 색이 값으로 잘못 옮겨진다. 그래서 호출하는
+    쪽에서 반드시 경고를 남겨야 하고, 범례가 보이는 이미지에서는
+    detect_colorbar 를 써야 한다.
+
+    Args:
+        vmin, vmax: 컬러바 양 끝 값(mm). 품번별로 등록돼 있다
+            (simple_zero_line.PRODUCT_COLORBAR_MM).
+    """
+    # 마젠타(H=150) -> 빨강(H=0). 모듈 첫머리에 적어 둔 순서 그대로다.
+    hues = np.linspace(150, 0, n_samples, dtype=np.float32)
+    hsv = np.stack([hues,
+                    np.full(n_samples, 255, np.float32),
+                    np.full(n_samples, 255, np.float32)], axis=1)
+    colors = cv2.cvtColor(
+        hsv.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_HSV2RGB
+    ).reshape(-1, 3)
+
+    info = ColorbarInfo(
+        side="right", x0=0, x1=0, y0=0, y1=0,
+        n_samples=n_samples, vmin_at="bottom",
+        vmin=float(vmin), vmax=float(vmax),
+        symmetric=abs(float(vmin) + float(vmax)) < 1e-6,
+    )
+    return Colorbar(info=info, colors_rgb=colors, lab=_rgb_to_lab(colors))
+
+
+__all__ = ["Colorbar", "canonical_colorbar", "detect_colorbar"]
