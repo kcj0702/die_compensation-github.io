@@ -81,11 +81,23 @@ export type CadNote = { id: string; at: [number, number, number]; text: string }
  *  어느 금형(상형/하형)을 어떻게(용접/가공/심고음) 손볼지 적는다. */
 export type CadRegion = {
   id: string;
-  at: [number, number, number];
-  radius: number;
+  /* 붓으로 칠한 자국들. 끌면 여러 개가 쌓여 작업자가 원하는 모양이 된다.
+     예전에는 at + radius 하나뿐이라 클릭한 자리 둘레의 **동그라미밖에**
+     못 만들었다 — "구역이 랜덤으로 잡힌다" 는 게 그 얘기였다. */
+  stamps?: { at: [number, number, number]; radius: number }[];
   die: '상형' | '하형';
   work: '용접' | '가공' | '심고음';
+  /* 예전 형식. 저장해 둔 작업을 계속 읽으려고 남겨 둔다. */
+  at?: [number, number, number];
+  radius?: number;
 };
+
+/** 예전 형식(at+radius)과 새 형식(stamps)을 한 가지로 본다. */
+export function stampsOf(region: CadRegion) {
+  if (region.stamps?.length) return region.stamps;
+  if (region.at && region.radius) return [{ at: region.at, radius: region.radius }];
+  return [];
+}
 
 export const DIE_CHOICES: CadRegion['die'][] = ['상형', '하형'];
 export const WORK_CHOICES: CadRegion['work'][] = ['용접', '가공', '심고음'];
@@ -331,6 +343,16 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   zoneRadiusRef.current = zoneRadius;
   const notingRef = useRef(noting);
   notingRef.current = noting;
+  /* 구역 목록을 ref 로도 들고 있는다. 클릭 핸들러는 WebGL 이펙트 안에
+     있는데 그 이펙트의 의존성에 regions 가 없다. 그래서 핸들러가 처음
+     만들어질 때의 빈 목록을 계속 붙들고 있었고, 구역을 새로 찍을 때마다
+     **직전 것이 교체**됐다. 구역이 추가가 안 되던 이유다. */
+  const regionsRef = useRef(regions);
+  regionsRef.current = regions;
+  /* 지금 칠하고 있는 구역. 고르면 거기에 덧칠하고, 없으면 새로 만든다. */
+  const [activeZone, setActiveZone] = useState<string | null>(null);
+  const activeZoneRef = useRef(activeZone);
+  activeZoneRef.current = activeZone;
   const measureRef = useRef<THREE.Group | null>(null);
   const surfaceRef = useRef<THREE.Mesh | null>(null);
   const viewApi = useRef<{
@@ -958,18 +980,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       }
       setEditing(null);
 
-      if (zoningRef.current) {
-        const spot = raycaster.intersectObject(surface, false)[0];
-        if (spot) {
-          onRegionsChange?.([...(regions ?? []), {
-            id: `Z-${Date.now().toString(36)}`,
-            at: [spot.point.x, spot.point.y, spot.point.z],
-            radius: zoneRadiusRef.current * radius,
-            die: '하형', work: '용접',
-          }]);
-        }
-        return;
-      }
       if (notingRef.current) {
         const spot = raycaster.intersectObject(surface, false)[0];
         if (spot) {
@@ -994,6 +1004,67 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         .find((entry) => entry.object.userData?.hole);
       setPicked(hit ? (hit.object.userData.hole as CadHole) : null);
     };
+    // ── 공정 구역 붓 ─────────────────────────────────────────
+    // 누른 채 끌면 지나간 자리마다 자국이 찍힌다. 클릭 한 번으로 끝내면
+    // 클릭 지점 둘레의 동그라미밖에 안 나와서, 작업자가 원하는 모양을
+    // 만들 수 없었다.
+    let painting: string | null = null;
+    const stampAt = (event: PointerEvent) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      raycaster.setFromCamera(new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1), camera);
+      const spot = raycaster.intersectObject(surface, false)[0];
+      if (!spot) return;
+
+      const brush = zoneRadiusRef.current * radius;
+      const at: [number, number, number] =
+        [spot.point.x, spot.point.y, spot.point.z];
+      const current = regionsRef.current ?? [];
+      const target = painting
+        ?? activeZoneRef.current
+        ?? null;
+      const existing = current.find((r) => r.id === target);
+
+      if (existing) {
+        const stamps = stampsOf(existing);
+        const last = stamps[stamps.length - 1];
+        // 너무 촘촘하면 자국을 더 찍지 않는다 — 그리는 결과는 같은데
+        // 개수만 늘어 덮는 면을 다시 계산할 때 느려진다.
+        if (last) {
+          const dx = last.at[0] - at[0], dy = last.at[1] - at[1],
+                dz = last.at[2] - at[2];
+          if (Math.hypot(dx, dy, dz) < brush * 0.35) return;
+        }
+        painting = existing.id;
+        onRegionsChange?.(current.map((r) => r.id === existing.id
+          ? { ...r, stamps: [...stamps, { at, radius: brush }] } : r));
+        return;
+      }
+
+      const id = `Z-${Date.now().toString(36)}`;
+      painting = id;
+      setActiveZone(id);
+      onRegionsChange?.([...current, {
+        id, stamps: [{ at, radius: brush }], die: '하형', work: '용접',
+      }]);
+    };
+    const onPaintDown = (event: PointerEvent) => {
+      if (!zoningRef.current || event.button !== 0) return;
+      event.preventDefault();
+      painting = activeZoneRef.current;
+      stampAt(event);
+    };
+    const onPaintMove = (event: PointerEvent) => {
+      if (!zoningRef.current || !painting || (event.buttons & 1) === 0) return;
+      stampAt(event);
+    };
+    const onPaintUp = () => { painting = null; };
+
+    renderer.domElement.addEventListener('pointerdown', onPaintDown);
+    renderer.domElement.addEventListener('pointermove', onPaintMove);
+    window.addEventListener('pointerup', onPaintUp);
+
     renderer.domElement.addEventListener('pointerdown', onDown);
     renderer.domElement.addEventListener('pointerup', onUp);
 
@@ -1035,6 +1106,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.domElement.removeEventListener('pointerup', onButtonUp);
       renderer.domElement.removeEventListener('wheel', onWheel);
       renderer.domElement.removeEventListener('contextmenu', blockMenu);
+      renderer.domElement.removeEventListener('pointerdown', onPaintDown);
+      renderer.domElement.removeEventListener('pointermove', onPaintMove);
+      window.removeEventListener('pointerup', onPaintUp);
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
       renderer.dispose();
@@ -1090,15 +1164,33 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     if (!position || !index) return;
 
     (regions ?? []).forEach((region, order) => {
-      const centre = new THREE.Vector3(...region.at);
-      const limit = region.radius * region.radius;
+      const stamps = stampsOf(region);
+      if (!stamps.length) return;
+      const centres = stamps.map((s) => new THREE.Vector3(...s.at));
+      const limits = stamps.map((s) => s.radius * s.radius);
+
+      // 자국 전체를 감싸는 공. 이 밖의 삼각형은 자국을 하나씩 재볼
+      // 것도 없이 건너뛴다 — 삼각형이 11만 개라 이게 없으면 느리다.
+      const hull = new THREE.Vector3();
+      for (const c of centres) hull.add(c);
+      hull.divideScalar(centres.length);
+      let reach = 0;
+      for (let k = 0; k < centres.length; k += 1) {
+        reach = Math.max(reach, hull.distanceTo(centres[k]) + stamps[k].radius);
+      }
+      const reachSq = reach * reach;
+
       const keep: number[] = [];
       const a = new THREE.Vector3();
       for (let i = 0; i < index.count; i += 3) {
         const i0 = index.getX(i);
         a.set(position.getX(i0), position.getY(i0), position.getZ(i0));
-        if (a.distanceToSquared(centre) <= limit) {
-          keep.push(i0, index.getX(i + 1), index.getX(i + 2));
+        if (a.distanceToSquared(hull) > reachSq) continue;
+        for (let k = 0; k < centres.length; k += 1) {
+          if (a.distanceToSquared(centres[k]) <= limits[k]) {
+            keep.push(i0, index.getX(i + 1), index.getX(i + 2));
+            break;
+          }
         }
       }
       if (keep.length) {
@@ -1115,7 +1207,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const tag = makeZoneLabel(
         `${CIRCLED[order] ?? order + 1} ${region.die} ${region.work}`,
         scale * 0.042);
-      tag.position.copy(centre).add(new THREE.Vector3(0, 0, region.radius * 1.1));
+      // 이름표는 칠한 자리 한가운데 위에 띄운다
+      tag.position.copy(hull).add(new THREE.Vector3(0, 0, reach * 1.1));
       tag.renderOrder = 14;
       root.add(tag);
     });
@@ -1371,8 +1464,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
             onChange={(event) => setZoneRadius(Number(event.target.value))} />
         </div>
         {(regions ?? []).map((region, order) => (
-          <div key={region.id} className="cad-viewer__zone">
-            <b>{CIRCLED[order] ?? order + 1}</b>
+          <div key={region.id}
+            className={`cad-viewer__zone${region.id === activeZone ? ' is-active' : ''}`}>
+            {/* 번호를 누르면 그 구역에 덧칠한다. 안 고르면 새 구역이 된다. */}
+            <button type="button" className="cad-viewer__zone-pick"
+              title={region.id === activeZone ? '덧칠 중' : '이 구역에 덧칠'}
+              onClick={() => setActiveZone(
+                region.id === activeZone ? null : region.id)}>
+              {CIRCLED[order] ?? order + 1}
+            </button>
             <select value={region.die} aria-label="금형"
               onChange={(event) => onRegionsChange?.((regions ?? []).map((other) =>
                 other.id === region.id
@@ -1388,11 +1488,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
               {WORK_CHOICES.map((name) => <option key={name}>{name}</option>)}
             </select>
             <button type="button" aria-label={`구역 ${order + 1} 삭제`}
-              onClick={() => onRegionsChange?.(
-                (regions ?? []).filter((other) => other.id !== region.id))}>×</button>
+              onClick={() => {
+                if (region.id === activeZone) setActiveZone(null);
+                onRegionsChange?.(
+                  (regions ?? []).filter((other) => other.id !== region.id));
+              }}>×</button>
           </div>
         ))}
-        {!(regions ?? []).length && <p>형상을 눌러 구역을 만드세요</p>}
+        {(regions ?? []).length > 0 && (
+          <button type="button" className="cad-viewer__zone-new"
+            onClick={() => setActiveZone(null)}
+            disabled={activeZone === null}>
+            + 새 구역으로 칠하기
+          </button>
+        )}
+        <p>{activeZone
+          ? '고른 구역에 덧칠합니다 — 번호를 다시 누르면 해제됩니다'
+          : '형상 위를 누른 채 끌어서 칠하세요. 놓았다 다시 끌면 새 구역입니다'}</p>
       </div>
     )}
 

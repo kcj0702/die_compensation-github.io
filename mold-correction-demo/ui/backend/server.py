@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import uuid
 from collections import OrderedDict
@@ -125,6 +126,47 @@ _reader_lock = threading.Lock()
 # VLM 라벨 판독도 다시 안 돌리려는 목적.
 _analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _ANALYSIS_CACHE_MAX = 5
+
+
+# 라벨 판독 결과 캐시.
+#
+# [왜 필요한가 — 실측]
+# JD_67XX6 한 장을 분석하는 데 812초가 걸리는데 그중 **739초(96%)가
+# Qwen 숫자 판독**이다. 나머지 전부 합쳐도 8초다(라벨 검출 0.3 · 라벨
+# 지우기 3.6 · 컬러바 4.2).
+#
+# 그런데 Qwen 이 하는 일은 **라벨에 적힌 글자를 읽는 것**뿐이다.
+# `-1.4` 는 품번이 뭐든 `-1.4` 다. 품번은 컬러바 범위(색->mm)와 제로라인
+# 파라미터만 바꾼다. 그래서 같은 그림을 다시 분석할 때 — 품번을 고쳐
+# 다시 돌릴 때가 특히 그렇다 — 739초를 그대로 또 쓸 이유가 없다.
+#
+# 열쇠는 **잘라낸 라벨 그림 자체**의 해시다. 파일 이름이나 크기가 아니라
+# 내용으로 잡아야 같은 라벨을 알아본다.
+_MISSING = object()          # 캐시에 없음과 '읽었는데 None' 을 가른다
+_label_cache: "OrderedDict[str, float | None]" = OrderedDict()
+_LABEL_CACHE_MAX = 4000        # 부품 한 장이 라벨 130여 개다
+
+
+def _crop_key(crop) -> str:
+    """잘라낸 라벨 그림의 내용 해시."""
+    import hashlib
+
+    return hashlib.blake2b(
+        np.asarray(crop, dtype=np.uint8).tobytes(), digest_size=16
+    ).hexdigest()
+
+
+def reset_label_cache() -> None:
+    """판독 캐시를 비운다. 테스트가 서로 영향을 주지 않게 하는 용도다."""
+    _label_cache.clear()
+
+
+def _remember_labels(keys: list[str], values: list) -> None:
+    for key, value in zip(keys, values):
+        _label_cache[key] = value
+        _label_cache.move_to_end(key)
+    while len(_label_cache) > _LABEL_CACHE_MAX:
+        _label_cache.popitem(last=False)
 
 
 _cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -322,6 +364,21 @@ def analyze_image(image: np.ndarray, filename: str,
     """
     height, width = image.shape[:2]
     errors: dict[str, str] = {}
+    # 단계별 소요 시간. "왜 이렇게 오래 걸리나" 를 짐작이 아니라 숫자로
+    # 답하려는 것이다. 따로 프로파일러를 띄우면 이 서버와 GPU 를 두고
+    # 다퉈 값이 왜곡된다 — 실제로 그렇게 재다가 13분을 버렸다.
+    spent: dict[str, float] = {}
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _timed(label: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            spent[label] = round(spent.get(label, 0.0)
+                                 + time.perf_counter() - start, 2)
     # 품번을 먼저 정한다 — 컬러바 검출이 실패했을 때 대신 쓸 범위를
     # 고르는 데 필요하다(zero_line.detect_zero_line 의 대체 경로).
     part_key = (part_no or "").strip().upper() or part_no_from_name(filename)
@@ -333,8 +390,10 @@ def analyze_image(image: np.ndarray, filename: str,
     clean_image: np.ndarray | None = None
     label_count = 0
     try:
-        label_count = len(detect_label_boxes(image))
-        clean_image = create_versions(image)["2_labels_inpainted"]
+        with _timed("라벨 박스 검출"):
+            label_count = len(detect_label_boxes(image))
+        with _timed("라벨 지우기"):
+            clean_image = create_versions(image)["2_labels_inpainted"]
     except Exception as exc:  # engine errors must be shown per engine
         errors["label"] = str(exc)
 
@@ -346,14 +405,15 @@ def analyze_image(image: np.ndarray, filename: str,
     zero_output = None
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        zero_output = detect_zero_line(
-            rgb,
-            # PRODUCT_COLORBAR_MM 은 (위, 아래) = (vmax, vmin) 순서다
-            ZeroLineConfig(
-                vmax=part_span[0] if part_span else None,
-                vmin=part_span[1] if part_span else None,
-            ),
-            source_name=filename)
+        with _timed("컬러바+제로영역"):
+            zero_output = detect_zero_line(
+                rgb,
+                # PRODUCT_COLORBAR_MM 은 (위, 아래) = (vmax, vmin) 순서다
+                ZeroLineConfig(
+                    vmax=part_span[0] if part_span else None,
+                    vmin=part_span[1] if part_span else None,
+                ),
+                source_name=filename)
     except Exception as exc:
         errors["zero"] = str(exc)
 
@@ -400,11 +460,26 @@ def analyze_image(image: np.ndarray, filename: str,
         qwen_values: list[float | None] = [None] * len(crops)
         qwen_failure: str | None = None
         if crops:
-            try:
-                reader = _get_qwen_reader()
-                qwen_values, qwen_failure = _read_qwen_values(reader, crops)
-            except Exception as exc:
-                qwen_failure = str(exc)
+            # 이미 읽어 본 라벨은 다시 읽지 않는다
+            keys = [_crop_key(crop) for crop in crops]
+            cached = [_label_cache.get(key, _MISSING) for key in keys]
+            todo = [i for i, value in enumerate(cached) if value is _MISSING]
+            spent["판독 재사용"] = len(crops) - len(todo)
+            if todo:
+                try:
+                    with _timed("Qwen 모델 적재"):
+                        reader = _get_qwen_reader()
+                    with _timed("Qwen 숫자 판독"):
+                        fresh, qwen_failure = _read_qwen_values(
+                            reader, [crops[i] for i in todo])
+                    _remember_labels([keys[i] for i in todo], fresh)
+                    for slot, value in zip(todo, fresh):
+                        cached[slot] = value
+                except Exception as exc:
+                    qwen_failure = str(exc)
+                    for slot in todo:
+                        cached[slot] = None
+            qwen_values = [None if v is _MISSING else v for v in cached]
 
         for candidate, qwen_value in zip(valid_candidates, qwen_values):
             x, y = candidate.point_xy
@@ -739,6 +814,7 @@ def analyze_image(image: np.ndarray, filename: str,
         "analysisId": analysis_id,
         "partNo": part_key,
         "naming": naming.to_dict(),
+        "timings": spent,
         "keyPoints": [k.to_dict() for k in key_points],
         "keyPointsRejected": key_rejected,
         "knownParts": sorted(PRODUCT_COLORBAR_MM),

@@ -98,6 +98,10 @@ class UiBackendModelDiscoveryTest(unittest.TestCase):
 class UiBackendStrictReadingTest(unittest.TestCase):
     def setUp(self) -> None:
         backend_server._reader = None
+        # 판독 캐시는 모듈 전역이라 테스트 사이에 넘어간다. 같은 합성
+        # 이미지를 쓰는 테스트가 앞 테스트의 값을 읽어 버려 스텁이 아예
+        # 안 불리는 일이 생긴다 — 실제로 10건이 그렇게 깨졌다.
+        backend_server.reset_label_cache()
         self.image = np.full((80, 120, 3), 180, dtype=np.uint8)
         self.candidates = [
             _candidate((5, 5, 30, 16), (50, 40)),
@@ -106,6 +110,7 @@ class UiBackendStrictReadingTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         backend_server._reader = None
+        backend_server.reset_label_cache()
 
     def _analyze_with_reader(self, reader, *, scan_present: bool = True) -> dict:
         reader_patch = (
@@ -280,6 +285,9 @@ class UiBackendStrictReadingTest(unittest.TestCase):
     def test_nonfinite_or_malformed_value_does_not_discard_valid_point(self) -> None:
         for invalid_value in (float("nan"), float("inf"), "not-a-number"):
             with self.subTest(invalid_value=invalid_value):
+                # 세 번 다 같은 그림을 쓰므로 판독 캐시가 첫 결과를
+                # 돌려준다. 값마다 따로 확인하려면 매번 비워야 한다.
+                backend_server.reset_label_cache()
                 result = self._analyze_with_reader(_Reader([invalid_value, -0.5]))
 
                 self.assertEqual(len(result["points"]), 1)
