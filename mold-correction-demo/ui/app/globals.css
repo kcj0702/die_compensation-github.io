@@ -640,3 +640,9 @@ button { cursor: pointer; }
 .cad-viewer__zone-pick { padding: 0 5px !important; border: 0 !important; background: transparent !important; color: inherit !important; font-weight: 700; cursor: pointer; }
 .cad-viewer__zone.is-active .cad-viewer__zone-pick { color: #ffbfe0 !important; }
 .cad-viewer__zone-new { width: 100%; margin-top: 4px; }
+
+/* 우측 보조 표시 열 — 컬러바와 범례가 서로 겹치지 않게 한 열로 쌓는다 */
+.cad-viewer__side { position: absolute; right: 12px; top: 52px; bottom: 52px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; z-index: 2; pointer-events: none; overflow: hidden; }
+.cad-viewer__side > * { pointer-events: auto; }
+.cad-viewer__side .cad-viewer__bar { position: static; }
+.cad-viewer__side .cad-viewer__legend { position: static; margin-top: auto; }

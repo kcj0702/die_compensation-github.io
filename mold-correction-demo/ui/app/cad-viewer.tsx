@@ -401,6 +401,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     renderer.localClippingEnabled = true;
     // 금속은 밝은 곳을 반사해야 형태가 읽힌다. 톤매핑 없이 두면
     // 반사 하이라이트가 흰색으로 다 타버린다.
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.8;
     mount.appendChild(renderer.domElement);
@@ -438,7 +440,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const deviations = overlay?.surfaceDeviation;
     const range = overlay?.deviationRange;
     let painted = false;
-    if (showHeat && deviations && deviations.length === mesh.positions.length / 3) {
+    // 정합이 나쁘면(겹침 75% 미만) 칠하지 않는다. 51% 정합으로 편차색을
+    // 입혔더니 엉뚱한 자리에 빨간 조각이 흩어져 "형상이 깨졌다" 는 인상을
+    // 줬다 — 틀린 그림을 그럴듯하게 보여주는 것이 제일 나쁘다.
+    if (showHeat && overlay?.fit.reliable && deviations
+        && deviations.length === mesh.positions.length / 3) {
       const span = Math.max(
         Math.abs(range?.[0] ?? -1), Math.abs(range?.[1] ?? 1), 0.01);
       const colours = new Float32Array(deviations.length * 3);
@@ -510,6 +516,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       material.transparent = true;
       material.opacity = 0.28;
     }
+    surface.castShadow = true;
+    surface.receiveShadow = true;
     scene.add(surface);
     solidMesh.current = surface;
     surfaceRef.current = surface;
@@ -613,7 +621,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // ── 스캔에서 옮겨온 것들 (제로라인·보정량) ───────────────
     const overlayRoot = new THREE.Group();
     const labelPicks: THREE.Sprite[] = [];
-    if (overlay) {
+    if (overlay?.fit.reliable) {
       // 제로라인 — **표면 자체를 칠한다.**
       //
       // 예전에는 3D 공간에 관(tube)을 띄웠다. 곡면 위를 지나가면 형상에서
@@ -818,13 +826,27 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     //
     // 환경맵은 고루 퍼진 빛이라 형태를 못 만든다. 형태는 주광 하나가
     // 만든다 — 그래서 반구와 보조는 색만 얹는 정도로 낮추고 주광을 남긴다.
-    scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 0.15));
-    const key = new THREE.DirectionalLight(0xffffff, 0.75);
+    // team-15 뷰어(frontend/threejs/viewer.js)의 조명 구성을 가져왔다.
+    // 그쪽이 깔끔해 보이는 건 밝기가 아니라 **그림자와 림 라이트**다 —
+    // 그림자가 면과 면을 가르고, 뒤에서 치는 림이 윤곽을 세워 준다.
+    // 밝기 자체는 우리 화면(어두운 배경 + 환경맵)에 맞게 낮췄다.
+    scene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.3));
+    const key = new THREE.DirectionalLight(0xffffff, 0.85);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    const cam = key.shadow.camera;
+    cam.left = cam.bottom = -radius * 1.4;
+    cam.right = cam.top = radius * 1.4;
+    cam.near = radius * 0.5;
+    cam.far = radius * 8;
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0x9fc4e0, 0.25);
+    const fill = new THREE.DirectionalLight(0x93c5fd, 0.3);
     fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
     scene.add(fill);
+    const rim = new THREE.DirectionalLight(0xf8fafc, 0.4);
+    rim.position.set(-0.4, 0.3, -1.4).multiplyScalar(radius * 3);
+    scene.add(rim);
 
     // ── 카메라 ───────────────────────────────────────────────
     // 감춰진 채로 만들어지면 mount 크기가 0 이라 0/0 = NaN 이 되고
@@ -1409,7 +1431,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         }}>시트에 담기</button>}
     </div>
 
-    {overlay && showHeat && overlay.deviationRange && (
+    {/* 우측 보조 표시들. 예전엔 컬러바(top:52)와 범례(bottom:12)가 각자
+        absolute 라 화면이 낮으면 서로 겹치고 밖으로 삐져나왔다. 한 열로
+        쌓아 겹칠 수 없게 한다. */}
+    <div className="cad-viewer__side">
+    {overlay && showHeat && overlay.fit.reliable && overlay.deviationRange && (
       <div className="cad-viewer__bar">
         <span>{overlay.deviationRange[1].toFixed(1)}</span>
         <i />
@@ -1421,7 +1447,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       </div>
     )}
 
-    {overlay && showOverlay && overlay.points.length > 0 && (
+    {overlay && showOverlay && overlay.fit.reliable && overlay.points.length > 0 && (
       <div className="cad-viewer__legend">
         <span><i style={{ background: '#ffef3a' }} />보정량 (mm)</span>
         <span><i style={{ background: '#e01b1b' }} />보정 지점과 지시선</span>
@@ -1429,6 +1455,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         <small>보정시트와 같은 표기입니다</small>
       </div>
     )}
+    </div>
 
     <div className="cad-viewer__hud">
       <div className="cad-viewer__seg" role="group" aria-label="표시 방식">
@@ -1622,8 +1649,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
     {overlay && !overlay.fit.reliable && (
       <p className="cad-viewer__warn">
-        CAD 겉모양과 스캔이 {Math.round(overlay.fit.iou * 100)}% 만 겹칩니다.
-        위치가 어긋날 수 있어 참고용으로만 보세요.
+        CAD 겉모양과 스캔이 {Math.round(overlay.fit.iou * 100)}% 만 겹쳐
+        제로라인·보정량·편차색을 형상에 얹지 않았습니다 (기준 75%).
+        틀린 자리에 그리는 것보다 안 그리는 쪽을 택했습니다 —
+        이 부품은 "시트 단면 표기" 로 제로라인을 계산해 주세요.
       </p>
     )}
   </>;

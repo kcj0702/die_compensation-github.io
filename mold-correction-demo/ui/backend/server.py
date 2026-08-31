@@ -1234,8 +1234,11 @@ def sheet_excel_for(analysis_id: str, corrections: dict,
             shot = None
         if shot is not None:
             pages.append(shot)
-    if not pages:
-        pages = [draw_sheet_image(base_bgr, points)]
+    # 1쪽은 **항상** 스캔에 보정치를 그린 전체도다. 예전에는 3D 화면을
+    # 담아 두면 그걸로 1쪽을 통째로 대체해서, 정합이 어긋난 CAD 캡처
+    # 한 장이 시트가 됐다 — "71XX2 로 만들었는데 다른 제품이 나온다" 는
+    # 말이 그것이었다. 현업 시트도 전체도가 먼저고 상세도가 뒤따른다.
+    pages = [draw_sheet_image(base_bgr, points)] + pages
 
     return build_workbook(
         pages, points,
