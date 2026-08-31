@@ -1175,6 +1175,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     }
   }, [measure]);
 
+  /* 전체화면. 브라우저 기본 기능이라 따로 만들 게 없다 — 나갈 때는
+     Esc 다. 화면 크기가 바뀌면 ResizeObserver 가 카메라를 다시 맞춘다. */
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const onChange = () => setFull(document.fullscreenElement != null);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+  const toggleFull = () => {
+    const box = mountRef.current?.parentElement;
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else void box?.requestFullscreen?.();
+  };
+
   const goToView = (dir: [number, number, number]) => {
     viewApi.current?.frame(new THREE.Vector3(...dir));
   };
@@ -1210,6 +1224,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   return <>
     <div ref={mountRef} className="cad-viewer__stage" />
 
+    {/* 아래쪽 조작부는 한 덩어리로 쌓는다. 예전에는 단면 슬라이더를
+        bottom:52px 로 못 박아 뒀는데, 아래 버튼 줄이 두 줄로 접히면
+        그 위로 겹쳐 올라와 둘 다 누르기 어려웠다. */}
+    <div className="cad-viewer__controls">
     <div className="cad-viewer__section">
       <label htmlFor="cad-clip">단면</label>
       <input id="cad-clip" type="range" min={-1} max={1} step={0.01}
@@ -1229,6 +1247,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           {view.label}
         </button>
       ))}
+      <button type="button" onClick={toggleFull}
+        title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
+        {full ? '축소' : '확대'}
+      </button>
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장
       </button>
@@ -1316,6 +1338,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           : measuring ? '형상 위 두 곳을 눌러 거리를 잽니다'
           : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택 · 콜아웃 눌러 수정'}
       </span>
+    </div>
     </div>
 
     {noteDraft && (

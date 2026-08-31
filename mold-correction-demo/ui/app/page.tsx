@@ -2035,7 +2035,14 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     setAnnotations((current) => current.map((item) => item.id === selectedAnnotationId ? { ...item, color: hex } : item));
   };
   const displayFor = (point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient);
-  const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [coefficient, points, pointOverrides]);
+  /* 시트에 실제로 실린 포인트만 센다. 예전에는 숨긴 것까지 포함해서,
+     핵심 15개만 남겨 놓고도 "최대 보정량 9.000mm" 처럼 시트에 없는 값이
+     떴다 — 그 9.0 은 컬러바 범위(+-3.0)를 벗어난 판독 오류였다. */
+  const maxCorrection = useMemo(() => {
+    const shown = points.filter((point) => visiblePointIds.has(point.id));
+    return shown.length
+      ? Math.max(...shown.map((point) => Math.abs(displayFor(point)))) : 0;
+  }, [coefficient, points, pointOverrides, visiblePointIds]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
   const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
   return <section className="page page--service">

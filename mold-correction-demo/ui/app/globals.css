@@ -128,7 +128,7 @@ button { cursor: pointer; }
 .cad-viewer__stage{position:absolute;inset:0;cursor:grab}
 .cad-viewer__stage:active{cursor:grabbing}
 .cad-viewer__stage canvas{display:block;width:100%;height:100%;touch-action:none}
-.cad-viewer__hud{position:absolute;left:12px;bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;z-index:2}
+.cad-viewer__hud{display:flex;flex-wrap:wrap;gap:8px;align-items:center;z-index:2}
 .cad-viewer__hud button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;letter-spacing:.02em;cursor:pointer;backdrop-filter:blur(6px)}
 .cad-viewer__hud button:hover{border-color:rgba(255,255,255,.4);color:#eaf2f8}
 .cad-viewer__hud button:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
@@ -525,7 +525,7 @@ button { cursor: pointer; }
 .cad-viewer__bar-low{order:3}
 .cad-viewer__bar small{color:#7d90a2;font-size:8px;letter-spacing:.03em}
 
-.cad-viewer__section{position:absolute;left:12px;bottom:52px;display:flex;align-items:center;gap:8px;padding:6px 11px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__section{display:flex;align-items:center;gap:8px;padding:6px 11px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
 .cad-viewer__section label{color:#c6d4e0;font-size:9px;font-weight:600}
 .cad-viewer__section input{width:118px;accent-color:#6fb4e8}
 .cad-viewer__section span{min-width:44px;color:#8fa3b4;font-size:8.5px;font-variant-numeric:tabular-nums}
@@ -620,3 +620,17 @@ button { cursor: pointer; }
 .cad-section-bar select { height: 28px; border: 1px solid #bfe3cf; border-radius: 6px; background: white; font-size: 10px; }
 .cad-section-bar__ok { color: #1d7d64; font-size: 10px; font-weight: 600; }
 .cad-section-bar__note { color: #7d9a8b; font-size: 9px; }
+
+/* 아래쪽 조작부 — 단면 슬라이더와 버튼 줄을 한 흐름에 쌓는다.
+   예전에는 둘 다 absolute 라 버튼이 두 줄로 접히면 서로 겹쳤다. */
+.cad-viewer__controls { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 7px; z-index: 2; pointer-events: none; }
+.cad-viewer__controls > * { pointer-events: auto; }
+.cad-viewer__section { align-self: flex-start; }
+/* 전체화면일 때도 배경이 비치지 않게 */
+.cad-viewer:fullscreen, .cad-viewer:-webkit-full-screen { background: #16202a; }
+
+/* 제로라인·도형 겹침층 — 형제들(.zero-zone-overlay 등)에는 있는데 이 둘만
+   규칙이 없었다. 그래서 SVG 가 그려져도 자리를 못 잡아 화면에 안 보였다.
+   시트의 "제로라인" 단추가 눌러도 아무 일 없던 진짜 이유다. */
+.simple-zero-line-overlay { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 6; pointer-events: none; }
+.approved-profile-overlay { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 5; pointer-events: none; }
