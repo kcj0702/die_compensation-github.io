@@ -808,6 +808,9 @@ def analyze_image(image: np.ndarray, filename: str,
             "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
             "deviation_points": points,
             "part_no": part_key,
+            # 시트에 등록된 제로 표기. 67XX6 은 선이 아니라 **영역**이라
+            # 3D 에서도 면으로 칠해야 한다.
+            "zero_reference": reference_line,
         })
 
     return {
@@ -1091,11 +1094,16 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
 
     fit = ov.fit_view(vertices, faces, analysis["part_mask"])
 
+    # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
+    # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
     lines = []
+    dropped_line_points = 0
     for line in analysis.get("simple_zero_lines", []):
         placed = ov.unproject(line["points"], vertices, faces, fit, shifted)
-        if placed:
-            lines.append({"line_id": line.get("line_id"), "points": placed})
+        kept = [spot for spot in placed if spot is not None]
+        dropped_line_points += len(placed) - len(kept)
+        if len(kept) >= 2:
+            lines.append({"line_id": line.get("line_id"), "points": kept})
 
     # 컬러바 범위 밖의 값은 판독 오류다. 실측(JD_67XX6, 컬러바 +3.0~-3.0)
     # 에서 +9.00 이 5건 나왔다. 3D 에 얹으면 화살표 길이 기준을 잡아먹어
@@ -1119,12 +1127,40 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     points = [
         {"id": point.get("id"), "position": spot,
          "value": round(float(point.get("value", 0.0)), 3)}
-        for point, spot in zip(wanted, placed)
+        for point, spot in zip(wanted, placed) if spot is not None
     ]
+    dropped_points = sum(1 for spot in placed if spot is None)
+
+    # ── 제로라인을 표면에 칠할 도장 ──────────────────────────
+    # 3D 공간에 관(tube)으로 띄우면 곡면 위에서 형상과 떠서 "선을 얹은
+    # 느낌" 이 난다. 표면 자체를 칠하면 굴곡을 그대로 따라간다.
+    #   1 = 선(띠)   2 = 영역
+    display = cad_entry.get("display_vertices")
+    stencil = np.zeros(analysis["part_mask"].shape, np.uint8)
+    reference = analysis.get("zero_reference") or {}
+    for contour in (reference.get("contours") or []):
+        pts = np.rint(np.asarray(contour, dtype=float)).astype(np.int32)
+        if len(pts) >= 3:
+            cv2.fillPoly(stencil, [pts], 2)
+    line_sources = []
+    if reference.get("kind") == "line" and reference.get("points"):
+        line_sources.append(reference["points"])
+    if not line_sources:
+        line_sources = [l["points"] for l in analysis.get("simple_zero_lines", [])]
+    # 띠 두께는 부품 크기에 맞춘다 — 고정 픽셀이면 큰 스캔에서 실오라기가 된다
+    band = max(int(round(min(stencil.shape) * 0.012)), 3)
+    for pts in line_sources:
+        arr = np.rint(np.asarray(pts, dtype=float)).astype(np.int32)
+        if len(arr) >= 2:
+            cv2.polylines(stencil, [arr], False, 1, band)
+
+    zero_surface: list = []
+    if display is not None and stencil.any():
+        zero_surface = ov.sample_flags(
+            np.asarray(display, dtype=float), fit, stencil)
 
     # 표면에 입힐 편차 — 화면용 정점 하나하나에 스캔 값을 찍는다.
     surface = []
-    display = cad_entry.get("display_vertices")
     if display is not None:
         surface = ov.sample_deviation(
             np.asarray(display, dtype=float), fit,
@@ -1132,6 +1168,10 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
 
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
+            "zeroSurface": zero_surface,
+            "zeroKind": reference.get("kind") or "line",
+            "droppedPoints": dropped_points,
+            "droppedLinePoints": dropped_line_points,
             "colorbarLimit": round(limit, 2) if limit else None,
             "scanPart": scan_part_for_cad(cad_entry.get("name", "")),
             "surfaceDeviation": surface,

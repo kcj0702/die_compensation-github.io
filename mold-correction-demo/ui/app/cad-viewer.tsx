@@ -43,6 +43,10 @@ export type CadOverlay = {
     mm_per_px: number; iou: number; reliable: boolean;
   };
   zeroLines: { line_id: number | null; points: [number, number, number][] }[];
+  /* 정점마다 0 = 아님 · 1 = 제로라인(띠) · 2 = 제로 영역.
+     선을 공간에 띄우는 대신 **표면을 칠한다** — 곡면을 그대로 따라간다. */
+  zeroSurface?: number[];
+  zeroKind?: string;
   /* 위치만 준다. 보정량은 최종 보정시트가 정하므로 화면이 넣는다. */
   points: { id: string; position: [number, number, number]; value: number }[];
   scanPart?: string | null;
@@ -398,7 +402,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 금속은 밝은 곳을 반사해야 형태가 읽힌다. 톤매핑 없이 두면
     // 반사 하이라이트가 흰색으로 다 타버린다.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 0.8;
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -492,9 +496,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : SURFACE,
       vertexColors: painted,
-      metalness: painted ? 0.05 : 0.25,
-      roughness: painted ? 0.8 : 0.5,
-      envMapIntensity: painted ? 0.35 : 1.0,
+      metalness: painted ? 0.05 : 0.15,
+      roughness: painted ? 0.85 : 0.62,
+      // 환경맵을 세게 주면 판넬이 하얗게 번진다. 형태는 주광이 만든다.
+      envMapIntensity: painted ? 0.25 : 0.45,
       side: THREE.DoubleSide, flatShading: false,
       clippingPlanes: [clipPlane],
     }));
@@ -609,17 +614,49 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const overlayRoot = new THREE.Group();
     const labelPicks: THREE.Sprite[] = [];
     if (overlay) {
-      // 제로라인 — 표면에 살짝 띄워 z-파이팅을 피한다
-      const lift = radius * 0.006;   // 형상에 묻히지 않게 굵게
-      for (const line of overlay.zeroLines || []) {
-        if (!line.points?.length) continue;
-        const pts = line.points.map(([x, y, z]) => new THREE.Vector3(x, y, z));
-        const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
-        const tube = new THREE.Mesh(
-          new THREE.TubeGeometry(curve, Math.max(pts.length * 4, 32), lift, 6, false),
-          new THREE.MeshBasicMaterial({ color: ZERO_TINT }),
-        );
-        overlayRoot.add(tube);
+      // 제로라인 — **표면 자체를 칠한다.**
+      //
+      // 예전에는 3D 공간에 관(tube)을 띄웠다. 곡면 위를 지나가면 형상에서
+      // 떠서 "선을 얹은 느낌" 이 났고, 부품 뒤로 파고들기도 했다. 표면을
+      // 칠하면 굴곡을 그대로 따라간다 — 칠하는 대상이 곧 그 곡면이다.
+      //
+      // 부품에 따라 시트가 제로를 선으로도, 면으로도 표기한다.
+      // 실측 64XX2 는 선("0" LINE), 67XX6 은 영역("0" 라인 빗금)이다.
+      const stencil = overlay.zeroSurface;
+      const zeroIndex = geometry.getIndex();
+      if (stencil?.length && zeroIndex) {
+        const keep: number[] = [];
+        for (let i = 0; i < zeroIndex.count; i += 3) {
+          const a = zeroIndex.getX(i), b = zeroIndex.getX(i + 1),
+                c = zeroIndex.getX(i + 2);
+          // 세 꼭짓점 중 둘 이상이 도장 안이면 그 삼각형을 칠한다.
+          // 하나만으로 하면 경계가 지저분하게 번진다.
+          const hits = (stencil[a] ? 1 : 0) + (stencil[b] ? 1 : 0)
+                     + (stencil[c] ? 1 : 0);
+          if (hits >= 2) keep.push(a, b, c);
+        }
+        if (keep.length) {
+          const patch = geometry.clone();
+          patch.setIndex(keep);
+          patch.computeBoundingSphere();
+          const skin = new THREE.Mesh(patch, new THREE.MeshBasicMaterial({
+            color: ZERO_TINT, transparent: true, opacity: 0.85,
+            side: THREE.DoubleSide, depthWrite: false,
+            polygonOffset: true, polygonOffsetFactor: -2,
+          }));
+          skin.renderOrder = 7;
+          overlayRoot.add(skin);
+
+          // 무엇인지 적어 준다 — 빨간 면만 있으면 편차 색과 헷갈린다
+          const seat = patch.boundingSphere?.center ?? new THREE.Vector3();
+          const spread = patch.boundingSphere?.radius ?? radius * 0.1;
+          const tag = makeZoneLabel(
+            overlay.zeroKind === 'areas' ? '제로라인 (영역)' : '제로라인',
+            radius * 0.04);
+          tag.position.copy(seat).add(new THREE.Vector3(0, 0, spread * 0.9));
+          tag.renderOrder = 15;
+          overlayRoot.add(tag);
+        }
       }
 
       // 보정량 — 표면에서 화살표를 세우고 값을 붙인다.
@@ -774,11 +811,18 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     }
 
     // ── 조명 ─────────────────────────────────────────────────
-    scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 1.15));
-    const key = new THREE.DirectionalLight(0xffffff, 1.5);
+    // 환경맵을 넣기 전에는 이 세 개가 장면을 통째로 밝히고 있었다
+    // (반구 1.15 · 주광 1.5 · 보조 0.7). 환경맵이 그 일을 대신하게 됐는데
+    // 값을 그대로 두는 바람에 빛이 두 번 더해져 판넬이 **하얗게 날아갔다**.
+    // 어두워서 안 보이던 게 이번엔 밝아서 안 보였다.
+    //
+    // 환경맵은 고루 퍼진 빛이라 형태를 못 만든다. 형태는 주광 하나가
+    // 만든다 — 그래서 반구와 보조는 색만 얹는 정도로 낮추고 주광을 남긴다.
+    scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 0.15));
+    const key = new THREE.DirectionalLight(0xffffff, 0.75);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0x9fc4e0, 0.7);
+    const fill = new THREE.DirectionalLight(0x9fc4e0, 0.25);
     fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
     scene.add(fill);
 
@@ -981,13 +1025,24 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       setEditing(null);
 
       if (notingRef.current) {
+        // 형상 위면 그 자리에, **빈 공간이면 부품 중심을 지나는 평면
+        // 위**에 찍는다. 예전에는 형상에 맞아야만 찍혀서 여백에 메모를
+        // 달 수가 없었다 — 시트는 여백에 지시문을 적는데 3D 는 못 했다.
         const spot = raycaster.intersectObject(surface, false)[0];
+        let at: [number, number, number];
         if (spot) {
-          setNoteDraft({
-            at: [spot.point.x, spot.point.y, spot.point.z], text: '',
-            x: event.clientX - rect.left, y: event.clientY - rect.top,
-          });
+          at = [spot.point.x, spot.point.y, spot.point.z];
+        } else {
+          const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+            camera.getWorldDirection(new THREE.Vector3()), centre);
+          const hit = new THREE.Vector3();
+          if (!raycaster.ray.intersectPlane(plane, hit)) return;
+          at = [hit.x, hit.y, hit.z];
         }
+        setNoteDraft({
+          at, text: '',
+          x: event.clientX - rect.left, y: event.clientY - rect.top,
+        });
         return;
       }
       if (measuringRef.current) {
