@@ -5,11 +5,11 @@
 
 import {
   Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronRight,
-  Circle, CircleHelp, Crosshair, Eye, EyeOff, File, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon,
+  Circle, CircleHelp, Crosshair, Eye, EyeOff, File, FileSpreadsheet, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon,
   Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Settings2,
   Printer, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
-import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -43,16 +43,35 @@ type AnalysisResult = {
 };
 type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string };
 type FolderEntry = { name: string; path: string; isDirectory: boolean; size: number | null; modified: string };
+type CorrectionMode = 'auto' | 'manual';
+type CorrectionAction = 'edit' | 'reset_auto' | 'reset_all' | 'restore_before' | 'reapply' | 'revise';
+type CorrectionHistoryEntry = {
+  id: number;
+  partNo: string;
+  scanName: string;
+  pointId: string;
+  oldValue: number | null;
+  newValue: number | null;
+  oldMode: CorrectionMode | null;
+  newMode: CorrectionMode | null;
+  coefficient: number | null;
+  action: CorrectionAction;
+  sourceEntryId: number | null;
+  worker: string | null;
+  createdAt: string;
+};
 type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
 type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
 type SheetTitleField = 'heading' | 'managementLabel' | 'managementNo' | 'partNameLabel' | 'partName' | 'processLabel' | 'process' | 'partNoLabel' | 'partNo' | 'materialLabel' | 'material' | 'appliedDateLabel' | 'appliedDate';
 type SheetTitleValues = Record<SheetTitleField, string>;
+type SheetTitleFonts = Record<SheetTitleField, string>;
+type SheetTitleFontSizes = Partial<Record<SheetTitleField, number>>;
 
 /* 보정 시트 주석 — 좌표와 크기는 모두 이미지 대비 %라 확대/축소와 창 크기에 영향받지 않는다. */
 type AnnotationKind = 'rect' | 'ellipse' | 'text' | 'arrow';
 type AnnotationTool = 'select' | AnnotationKind;
 /* 사각형·타원·텍스트는 x,y 가 좌상단이고 w,h 가 크기다. 화살표는 x,y 가 시작점이고 w,h 가 끝점까지의 변위라 음수가 될 수 있다. */
-type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; color?: string };
+type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; fontFamily?: string; color?: string };
 type DetailRegion = { id: string; x: number; y: number; w: number; h: number; label: string };
 type SheetLayout = { id: string; kind: 'front' | 'detail'; x: number; y: number; w: number; h: number; regionId?: string };
 
@@ -62,11 +81,102 @@ const engineMeta: Record<Engine, { name: string; short: string; color: string }>
   zero: { name: '제로라인 검출', short: 'zero_line_detection', color: '#17a58b' },
 };
 
+/* 보정 시트에서 쓰는 글꼴들. 아진산업 실제 양식 기준 — 돋움·맑은 고딕은 이 PC에도 설치돼 있지만
+   휴먼옛체·현대하모니는 별도 설치가 필요한 사내 서체라, 이름만 걸어두고 설치된 PC에서 자동 적용되게 한다. */
+const FONT_HUMAN_OLD = "'휴먼옛체', serif";
+const FONT_MALGUN = "'Malgun Gothic', sans-serif";
+const FONT_DOTUM = "Dotum, sans-serif";
+const FONT_HARMONY_M = "'현대하모니 M', sans-serif";
+const FONT_HARMONY_L = "'현대하모니 L', sans-serif";
+const FONT_FAMILY_OPTIONS: { label: string; value: string }[] = [
+  { label: '기본 글꼴', value: '' },
+  { label: '휴먼옛체', value: FONT_HUMAN_OLD },
+  { label: '맑은 고딕', value: FONT_MALGUN },
+  { label: '돋움', value: FONT_DOTUM },
+  { label: '현대하모니 M', value: FONT_HARMONY_M },
+  { label: '현대하모니 L', value: FONT_HARMONY_L },
+];
+const DEFAULT_TITLE_FONTS: SheetTitleFonts = {
+  heading: FONT_HUMAN_OLD,
+  managementLabel: FONT_DOTUM, managementNo: FONT_MALGUN,
+  partNameLabel: FONT_DOTUM, partName: FONT_MALGUN,
+  processLabel: FONT_DOTUM, process: FONT_MALGUN,
+  partNoLabel: FONT_DOTUM, partNo: FONT_MALGUN,
+  materialLabel: FONT_DOTUM, material: FONT_MALGUN,
+  appliedDateLabel: FONT_DOTUM, appliedDate: FONT_MALGUN,
+};
+const DEFAULT_POINT_LABEL_FONT = FONT_HARMONY_L;
+const DEFAULT_ANNOTATION_TEXT_FONT = FONT_HARMONY_M;
+const TITLE_FONT_SIZE_MIN = 6;
+const TITLE_FONT_SIZE_MAX = 40;
+const TITLE_FONT_SIZE_STEP = 1;
+/* 글꼴 크기를 아직 아무도 바꾸지 않았을 때 도구막대 스테퍼가 보여줄 시작값 — 화면 기본 CSS 크기와 맞춘다. */
+const TITLE_DEFAULT_FONT_SIZE: Record<SheetTitleField, number> = {
+  heading: 22,
+  managementLabel: 10, managementNo: 10,
+  partNameLabel: 10, partName: 10,
+  processLabel: 10, process: 10,
+  partNoLabel: 10, partNo: 10,
+  materialLabel: 10, material: 10,
+  appliedDateLabel: 10, appliedDate: 10,
+};
+
+/* CSS font-family 문자열("'Malgun Gothic', sans-serif")에서 엑셀 셀 글꼴로 쓸 첫 글꼴 이름만 뽑는다. */
+function extractFontName(cssFontFamily: string) {
+  const first = cssFontFamily.split(',')[0]?.trim().replace(/^['"]|['"]$/g, '');
+  return first || 'Malgun Gothic';
+}
+
+/* 파일명은 "관리 NO 보정내용" 형식으로 저장한다 (예: CD8 71XX2/22-XB000-01 → CD8 71XX2_22-XB000-01 보정내용.xlsx).
+   윈도우 파일명에 못 쓰는 문자만 밑줄로 바꾸고, 나머지는 그대로 둔다. */
+function excelFileName(managementNo: string) {
+  const sanitized = managementNo.trim().replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+  return `${sanitized || '보정 시트'} 보정내용.xlsx`;
+}
+
+/* 사용자 기준 엑셀 그림 크기. 1px=9525EMU, 1cm=360000EMU로 환산하면 Excel의
+   그림 서식 창에서도 아래 cm 값이 그대로 표시된다. */
+const EXCEL_SHEET_IMAGE_WIDTH_CM = 26.96;
+const EXCEL_SHEET_IMAGE_HEIGHT_CM = 15.74;
+const EXCEL_SHEET_IMAGE_INSET_CM = 0.03;
+const EXCEL_SHEET_IMAGE_ASPECT = EXCEL_SHEET_IMAGE_WIDTH_CM / EXCEL_SHEET_IMAGE_HEIGHT_CM;
+const excelCentimetersToPixels = (centimeters: number) => centimeters * 360000 / 9525;
+
+/* 웹 시트(A4 비율)의 아래쪽 빈 공간만 잘라 엑셀 그림 비율로 만든다. 그림을 가로·세로로
+   따로 늘이지 않으므로 보정치 글자와 흰 라벨의 비율이 웹 화면과 동일하게 유지된다. */
+function cropCanvasToAspect(source: HTMLCanvasElement, targetAspect: number) {
+  const sourceAspect = source.width / source.height;
+  let sourceX = 0; let sourceY = 0; let sourceWidth = source.width; let sourceHeight = source.height;
+  if (sourceAspect < targetAspect) {
+    sourceHeight = Math.min(source.height, Math.round(source.width / targetAspect));
+    /* 보정 도면은 시트 위쪽에 배치되므로 위를 고정하고 아래쪽 여백을 우선 잘라낸다. */
+    sourceY = 0;
+  } else if (sourceAspect > targetAspect) {
+    sourceWidth = Math.min(source.width, Math.round(source.height * targetAspect));
+    sourceX = Math.round((source.width - sourceWidth) / 2);
+  }
+  const cropped = document.createElement('canvas');
+  cropped.width = sourceWidth;
+  cropped.height = sourceHeight;
+  const context = cropped.getContext('2d');
+  if (!context) throw new Error('엑셀용 보정 시트 이미지를 만들지 못했습니다.');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, cropped.width, cropped.height);
+  context.drawImage(source, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, cropped.width, cropped.height);
+  return cropped;
+}
+
 function formatBytes(value: number | null) {
   if (value == null) return '';
   if (value < 1024) return `${value} B`;
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/* 업로드 파일명이 그대로 PART NAME 기본값이 되는데, "3D 스캔" 류의 촬영 방식 표기까지
+   부품명에 섞여 들어오는 경우가 많아 걷어낸다. */
+function stripScanSuffix(name: string) {
+  return name.replace(/[\s_-]*3d[\s_-]*스캔/gi, '').replace(/[\s_-]*3d[\s_-]*scan/gi, '').trim();
 }
 
 function createDefaultSheetTitleValues(scan: ScanItem): SheetTitleValues {
@@ -75,7 +185,7 @@ function createDefaultSheetTitleValues(scan: ScanItem): SheetTitleValues {
     managementLabel: '관리 NO',
     managementNo: `ADC-${scan.partNo}`,
     partNameLabel: 'PART NAME',
-    partName: scan.name.replace(/\.[^.]+$/, ''),
+    partName: stripScanSuffix(scan.name.replace(/\.[^.]+$/, '')),
     processLabel: '공정',
     process: '금형 보정',
     partNoLabel: 'PART NO',
@@ -202,6 +312,28 @@ const HANDLE_OFFSET: Record<string, { x: number; y: number }> = {
   nw: { x: 0, y: 0 }, n: { x: 0.5, y: 0 }, ne: { x: 1, y: 0 }, e: { x: 1, y: 0.5 },
   se: { x: 1, y: 1 }, s: { x: 0.5, y: 1 }, sw: { x: 0, y: 1 }, w: { x: 0, y: 0.5 },
 };
+type AnnotationHandle = (typeof BOX_HANDLES)[number] | 'start' | 'end';
+
+function annotationHandleDescriptors(annotation: Annotation): { handle: AnnotationHandle; className: string; left: number; top: number }[] {
+  if (annotation.kind === 'arrow') {
+    return (['start', 'end'] as const).map((handle) => ({
+      handle,
+      className: 'annotation-handle annotation-handle--endpoint',
+      left: handle === 'start' ? annotation.x : annotation.x + annotation.w,
+      top: handle === 'start' ? annotation.y : annotation.y + annotation.h,
+    }));
+  }
+  const left = Math.min(annotation.x, annotation.x + annotation.w);
+  const top = Math.min(annotation.y, annotation.y + annotation.h);
+  const width = Math.abs(annotation.w);
+  const height = Math.abs(annotation.h);
+  return BOX_HANDLES.map((handle) => ({
+    handle,
+    className: `annotation-handle annotation-handle--${handle}`,
+    left: left + width * HANDLE_OFFSET[handle].x,
+    top: top + height * HANDLE_OFFSET[handle].y,
+  }));
+}
 
 let annotationSeq = 0;
 const nextAnnotationId = () => `ann-${Date.now().toString(36)}-${++annotationSeq}`;
@@ -414,21 +546,17 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
   const drawing = draft && !annotations.some((item) => item.id === draft.id) ? draft : null;
   const arrows = [...rendered, ...(drawing ? [drawing] : [])].filter((item) => item.kind === 'arrow');
 
-  const renderHandles = (annotation: Annotation) => {
-    if (annotation.kind === 'arrow') {
-      return (['start', 'end'] as const).map((handle) => <span key={handle} className="annotation-handle annotation-handle--endpoint"
-        style={{ left: `${handle === 'start' ? annotation.x : annotation.x + annotation.w}%`, top: `${handle === 'start' ? annotation.y : annotation.y + annotation.h}%` }}
-        onPointerDown={(event) => beginResize(event, annotation, handle)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />);
-    }
-    /* 끌어서 뒤집히는 중에도 핸들이 실제 테두리에 붙어 있도록 좌상단 기준으로 편다. */
-    const left = Math.min(annotation.x, annotation.x + annotation.w);
-    const top = Math.min(annotation.y, annotation.y + annotation.h);
-    const width = Math.abs(annotation.w);
-    const height = Math.abs(annotation.h);
-    return BOX_HANDLES.map((handle) => <span key={handle} className={`annotation-handle annotation-handle--${handle}`}
-      style={{ left: `${left + width * HANDLE_OFFSET[handle].x}%`, top: `${top + height * HANDLE_OFFSET[handle].y}%` }}
-      onPointerDown={(event) => beginResize(event, annotation, handle)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />);
-  };
+  const selectedAnnotation = !armed && selectedId && !drawing ? rendered.find((item) => item.id === selectedId) : undefined;
+  const selectedHandles = selectedAnnotation ? annotationHandleDescriptors(selectedAnnotation) : [];
+  const selectedAnchorX = selectedAnnotation?.kind === 'arrow'
+    ? Math.max(selectedAnnotation.x, selectedAnnotation.x + selectedAnnotation.w)
+    : selectedAnnotation ? Math.min(selectedAnnotation.x, selectedAnnotation.x + selectedAnnotation.w) + Math.abs(selectedAnnotation.w) : 0;
+  const selectedAnchorY = selectedAnnotation?.kind === 'arrow'
+    ? Math.min(selectedAnnotation.y, selectedAnnotation.y + selectedAnnotation.h)
+    : selectedAnnotation ? Math.min(selectedAnnotation.y, selectedAnnotation.y + selectedAnnotation.h) : 0;
+  const selectedSize = selectedAnnotation?.fontSize ?? DEFAULT_TEXT_SIZE;
+  const selectedHex = selectedAnnotation?.color || DEFAULT_ANNOTATION_COLOR;
+  const selectedFontFamily = selectedAnnotation?.fontFamily || DEFAULT_ANNOTATION_TEXT_FONT;
 
   return <div ref={layerRef} className={`annotation-layer ${armed ? 'annotation-layer--armed' : ''} annotation-layer--${tool}`}
     onPointerDown={beginDraw} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}>
@@ -466,35 +594,29 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
         onPointerDown={(event) => beginMove(event, annotation)} onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation}
         onDoubleClick={(event) => { if (annotation.kind !== 'text') return; event.stopPropagation(); setEditingId(annotation.id); setEditText(annotation.text || ''); }}>
         {annotation.kind === 'text' && (editing
-          ? <textarea className="annotation-text__input" style={{ fontSize: `${annotation.fontSize ?? DEFAULT_TEXT_SIZE}px` }} value={editText} autoFocus onChange={(event) => setEditText(event.target.value)} onPointerDown={(event) => event.stopPropagation()}
+          ? <textarea className="annotation-text__input" style={{ fontSize: `${annotation.fontSize ?? DEFAULT_TEXT_SIZE}px`, fontFamily: annotation.fontFamily || DEFAULT_ANNOTATION_TEXT_FONT }} value={editText} autoFocus onChange={(event) => setEditText(event.target.value)} onPointerDown={(event) => event.stopPropagation()}
               onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); commitText(); } else if (event.key === 'Escape') { event.preventDefault(); setEditingId(null); } }}
               onBlur={commitText} placeholder="가공 내용 입력" aria-label="주석 텍스트" />
-          : <span className="annotation-text__value" style={{ fontSize: `${annotation.fontSize ?? DEFAULT_TEXT_SIZE}px` }}>{annotation.text || <em>더블클릭해 입력</em>}</span>)}
+          : <span className="annotation-text__value" style={{ fontSize: `${annotation.fontSize ?? DEFAULT_TEXT_SIZE}px`, fontFamily: annotation.fontFamily || DEFAULT_ANNOTATION_TEXT_FONT }}>{annotation.text || <em>더블클릭해 입력</em>}</span>)}
       </div>;
     })}
 
-    {!armed && selectedId && !drawing && (() => {
-      const target = rendered.find((item) => item.id === selectedId);
-      if (!target) return null;
-      const anchorX = target.kind === 'arrow' ? Math.max(target.x, target.x + target.w) : Math.min(target.x, target.x + target.w) + Math.abs(target.w);
-      const anchorY = target.kind === 'arrow' ? Math.min(target.y, target.y + target.h) : Math.min(target.y, target.y + target.h);
-      const size = target.fontSize ?? DEFAULT_TEXT_SIZE;
-      /* 편집 중에도 크기를 바로 확인할 수 있도록 preventDefault 로 textarea 포커스를 지킨다. */
-      const resize = (next: number) => onCommit({ ...target, fontSize: clamp(next, TEXT_SIZE_MIN, TEXT_SIZE_MAX) });
-      /* 핸들은 도형의 자식이 아니라 변수가 상속되지 않으므로 여기서 직접 씌운다. */
-      const selectedHex = target.color || DEFAULT_ANNOTATION_COLOR;
-      return <div className="annotation-selection" style={{ ['--annot' as string]: selectedHex }}>
-        {renderHandles(target)}
-        <button type="button" className="annotation-delete" style={{ left: `${anchorX}%`, top: `${anchorY}%` }} onPointerDown={(event) => event.stopPropagation()}
+    {selectedAnnotation && selectedId && <div className="annotation-selection" style={{ ['--annot' as string]: selectedHex }}>
+        {selectedHandles.map(({ handle, className, left, top }) => <span key={handle} className={className}
+          style={{ left: `${left}%`, top: `${top}%` }} onPointerDown={(event) => beginResize(event, selectedAnnotation, handle)}
+          onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />)}
+        <button type="button" className="annotation-delete" style={{ left: `${selectedAnchorX}%`, top: `${selectedAnchorY}%` }} onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => { event.stopPropagation(); onDelete(selectedId); onSelect(null); }} aria-label="이 주석 삭제" title="삭제 (Delete)"><X size={11} /></button>
-        {target.kind === 'text' && <div className="annotation-fontsize" style={{ left: `${Math.min(target.x, target.x + target.w)}%`, top: `${Math.min(target.y, target.y + target.h) + Math.abs(target.h)}%` }}
+        {selectedAnnotation.kind === 'text' && <div className="annotation-fontsize" style={{ left: `${Math.min(selectedAnnotation.x, selectedAnnotation.x + selectedAnnotation.w)}%`, top: `${Math.min(selectedAnnotation.y, selectedAnnotation.y + selectedAnnotation.h) + Math.abs(selectedAnnotation.h)}%` }}
           onPointerDown={(event) => { event.stopPropagation(); event.preventDefault(); }}>
-          <button type="button" onClick={() => resize(size - TEXT_SIZE_STEP)} disabled={size <= TEXT_SIZE_MIN} aria-label="글자 작게" title="글자 작게">A<span>−</span></button>
-          <span className="annotation-fontsize__value" aria-live="polite">{size}</span>
-          <button type="button" onClick={() => resize(size + TEXT_SIZE_STEP)} disabled={size >= TEXT_SIZE_MAX} aria-label="글자 크게" title="글자 크게">A<span>+</span></button>
+          <select className="annotation-fontsize__font" value={selectedFontFamily} onChange={(event) => onCommit({ ...selectedAnnotation, fontFamily: event.target.value })} aria-label="주석 글꼴 선택" title="글꼴 선택">
+            {FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}
+          </select>
+          <button type="button" onClick={() => onCommit({ ...selectedAnnotation, fontSize: clamp(selectedSize - TEXT_SIZE_STEP, TEXT_SIZE_MIN, TEXT_SIZE_MAX) })} disabled={selectedSize <= TEXT_SIZE_MIN} aria-label="글자 작게" title="글자 작게">A<span>−</span></button>
+          <span className="annotation-fontsize__value" aria-live="polite">{selectedSize}</span>
+          <button type="button" onClick={() => onCommit({ ...selectedAnnotation, fontSize: clamp(selectedSize + TEXT_SIZE_STEP, TEXT_SIZE_MIN, TEXT_SIZE_MAX) })} disabled={selectedSize >= TEXT_SIZE_MAX} aria-label="글자 크게" title="글자 크게">A<span>+</span></button>
         </div>}
-      </div>;
-    })()}
+      </div>}
   </div>;
 }
 
@@ -653,11 +775,11 @@ function SheetLayoutFrame({ layout, imageAspect, selected, onSelect, onChange, o
   </article>;
 }
 
-function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void }) {
+function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange, labelFontFamily }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void; labelFontFamily?: string }) {
   const labelHeight = 17;
-  const displayFor = (point: PointResult) => overrides?.[point.id] !== undefined ? overrides[point.id]! : -(point.value * coefficient);
-  const formatCorrection = (value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`;
-  const getLabelWidth = (point: PointResult) => Math.max(24, formatCorrection(displayFor(point)).length * 5.2 + 8);
+  const displayFor = useCallback((point: PointResult) => overrides?.[point.id] !== undefined ? overrides[point.id]! : -(point.value * coefficient), [coefficient, overrides]);
+  const formatCorrection = useCallback((value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`, []);
+  const getLabelWidth = useCallback((point: PointResult) => Math.max(24, formatCorrection(displayFor(point)).length * 5.2 + 8), [displayFor, formatCorrection]);
   const layerRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ id: string; x: number; y: number; clientX: number; clientY: number; moved: boolean } | null>(null);
   const ignoreClickRef = useRef(false);
@@ -667,6 +789,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   const [labelPositions, setLabelPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
+  const editOriginalRef = useRef<number | null>(null);
   useEffect(() => {
     const layer = layerRef.current;
     if (!layer) return;
@@ -712,7 +835,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
       });
       return next;
     });
-  }, [layerSize, points, coefficient, labelHeight, overrides]);
+  }, [layerSize, points, labelHeight, displayFor, formatCorrection, getLabelWidth]);
   const beginLabelDrag = (event: React.PointerEvent<HTMLSpanElement>, id: string) => {
     const position = labelPositions[id];
     if (!position) return;
@@ -742,11 +865,16 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   const startEdit = (id: string, currentValue: number) => {
     setEditingId(id);
     setEditValue(currentValue.toFixed(1));
+    editOriginalRef.current = currentValue;
   };
   const commitEdit = () => {
     if (!editingId || !onOverrideChange) { setEditingId(null); return; }
     const parsed = parseFloat(editValue);
-    if (Number.isFinite(parsed)) onOverrideChange(editingId, parsed);
+    /* 라벨을 눌렀다가 아무것도 안 바꾸고 포커스만 벗어나도 blur 로 commitEdit 이 불린다.
+       값이 실제로 안 바뀌었으면 onOverrideChange 를 아예 부르지 않아야, 그냥 눌러보기만 해도
+       자동값이 수동값으로 바뀌고 이력에 기록되는 일이 없다. */
+    const unchanged = editOriginalRef.current !== null && Math.abs(parsed - editOriginalRef.current) < 0.0001;
+    if (Number.isFinite(parsed) && !unchanged) onOverrideChange(editingId, parsed);
     setEditingId(null);
   };
   const cancelEdit = () => setEditingId(null);
@@ -784,7 +912,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     const isOverridden = overrides?.[point.id] !== undefined;
     const isEditing = editingId === point.id;
     const editable = Boolean(onOverrideChange);
-    const labelStyle = position ? { left: `${position.x - layerSize.width * point.x / 100}px`, top: `${position.y - layerSize.height * point.y / 100}px` } : undefined;
+    const labelStyle = position ? { left: `${position.x - layerSize.width * point.x / 100}px`, top: `${position.y - layerSize.height * point.y / 100}px`, fontFamily: labelFontFamily || undefined } : undefined;
     const labelClasses = ['measure-point__label'];
     if (editable) labelClasses.push('measure-point__label--editable');
     if (isOverridden) labelClasses.push('measure-point__label--overridden');
@@ -795,12 +923,12 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
       {labels && labelVisible && position && (isEditing ? <span className={labelClasses.join(' ')} style={labelStyle}>
         <input type="text" inputMode="decimal" className="measure-point__label__input" value={editValue} onChange={(e) => setEditValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitEdit(); } else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); } }} onBlur={commitEdit} autoFocus onFocus={(e) => e.currentTarget.select()} aria-label={`${point.id} 보정치 편집`} />
         {isOverridden && <button type="button" className="measure-point__label__reset" onMouseDown={(e) => e.preventDefault()} onClick={resetOverride} aria-label="자동값으로 되돌리기" title="자동값으로 되돌리기">↺</button>}
-      </span> : <span className={labelClasses.join(' ')} data-point-id={point.id} style={labelStyle} onPointerDown={(event) => beginLabelDrag(event, point.id)} onPointerMove={moveLabel} onPointerUp={endLabelDrag} onPointerCancel={endLabelDrag} onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (editable) startEdit(point.id, display); }} title={isOverridden ? `수정된 값 (계수 영향 없음) · 클릭하여 편집` : (editable ? '클릭하여 값 편집 · 드래그로 이동' : undefined)}>{formatCorrection(display)}</span>)}
+      </span> : <span className={labelClasses.join(' ')} data-point-id={point.id} style={labelStyle} onPointerDown={(event) => beginLabelDrag(event, point.id)} onPointerMove={moveLabel} onPointerUp={endLabelDrag} onPointerCancel={endLabelDrag} onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (editable) startEdit(point.id, display); }} title={isOverridden ? `수정된 값 (계수 영향 없음) · 클릭하여 편집` : (editable ? '클릭하여 값 편집 · 드래그로 이동' : undefined)}><span className="measure-point__label__value">{formatCorrection(display)}</span></span>)}
     </div>;
   })}</div>;
 }
 
-function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
+function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
   const sourceAspect = scan.result!.source.width / scan.result!.source.height;
   const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
   const [regions, setRegions] = useState<DetailRegion[]>([]);
@@ -844,7 +972,6 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
   };
 
   return <div className={`sheet-canvas ${detailMode ? 'sheet-canvas--detail-mode' : ''}`} onPointerDown={(event) => { if (event.target === event.currentTarget) { setSelectedLayoutId(''); setSelectedRegionId(null); setSelectedAnnotationId(null); } }}>
-    <div className="sheet-canvas__meta"><b>A3 · FRONT VIEW</b><span>{scan.partNo} / REV.01</span></div>
     {layouts.map((layout) => {
       const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
       if (layout.kind === 'detail' && !region) return null;
@@ -858,12 +985,12 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
         else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
       };
       return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
-        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} /></div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}</div>
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} /></div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}</div>
           : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
             onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onRemoveAddedPoint(added.id); }}
-            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
+            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
         <LabelAreaSelector mode={labelAreaMode} points={detailPoints} onApply={applyAreaPoints} onComplete={() => setLabelAreaMode(null)} />
       </SheetLayoutFrame>;
     })}
@@ -1005,17 +1132,33 @@ function Explorer() {
   return <div className="explorer card"><div className="explorer__title"><div><FolderOpen size={20} /><b>실시간 품번별 폴더</b></div><span>{available == null ? '연결 확인 중' : '현재 PC 폴더와 연결됨'}</span></div><div className="explorer__bar"><div className="explorer__crumb"><button disabled={!path} onClick={() => openFolder(segments.slice(0, -1).join('/'))}><ArrowLeft size={14} /></button><span><button onClick={() => openFolder('')}>{rootName}</button>{segments.map((segment, index) => <span key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => openFolder(segments.slice(0, index + 1).join('/'))}>{segment}</button></span>)}</span></div><label><ZoomIn size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="현재 폴더 검색" /></label></div><div className="explorer__body"><div className="folder-tree"><button className={`tree-root ${!path ? 'selected' : ''}`} onClick={() => openFolder('')}><ChevronDown size={15} /><FolderOpen size={17} /> <span>{rootName}</span></button><div className="tree-children">{rootEntries.map((entry) => <FolderTreeNode key={entry.path} entry={entry} selectedPath={path} onOpen={openFolder} />)}</div></div><div className="folder-content"><div className="folder-content__head"><span>이름</span><span>수정한 날짜</span><span>크기</span></div>{filtered.map((entry) => <button className="folder-row" key={entry.path} onDoubleClick={() => entry.isDirectory && openFolder(entry.path)} onClick={() => entry.isDirectory && openFolder(entry.path)}><span>{entry.isDirectory ? <Folder size={19} fill="currentColor" /> : <File size={18} />}{entry.name}</span><small>{new Date(entry.modified).toLocaleString('ko-KR')}</small><small>{entry.isDirectory ? '파일 폴더' : formatBytes(entry.size)}</small></button>)}{!filtered.length && <div className="empty-search">이 폴더는 비어 있습니다.</div>}<div className="folder-content__status">{filtered.length}개 항목 <span>·</span> 실시간 로컬 조회</div></div></div></div>;
 }
 
-function SheetTitleBlock({ values, onChange }: { values: SheetTitleValues; onChange: (field: SheetTitleField, value: string) => void }) {
-  const editableText = (field: SheetTitleField, label: string, heading = false) => <input
-    type="text"
-    className={`sheet-title-block__input${heading ? ' sheet-title-block__input--heading' : ''}`}
-    value={values[field]}
-    onChange={(event) => onChange(field, event.target.value)}
-    aria-label={`${label} 수정`}
-    title={`${label} - 클릭하여 수정`}
-    autoComplete="off"
-    spellCheck={false}
-  />;
+function SheetTitleBlock({ values, onChange, fonts, onFontChange, fontSizes, onFontSizeChange }: { values: SheetTitleValues; onChange: (field: SheetTitleField, value: string) => void; fonts: SheetTitleFonts; onFontChange: (field: SheetTitleField, fontFamily: string) => void; fontSizes: SheetTitleFontSizes; onFontSizeChange: (field: SheetTitleField, size: number) => void }) {
+  const editableText = (field: SheetTitleField, label: string, heading = false) => {
+    const size = fontSizes[field] ?? TITLE_DEFAULT_FONT_SIZE[field];
+    return <>
+      <input
+        type="text"
+        className={`sheet-title-block__input${heading ? ' sheet-title-block__input--heading' : ''}`}
+        style={{ fontFamily: fonts[field] || undefined, fontSize: fontSizes[field] ? `${fontSizes[field]}px` : undefined }}
+        value={values[field]}
+        onChange={(event) => onChange(field, event.target.value)}
+        aria-label={`${label} 수정`}
+        title={`${label} - 클릭하여 수정`}
+        autoComplete="off"
+        spellCheck={false}
+      />
+      {/* 셀 안에 포커스가 남아있는 동안(:focus-within)만 뜨는 작은 도구막대 — 텍스트를 선택/편집하는 동안 엑셀처럼 옆에서 바로 글꼴·크기를 바꾼다. */}
+      <div className="cell-font-picker">
+        <select value={fonts[field]} onChange={(event) => onFontChange(field, event.target.value)} onPointerDown={(event) => event.stopPropagation()} aria-label={`${label} 글꼴 선택`}>
+          {FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}
+        </select>
+        <span className="cell-font-picker__divider" />
+        <button type="button" onClick={() => onFontSizeChange(field, clamp(size - TITLE_FONT_SIZE_STEP, TITLE_FONT_SIZE_MIN, TITLE_FONT_SIZE_MAX))} disabled={size <= TITLE_FONT_SIZE_MIN} aria-label={`${label} 글자 작게`} title="글자 작게">A<small>−</small></button>
+        <span className="cell-font-picker__size" aria-live="polite">{size}</span>
+        <button type="button" onClick={() => onFontSizeChange(field, clamp(size + TITLE_FONT_SIZE_STEP, TITLE_FONT_SIZE_MIN, TITLE_FONT_SIZE_MAX))} disabled={size >= TITLE_FONT_SIZE_MAX} aria-label={`${label} 글자 크게`} title="글자 크게">A<small>+</small></button>
+      </div>
+    </>;
+  };
   return <section className="sheet-title-block" aria-label="보정 적용 내용">
     <div className="sheet-title-block__heading"><strong>{editableText('heading', '보정 시트 제목', true)}</strong></div>
     <div className="sheet-title-block__label">{editableText('managementLabel', '관리 NO 항목명')}</div><div className="sheet-title-block__value">{editableText('managementNo', '관리 NO 값')}</div>
@@ -1027,11 +1170,56 @@ function SheetTitleBlock({ values, onChange }: { values: SheetTitleValues; onCha
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void }) {
+function formatHistoryValue(value: number | null) {
+  if (value == null) return '자동';
+  return `${value > 0 ? '+' : ''}${value.toFixed(1)} mm`;
+}
+
+function formatHistoryTime(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value.replace('T', ' ');
+  return new Intl.DateTimeFormat('ko-KR', {
+    month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).format(parsed);
+}
+
+function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, deletingEntryIds, error, onReload, onRestore, onDelete }: {
+  partNo: string;
+  entries: CorrectionHistoryEntry[];
+  loading: boolean;
+  pendingPointIds: Set<string>;
+  deletingEntryIds: Set<number>;
+  error: string | null;
+  onReload: () => void;
+  onRestore: (entry: CorrectionHistoryEntry) => void;
+  onDelete: (entry: CorrectionHistoryEntry) => void;
+}) {
+  return <div className="card correction-history">
+    <div className="card-title"><div><h3>보정 이력</h3><p>{partNo} 품번 수동 수정 기록입니다.</p></div><button type="button" className="correction-history__reload" onClick={onReload} disabled={loading} aria-label="이력 새로고침" title="이력 새로고침">↻</button></div>
+    {error && <p className="correction-history__message correction-history__message--error" role="alert">{error}</p>}
+    {entries.length === 0 ? <p className="correction-history__empty">{loading ? '불러오는 중…' : '기록된 수정 이력이 없습니다.'}</p> : <ul className="correction-history__list">{entries.map((entry) => {
+      const busy = pendingPointIds.has(entry.pointId) || deletingEntryIds.has(entry.id);
+      return <li key={entry.id} className="correction-history__item">
+        <span className="correction-history__point">{entry.pointId}</span>
+        <div className="correction-history__change"><span>{formatHistoryValue(entry.oldValue)}</span><i>→</i><span>{formatHistoryValue(entry.newValue)}</span></div>
+        <div className="correction-history__meta"><span>{entry.worker || '이름 미입력'} · {formatHistoryTime(entry.createdAt)}</span></div>
+        <div className="correction-history__actions">
+          <button type="button" onClick={() => onRestore(entry)} disabled={busy} title="이 포인트를 엔진이 계산한 원래 값으로 되돌립니다">원래 값 복원</button>
+          <button type="button" className="correction-history__delete" onClick={() => onDelete(entry)} disabled={busy} title="이 기록만 삭제합니다 (포인트 값은 바뀌지 않음)">이력 삭제</button>
+        </div>
+      </li>;
+    })}</ul>}
+  </div>;
+}
+
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void }) {
   const result = scan.result!; const points = result.points; const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
+  /* 보정치 수치 라벨(+1.5 등) 글꼴 — "선택하면 자유롭게" 가 아니라 시트 전체 한 번에 바뀌는 값이라 여기 하나로 둔다. */
+  const [pointLabelFont, setPointLabelFont] = useState(DEFAULT_POINT_LABEL_FONT);
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
+  const addedPointSequenceRef = useRef(0);
   const [addPointMode, setAddPointMode] = useState(false);
   const [sampling, setSampling] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
@@ -1046,16 +1234,72 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       const response = await fetch(`${API_BASE}/api/sample`, { method: 'POST', body: form });
       const data = await response.json() as { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
       if (!response.ok) { setSampleError(data?.error || '편차값을 추정하지 못했습니다.'); return; }
-      setAddedPoints((current) => [...current, {
-        id: `M-${String(current.length + 1).padStart(2, '0')}`,
-        xPx: data.xPx, yPx: data.yPx, x: data.x, y: data.y,
-        value: data.value, labelColor: 'white', confidence: 'colormap', source: 'colormap',
-      }]);
+      setAddedPoints((current) => {
+        addedPointSequenceRef.current += 1;
+        return [...current, {
+          id: `M-${String(addedPointSequenceRef.current).padStart(2, '0')}`,
+          xPx: data.xPx, yPx: data.yPx, x: data.x, y: data.y,
+          value: data.value, labelColor: 'white', confidence: 'colormap', source: 'colormap',
+        }];
+      });
     } catch (error) {
       setSampleError(error instanceof Error ? error.message : '엔진 서버에 연결하지 못했습니다.');
     } finally {
       setSampling(false);
     }
+  };
+  /* 보정치 수동 수정 이력. 백엔드 로컬 DB(SQLite)에서 품번 기준으로 불러온다 —
+     스캔 데이터를 외부로 보낼 수 없는 정책이라 로컬 서버 안에서만 오간다. */
+  const [history, setHistory] = useState<CorrectionHistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const [pendingPointIds, setPendingPointIds] = useState<Set<string>>(() => new Set());
+  const pendingPointIdsRef = useRef(new Set<string>());
+  const [deletingEntryIds, setDeletingEntryIds] = useState<Set<number>>(() => new Set());
+  const deletingEntryIdsRef = useRef(new Set<number>());
+  /* 이펙트 안에서 곧바로 setState 를 호출하면 린트가 캐스케이드 렌더 위험으로 잡아내므로,
+     자동 로드(마운트/품번 변경)는 로딩 표시 없이 fetchHistory 만 부르고, 새로고침 버튼처럼
+     사용자 조작에서 시작하는 경우에만 loadHistory 로 로딩 상태를 켠다. */
+  const normalizeHistoryEntry = (entry: CorrectionHistoryEntry): CorrectionHistoryEntry => ({
+    ...entry,
+    oldMode: entry.oldMode ?? null,
+    newMode: entry.newMode ?? (entry.newValue == null ? 'auto' : null),
+    coefficient: entry.coefficient ?? null,
+    action: entry.action ?? 'edit',
+    sourceEntryId: entry.sourceEntryId ?? null,
+  });
+  const fetchHistory = useCallback(() => {
+    const query = new URLSearchParams({ partNo: scan.partNo, scanName: scan.name });
+    return fetch(`${API_BASE}/api/corrections?${query}`)
+      .then(async (response) => {
+        const data = await response.json() as { entries?: CorrectionHistoryEntry[]; error?: string };
+        if (!response.ok) throw new Error(data.error || '보정 이력을 불러오지 못했습니다.');
+        return data;
+      })
+      .then((data) => { setHistory((data.entries || []).map(normalizeHistoryEntry)); setHistoryError(null); })
+      .catch((error: unknown) => setHistoryError(error instanceof Error ? error.message : '보정 이력을 불러오지 못했습니다.'));
+  }, [scan.name, scan.partNo]);
+  const loadHistory = () => { setHistoryLoading(true); void fetchHistory().finally(() => setHistoryLoading(false)); };
+  useEffect(() => { void fetchHistory(); }, [fetchHistory]);
+  const recordCorrection = async ({ pointId, oldValue, newValue, oldMode, newMode, action, sourceEntryId }: {
+    pointId: string;
+    oldValue: number;
+    newValue: number;
+    oldMode: CorrectionMode;
+    newMode: CorrectionMode;
+    action: CorrectionAction;
+    sourceEntryId?: number;
+  }) => {
+    const response = await fetch(`${API_BASE}/api/corrections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ partNo: scan.partNo, scanName: scan.name, pointId, oldValue, newValue, oldMode, newMode, coefficient, action, sourceEntryId, worker }),
+    });
+    const data = await response.json() as CorrectionHistoryEntry & { error?: string };
+    if (!response.ok) throw new Error(data.error || '보정 이력을 저장하지 못했습니다.');
+    const saved = normalizeHistoryEntry(data);
+    setHistory((current) => [saved, ...current.filter((entry) => entry.id !== saved.id)].sort((a, b) => b.id - a.id).slice(0, 200));
+    return saved;
   };
   /* 시트에는 엔진이 찾은 포인트와 작업자가 찍은 포인트를 함께 올린다.
      표시 여부도 합친 목록 기준으로 계산해야 추가한 포인트의 라벨이 숨김 처리되지 않는다. */
@@ -1068,6 +1312,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   /* 브라우저 인쇄를 그대로 쓴다. 캔버스로 굽지 않아 글자가 벡터로 남고 추가 의존성도 없다.
      인쇄 대화상자에서 '대상: PDF로 저장'을 고르면 된다. */
   const sheetRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const savePdf = () => {
     setSelectedAnnotationId(null);
     setTool('select');
@@ -1090,35 +1335,281 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     /* 전환이 끝나 자리가 확정된 뒤에 인쇄해야 중간값이 찍히지 않는다. */
     window.setTimeout(() => window.print(), 80);
   };
+  /* 엑셀 저장 — 아진산업이 실제로 쓰는 보정시트_양식.xlsx / 기존 보정내용.xlsx 파일을 직접 열어
+     열 너비·행 높이·병합 범위·페이지 나누기를 그대로 뽑아냈다 (30개 열, 전부 폭 4.375 / 행 높이
+     13.5pt / 표제란은 6행 병합 3쌍(관리NO·PART NAME, 공정·PART NO, 원소재·적용일자) / 블록 하나당
+     정확히 40행, 사이 여백 없이 바로 다음 블록이 시작되고 그 경계에 페이지 나누기가 들어간다).
+     표제란은 실제 셀(글꼴·크기 그대로)로, 도면+포인트+주석은 화면 그대로 캡처한 이미지로 그 아래
+     40행 안에 맞춰 넣는다. 기존 파일을 골라두면 그 파일 끝에 같은 규칙으로 이어붙인다. */
+  const [excelFile, setExcelFile] = useState<File | null>(null);
+  const [excelSaving, setExcelSaving] = useState(false);
+  const [excelError, setExcelError] = useState<string | null>(null);
+  const excelInputRef = useRef<HTMLInputElement>(null);
+  const saveExcel = async () => {
+    if (excelSaving || !stageRef.current) return;
+    setExcelSaving(true);
+    setExcelError(null);
+    setSelectedAnnotationId(null); setTool('select'); setDetailMode(false); setLabelAreaMode(null); setAddPointMode(false);
+    document.body.classList.add('adc-printing');
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+      const [{ default: ExcelJS }, { default: html2canvas }] = await Promise.all([
+        import('exceljs'), import('html2canvas'),
+      ]);
+      /* 회색 stage 여백이 아니라 실제 흰 시트만 캡처한다. 캡처 결과를 목표 비율로 먼저
+         잘라 둔 뒤 같은 비율로 엑셀에 넣어야 라벨의 글자·배경이 세로로 눌리지 않는다. */
+      const captureTarget = stageRef.current.querySelector<HTMLElement>('.sheet-canvas') || stageRef.current;
+      let capturedCanvas: HTMLCanvasElement;
+      captureTarget.classList.add('adc-excel-capture');
+      try {
+        capturedCanvas = await html2canvas(captureTarget, {
+          backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false,
+          /* 출력 CSS가 복제 문서에서 상속되지 않는 경우에도 포인트 원형 표시는 PNG에 넣지 않는다. */
+          ignoreElements: (element) => element.classList.contains('measure-point__dot') || element.classList.contains('add-point-remove'),
+        });
+      } finally {
+        captureTarget.classList.remove('adc-excel-capture');
+      }
+      const excelCanvas = cropCanvasToAspect(capturedCanvas, EXCEL_SHEET_IMAGE_ASPECT);
+      const base64 = excelCanvas.toDataURL('image/png').split(',')[1];
+
+      const workbook = new ExcelJS.Workbook();
+      /* 열은 A~AD 30개. 화면에 보이는 "열 너비" 3.75를 원해서 그 숫자를 그대로 저장하면, 실제
+         엑셀은 그 값을 0.58만큼 낮춰서 보여준다(3.75 저장 → 3.17로 표시) — <col width> XML 값과
+         엑셀의 ColumnWidth 사이에 고정 오프셋이 있는 실제 엑셀 동작이다. 이 PC에 설치된 엑셀을
+         COM으로 직접 열어서 여러 값을 넣어보고 정확히 검증했다: 3.75+0.58=4.33을 저장해야
+         화면에 3.75로 뜬다. */
+      const TOTAL_COLS = 30;
+      const COL_WIDTH_STORED = 4.33;
+      /* 첨부 화면의 그림 서식 값(너비 26.96cm × 높이 15.74cm)을 정확히 사용한다.
+         위에서 캡처도 같은 비율로 만들었으므로 이 크기로 넣어도 비균등 확대/축소가 없다. */
+      const IMAGE_WIDTH_PX = excelCentimetersToPixels(EXCEL_SHEET_IMAGE_WIDTH_CM);
+      const IMAGE_HEIGHT_PX = excelCentimetersToPixels(EXCEL_SHEET_IMAGE_HEIGHT_CM);
+
+      if (excelFile) await workbook.xlsx.load(await excelFile.arrayBuffer());
+      let worksheet = workbook.worksheets[0];
+      if (!worksheet) {
+        worksheet = workbook.addWorksheet('보정 시트');
+        worksheet.columns = Array.from({ length: TOTAL_COLS }, () => ({ width: COL_WIDTH_STORED }));
+      }
+      /* 블록 하나 = 1~6행 표제란 + 7~40행 본문, 40행 고정. */
+      const HEADER_ROWS = 6;
+      const BLOCK_ROWS = 40;
+      const existingRowCount = worksheet.rowCount;
+      /* 이어붙이는 경우 이전 블록 마지막 행 바로 뒤에 페이지 나누기를 넣고, 실제 파일들처럼
+         빈 줄 없이 바로 다음 블록을 시작한다 — 인쇄하면 시트마다 정확히 한 장씩 나온다. */
+      if (existingRowCount > 0) worksheet.getRow(existingRowCount).addPageBreak();
+      const startRow = existingRowCount > 0 ? existingRowCount + 1 : 1;
+      const blockEndRow = startRow + BLOCK_ROWS - 1;
+      /* 실제 원본 양식 파일의 인쇄 설정을 COM으로 그대로 읽어서 맞췄다: A4 용지 + 폭 맞춤
+         배율(fitToWidth) + 여백 0. 이렇게 해야 AC/AD 사이에 뜨던 파란 점선(자동 페이지 나누기
+         표시)이 사라진다 — 그 점선은 "지금 용지에 폭이 안 맞아서 다음 페이지로 넘어간다"는
+         엑셀의 자동 표시였는데, 폭 맞춤 배율을 켜두면 항상 한 페이지 안에 들어가 아예 안 뜬다.
+         (이전엔 이 배율이 3.17 버그의 원인이라고 오판해서 껐었는데, 진짜 원인은 열 너비 저장값
+         오프셋이었고 이제 그건 따로 고쳤으니 배율을 켜도 문제없다 — 직접 열어서 재확인했다.) */
+      worksheet.pageSetup = { orientation: 'landscape', paperSize: 9 as import('exceljs').PaperSize, fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true, printArea: `A1:AD${blockEndRow}`, margins: { left: 0, right: 0, top: 0, bottom: 0, header: 0, footer: 0 } };
+      /* 페이지 나누기 미리보기 화면은 "인쇄되는 대로" 보여주는 모드라, 시스템 기본 프린터
+         용지에 맞춰 화면 배율을 자체적으로 조정하면서 열 너비 등 대화상자 값까지 실제 저장값과
+         다르게 보일 수 있다. 정확한 값 확인이 더 중요해서 기본 보기(일반 보기)로 연다. */
+      worksheet.views = [{ state: 'normal' }];
+
+      const border = { style: 'thin' as const, color: { argb: 'FF171717' } };
+      const applyBorder = (cell: import('exceljs').Cell) => { cell.border = { top: border, left: border, bottom: border, right: border }; };
+      const applyFont = (cell: import('exceljs').Cell, field: SheetTitleField, bold: boolean) => {
+        cell.font = { name: extractFontName(sheetTitleFonts[field]), size: sheetTitleFontSizes[field] ?? TITLE_DEFAULT_FONT_SIZE[field], bold };
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      };
+      const labelFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFAFAF8' } };
+      /* 표제란·본문 구분 없이 블록 40행 전부 13.5pt로 통일한다. */
+      for (let r = startRow; r <= blockEndRow; r++) worksheet.getRow(r).height = 13.5;
+      /* 본문(7~40행)은 도면 그림만 떠 있고 실제 셀은 필요 없어서, 30개 열 × 34행을 전부 하나로
+         병합해 둔다 — 자잘하게 나뉜 빈 칸들 대신 깔끔한 셀 하나로 만든다. */
+      worksheet.mergeCells(startRow + HEADER_ROWS, 1, blockEndRow, TOTAL_COLS);
+
+      /* 제목 배지는 A~I열(9칸), 표제란 6행 전체 높이만큼. 엑셀은 둥근 모서리·그림자를 셀로는
+         못 만들어서 테두리 있는 병합 셀로 근사한다. */
+      worksheet.mergeCells(startRow, 1, startRow + 5, 9);
+      const titleCell = worksheet.getCell(startRow, 1);
+      titleCell.value = sheetTitle.heading;
+      applyFont(titleCell, 'heading', true);
+      applyBorder(titleCell);
+
+      /* 실제 파일 기준 열 범위: 항목명1 J~L, 값1 M~S, 항목명2 T~W, 값2 X~AD. 필드 세 쌍이
+         두 행씩(관리NO/PART NAME, 공정/PART NO, 원소재/적용일자) 묶여 표제란 6행을 이룬다. */
+      const fieldRows: [SheetTitleField, SheetTitleField, SheetTitleField, SheetTitleField][] = [
+        ['managementLabel', 'managementNo', 'partNameLabel', 'partName'],
+        ['processLabel', 'process', 'partNoLabel', 'partNo'],
+        ['materialLabel', 'material', 'appliedDateLabel', 'appliedDate'],
+      ];
+      const writeField = (rowTop: number, colStart: number, colEnd: number, field: SheetTitleField, isLabel: boolean) => {
+        worksheet.mergeCells(rowTop, colStart, rowTop + 1, colEnd);
+        const cell = worksheet.getCell(rowTop, colStart);
+        cell.value = sheetTitle[field];
+        if (isLabel) cell.fill = labelFill;
+        applyFont(cell, field, false);
+        applyBorder(cell);
+      };
+      fieldRows.forEach(([labelField1, valueField1, labelField2, valueField2], index) => {
+        const rowTop = startRow + index * 2;
+        writeField(rowTop, 10, 12, labelField1, true);
+        writeField(rowTop, 13, 19, valueField1, false);
+        writeField(rowTop, 20, 23, labelField2, true);
+        writeField(rowTop, 24, 30, valueField2, false);
+      });
+
+      /* 그림을 본문 셀의 외곽선과 정확히 겹쳐 놓으면 Excel의 도형 레이어가 셀 선을 가린다.
+         ExcelJS가 anchor offset을 계산하는 단위에 맞춰 0.03cm만큼 안쪽에서 시작한다. */
+      const imageStartRow = startRow - 1 + HEADER_ROWS;
+      const firstColumnWidth = worksheet.getColumn(1).width ?? COL_WIDTH_STORED;
+      const firstBodyRowHeight = worksheet.getRow(startRow + HEADER_ROWS).height ?? 13.5;
+      const imageColumnInset = EXCEL_SHEET_IMAGE_INSET_CM * 360000 / (firstColumnWidth * 10000);
+      const imageRowInset = EXCEL_SHEET_IMAGE_INSET_CM * 360000 / (firstBodyRowHeight * 10000);
+
+      worksheet.addImage(workbook.addImage({ base64, extension: 'png' }), {
+        tl: { col: imageColumnInset, row: imageStartRow + imageRowInset },
+        ext: { width: IMAGE_WIDTH_PX, height: IMAGE_HEIGHT_PX },
+      });
+
+      /* 엑셀 파일의 "기본 글꼴"(스타일 0번, 열 너비를 "글자 수"로 계산하는 기준)이 ExcelJS가
+         기본으로 쓰는 Calibri로 남아있으면, 한글 글꼴 기준으로 만들어진 실제 양식과 달리 열
+         너비가 다르게 계산/표시된다 (원본 양식 파일의 기본 글꼴은 돋움이었다). 저장 직후 그
+         기본 글꼴만 돋움으로 바꿔친다. */
+      const rawBuffer = await workbook.xlsx.writeBuffer();
+      const { default: JSZip } = await import('jszip');
+      const zip = await JSZip.loadAsync(rawBuffer);
+      const stylesFile = zip.file('xl/styles.xml');
+      if (stylesFile) {
+        const stylesXml = await stylesFile.async('string');
+        const patched = stylesXml.replace(
+          /(<fonts[^>]*>)<font>[\s\S]*?<\/font>/,
+          '$1<font><sz val="11"/><name val="돋움"/><family val="3"/><charset val="129"/></font>',
+        );
+        zip.file('xl/styles.xml', patched);
+      }
+      const buffer = await zip.generateAsync({ type: 'arraybuffer' });
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = excelFileName(sheetTitle.managementNo);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setExcelFile(null);
+      if (excelInputRef.current) excelInputRef.current.value = '';
+    } catch (error) {
+      setExcelError(error instanceof Error ? error.message : '엑셀로 저장하지 못했습니다.');
+    } finally {
+      document.body.classList.remove('adc-printing');
+      setExcelSaving(false);
+    }
+  };
   /* 새 주석은 늘 기본색으로 그려지고, 색 변경은 주석을 고른 뒤 팔레트를 누르는 동작으로만 일어난다. */
   const selectedColor = selectedAnnotationId ? (annotations.find((item) => item.id === selectedAnnotationId)?.color ?? DEFAULT_ANNOTATION_COLOR) : null;
   const changeColor = (hex: string) => {
     if (!selectedAnnotationId) return;
     setAnnotations((current) => current.map((item) => item.id === selectedAnnotationId ? { ...item, color: hex } : item));
   };
-  const displayFor = (point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient);
-  const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [coefficient, points, pointOverrides]);
+  const displayFor = useCallback((point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient), [coefficient, pointOverrides]);
+  const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [displayFor, points]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
+  const applyCorrection = async (id: string, targetOverride: number | null, action: CorrectionAction, options?: { skipRecord?: boolean }) => {
+    const point = sheetPoints.find((item) => item.id === id);
+    if (!point) {
+      setHistoryError(`${id} 포인트가 현재 시트에 없어 적용할 수 없습니다.`);
+      return false;
+    }
+    if (pendingPointIdsRef.current.has(id)) return false;
+    const oldMode: CorrectionMode = pointOverrides[id] === undefined ? 'auto' : 'manual';
+    const newMode: CorrectionMode = targetOverride === null ? 'auto' : 'manual';
+    const oldValue = displayFor(point);
+    const newValue = targetOverride ?? -(point.value * coefficient);
+    if (oldMode === newMode && Math.abs(oldValue - newValue) < 0.0001) {
+      setHistoryError(null);
+      return true;
+    }
+    pendingPointIdsRef.current.add(id);
+    setPendingPointIds(new Set(pendingPointIdsRef.current));
+    setHistoryError(null);
+    try {
+      if (!options?.skipRecord) {
+        await recordCorrection({ pointId: id, oldValue, newValue, oldMode, newMode, action });
+      }
+      onOverrideChange(id, targetOverride);
+      return true;
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : '보정값을 적용하지 못했습니다.');
+      return false;
+    } finally {
+      pendingPointIdsRef.current.delete(id);
+      setPendingPointIds(new Set(pendingPointIdsRef.current));
+    }
+  };
+  const handleOverrideChange = (id: string, value: number | null) => {
+    void applyCorrection(id, value, value === null ? 'reset_auto' : 'edit');
+  };
+  /* "원래 값 복원" = 이 기록이 무엇이었든 상관없이 해당 포인트를 엔진이 계산한
+     자동값으로 되돌린다. 포인트 라벨의 ↺ 초기화 버튼과 동일한 동작이지만, 이력 패널에서
+     누른 복원은 그 자체로 새 이력을 남기지 않는다 — 되돌리는 동작까지 기록되면
+     이력이 계속 늘어나기만 해서 원래 무엇을 되돌렸는지 추적하기 어려워지기 때문. */
+  const restoreHistoryEntry = (entry: CorrectionHistoryEntry) => {
+    void applyCorrection(entry.pointId, null, 'reset_auto', { skipRecord: true });
+  };
+  const deleteHistoryEntry = async (entry: CorrectionHistoryEntry) => {
+    if (deletingEntryIdsRef.current.has(entry.id)) return;
+    deletingEntryIdsRef.current.add(entry.id);
+    setDeletingEntryIds(new Set(deletingEntryIdsRef.current));
+    setHistoryError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/corrections?id=${entry.id}`, { method: 'DELETE' });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || '이력을 삭제하지 못했습니다.');
+      setHistory((current) => current.filter((item) => item.id !== entry.id));
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : '이력을 삭제하지 못했습니다.');
+    } finally {
+      deletingEntryIdsRef.current.delete(entry.id);
+      setDeletingEntryIds(new Set(deletingEntryIdsRef.current));
+    }
+  };
+  const handleClearAllOverrides = async () => {
+    const results = await Promise.all(Object.keys(pointOverrides).map((id) => applyCorrection(id, null, 'reset_all')));
+    if (results.length > 0 && results.every(Boolean)) onClearAllOverrides();
+  };
   const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
-      <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button></div>
-    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /></div></div>
+      <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
+        <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
+        <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
+        {excelFile && <button type="button" className="sheet-print__clear" onClick={() => { setExcelFile(null); if (excelInputRef.current) excelInputRef.current.value = ''; }} aria-label="선택한 엑셀 파일 취소" title="선택 취소"><X size={12} /></button>}
+        <button type="button" className="sheet-print" onClick={() => void saveExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
+        <button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button>
+      </div>
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>{folderAvailable && <Explorer />}
   </section>;
 }
 
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
+  const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
+  const [sheetTitleFontSizesByScan, setSheetTitleFontSizesByScan] = useState<Record<string, SheetTitleFontSizes>>({});
+  /* 작업자 이름은 보정 이력에 남기는 용도라 브라우저에 저장해 다음에도 다시 입력하지 않게 한다. */
+  const [worker, setWorker] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem('adc-worker-name') || ''));
+  useEffect(() => { if (typeof window !== 'undefined') window.localStorage.setItem('adc-worker-name', worker); }, [worker]);
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const pointOverrides = completedScan ? pointOverridesByScan[completedScan.id] || {} : {};
   const sheetTitle = completedScan ? sheetTitlesByScan[completedScan.id] || createDefaultSheetTitleValues(completedScan) : undefined;
+  const sheetTitleFonts = completedScan ? sheetTitleFontsByScan[completedScan.id] || DEFAULT_TITLE_FONTS : DEFAULT_TITLE_FONTS;
+  const sheetTitleFontSizes = completedScan ? sheetTitleFontSizesByScan[completedScan.id] || {} : {};
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
   const setPointOverride = (id: string, value: number | null) => completedScan && setPointOverridesByScan((current) => { const next = { ...(current[completedScan.id] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [completedScan.id]: next }; });
@@ -1130,7 +1621,17 @@ export default function Home() {
     const targetScan = completedScan;
     setSheetTitlesByScan((current) => ({ ...current, [targetScan.id]: { ...(current[targetScan.id] || createDefaultSheetTitleValues(targetScan)), [field]: value } }));
   };
+  const setSheetTitleFontField = (field: SheetTitleField, fontFamily: string) => {
+    if (!completedScan) return;
+    const targetScan = completedScan;
+    setSheetTitleFontsByScan((current) => ({ ...current, [targetScan.id]: { ...(current[targetScan.id] || DEFAULT_TITLE_FONTS), [field]: fontFamily } }));
+  };
+  const setSheetTitleFontSizeField = (field: SheetTitleField, size: number) => {
+    if (!completedScan) return;
+    const targetScan = completedScan;
+    setSheetTitleFontSizesByScan((current) => ({ ...current, [targetScan.id]: { ...(current[targetScan.id] || {}), [field]: size } }));
+  };
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}</div></main>;
 }
