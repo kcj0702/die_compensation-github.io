@@ -37,6 +37,12 @@ type AnalysisResult = {
   analysisId: string | null;
   partNo?: string;
   knownParts?: string[];
+  /* 현업 파일명 규칙에서 읽어낸 것들 — 차종_품번_품명_공정_날짜.
+     보정시트 머리말을 이걸로 채운다. 못 읽은 칸은 null 이다. */
+  naming?: {
+    part_no: string | null; maker: string | null; part_name: string | null;
+    process: string | null; applied_at: string | null; control_no: string | null;
+  };
   /* 보정시트에 적을 만한 포인트만 골라낸 것. 스캔에는 백여 개가 찍히지만
      현업 시트에 적히는 건 열몇 개다. */
   keyPoints?: { point_id: string; x_px: number; y_px: number; value: number; score: number; reason: string }[];
@@ -1041,6 +1047,22 @@ function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset,
   </div></header>;
 }
 
+/* 파일명에서 품번을 뽑는다. 백엔드 file_naming.py 와 같은 규칙이며
+   짧은 형태(64XX2)를 준다 — 컬러바 표와 제로라인 라이브러리의 열쇠다.
+
+   순수 숫자 여섯 자리는 **날짜**라 품번으로 보지 않는다. NC 데이터가
+   `260825_JDZ_DASH LWR_OP10_...ZIP` 처럼 날짜를 앞에 달고 오는데,
+   예전 규칙은 이걸 품번이라고 집어냈다. */
+function partNoFromName(name: string): string | null {
+  for (const token of name.toUpperCase().split(/[_\s]+/)) {
+    const head = token.split(/[-/]/)[0];
+    if (!/^[0-9]{2}[A-Z0-9]{2,4}$/.test(head)) continue;
+    if (/^[0-9]+$/.test(head) && !/[-/]/.test(token)) continue;   // 날짜
+    return head;
+  }
+  return null;
+}
+
 /* 컬러바 범위가 등록된 품번. 백엔드 PRODUCT_COLORBAR_MM 과 같은 표이며
    분석 응답의 knownParts 로도 확인할 수 있다. */
 const KNOWN_PARTS = ['64XX2', '67XX6', '71XX2'];
@@ -1053,7 +1075,7 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
     const next = accepted.map((file, index): ScanItem => ({
       id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`,
       name: file.name,
-      partNo: file.name.match(/[0-9]{2}[A-Z0-9]{2,4}/)?.[0] || `NEW-${String(scans.length + index + 1).padStart(2, '0')}`,
+      partNo: partNoFromName(file.name) || `NEW-${String(scans.length + index + 1).padStart(2, '0')}`,
       size: `${(file.size / 1024 / 1024).toFixed(1)} MB`, url: URL.createObjectURL(file), file,
       status: 'ready', tone: (scans.length + index) % 3,
     }));
@@ -1310,18 +1332,33 @@ function Explorer() {
   return <div className="explorer card"><div className="explorer__title"><div><FolderOpen size={20} /><b>실시간 품번별 폴더</b></div><span>{available == null ? '연결 확인 중' : '현재 PC 폴더와 연결됨'}</span></div><div className="explorer__bar"><div className="explorer__crumb"><button disabled={!path} onClick={() => openFolder(segments.slice(0, -1).join('/'))}><ArrowLeft size={14} /></button><span><button onClick={() => openFolder('')}>{rootName}</button>{segments.map((segment, index) => <span key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => openFolder(segments.slice(0, index + 1).join('/'))}>{segment}</button></span>)}</span></div><label><ZoomIn size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="현재 폴더 검색" /></label></div><div className="explorer__body"><div className="folder-tree"><button className={`tree-root ${!path ? 'selected' : ''}`} onClick={() => openFolder('')}><ChevronDown size={15} /><FolderOpen size={17} /> <span>{rootName}</span></button><div className="tree-children">{rootEntries.map((entry) => <FolderTreeNode key={entry.path} entry={entry} selectedPath={path} onOpen={openFolder} />)}</div></div><div className="folder-content"><div className="folder-content__head"><span>이름</span><span>수정한 날짜</span><span>크기</span></div>{filtered.map((entry) => <button className="folder-row" key={entry.path} onDoubleClick={() => entry.isDirectory && openFolder(entry.path)} onClick={() => entry.isDirectory && openFolder(entry.path)}><span>{entry.isDirectory ? <Folder size={19} fill="currentColor" /> : <File size={18} />}{entry.name}</span><small>{new Date(entry.modified).toLocaleString('ko-KR')}</small><small>{entry.isDirectory ? '파일 폴더' : formatBytes(entry.size)}</small></button>)}{!filtered.length && <div className="empty-search">이 폴더는 비어 있습니다.</div>}<div className="folder-content__status">{filtered.length}개 항목 <span>·</span> 실시간 로컬 조회</div></div></div></div>;
 }
 
+/* 보정시트 머리말.
+   실제 시트(JM 67312-DZ000_보정적용.xlsx)가 이렇게 채워져 있다 —
+
+     관리 NO   JM 67312-DZ000-13      공   정  OP50
+     PART NAME DASH UPR LHD           PART NO  67312-DZ000
+     원소재     A6451P-T4S 1.8t        적용일자  2025-07-15
+
+   그래서 파일명 규칙에서 읽어낸 값을 그대로 쓴다. 예전에는 PART NAME
+   자리에 파일명 전체를 밀어 넣고 공정은 "금형 보정" 으로 박아 뒀는데,
+   현업 시트에는 그런 값이 들어가지 않는다. 못 읽은 칸은 비워 둔다 —
+   지어내는 것보다 비는 편이 낫다. */
 function SheetTitleBlock({ scan }: { scan: ScanItem }) {
-  const partName = scan.name.replace(/\.[^.]+$/, '');
-  const appliedDate = new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' }).format(new Date());
+  const named = scan.result?.naming;
+  const blank = <span className="sheet-title-block__blank">—</span>;
+  const applied = named?.applied_at
+    ? new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
+        .format(new Date(`${named.applied_at}T00:00:00`))
+    : null;
 
   return <section className="sheet-title-block" aria-label="보정 적용 내용">
     <div className="sheet-title-block__heading"><strong>보정 적용 내용</strong></div>
-    <div className="sheet-title-block__label">관리 NO</div><div className="sheet-title-block__value">ADC-{scan.partNo}</div>
-    <div className="sheet-title-block__label">PART NAME</div><div className="sheet-title-block__value" title={partName}>{partName}</div>
-    <div className="sheet-title-block__label">공정</div><div className="sheet-title-block__value">금형 보정</div>
-    <div className="sheet-title-block__label">PART NO</div><div className="sheet-title-block__value">{scan.partNo}</div>
-    <div className="sheet-title-block__label">원소재</div><div className="sheet-title-block__value">3D SCAN DATA</div>
-    <div className="sheet-title-block__label">적용일자</div><div className="sheet-title-block__value">{appliedDate}</div>
+    <div className="sheet-title-block__label">관리 NO</div><div className="sheet-title-block__value">{named?.control_no ?? `${scan.partNo}-01`}</div>
+    <div className="sheet-title-block__label">PART NAME</div><div className="sheet-title-block__value" title={named?.part_name ?? ''}>{named?.part_name ?? blank}</div>
+    <div className="sheet-title-block__label">공정</div><div className="sheet-title-block__value">{named?.process ?? blank}</div>
+    <div className="sheet-title-block__label">PART NO</div><div className="sheet-title-block__value">{named?.part_no ?? scan.partNo}</div>
+    <div className="sheet-title-block__label">원소재</div><div className="sheet-title-block__value">{blank}</div>
+    <div className="sheet-title-block__label">적용일자</div><div className="sheet-title-block__value">{applied ?? blank}</div>
   </section>;
 }
 
@@ -1438,7 +1475,12 @@ function CadWorkspace({ scans, coefficientByScan, hiddenPointIdsByScan, pointOve
         body: JSON.stringify({
           analysisId, corrections: sheetValues.values, images: shots,
           meta: {
-            partNo: scan?.partNo, coefficient: sheetValues.coefficient,
+            partNo: scan?.result?.naming?.part_no || scan?.partNo,
+            partName: scan?.result?.naming?.part_name || '',
+            process: scan?.result?.naming?.process || '',
+            controlNo: scan?.result?.naming?.control_no || '',
+            appliedAt: scan?.result?.naming?.applied_at || '',
+            coefficient: sheetValues.coefficient,
             /* 시트 아래쪽 "① : 하형 용접" 줄에 그대로 들어간다. */
             processes: (regionsByCad[notesKey] ?? [])
               .map((region, order) =>
@@ -1862,7 +1904,16 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
         body: JSON.stringify({
           analysisId, corrections,
           filename: `${scan.partNo || 'ADC'}_보정시트`,
-          meta: { partNo: scan.partNo, coefficient },
+          /* 머리말은 파일명 규칙에서 읽은 값을 그대로 보낸다.
+             화면에 보이는 것과 엑셀이 달라지면 안 된다. */
+          meta: {
+            partNo: result.naming?.part_no || scan.partNo,
+            partName: result.naming?.part_name || '',
+            process: result.naming?.process || '',
+            controlNo: result.naming?.control_no || '',
+            appliedAt: result.naming?.applied_at || '',
+            coefficient,
+          },
         }),
       });
       if (!response.ok) {

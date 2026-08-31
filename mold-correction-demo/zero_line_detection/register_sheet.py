@@ -30,9 +30,23 @@ LIBRARY_PATH = Path(__file__).resolve().parent / "zero_line_library.json"
 
 
 def part_no_from_name(name: str) -> str:
-    """파일명에서 품번을 뽑는다 (프론트엔드와 같은 규칙)."""
-    match = re.search(r"[0-9]{2}[A-Z0-9]{2,4}", name.upper())
-    return match.group(0) if match else Path(name).stem
+    """파일명에서 품번을 뽑는다 (프론트엔드와 같은 규칙).
+
+    **짧은 형태**(`64XX2`)를 돌려준다. 컬러바 표와 제로라인 라이브러리가
+    이 형태를 열쇠로 쓰기 때문이다 — 라이브러리는 정확 일치 조회라
+    `64XX2-DR000` 으로 바꾸면 못 찾는다.
+
+    날짜를 품번으로 착각하던 문제를 file_naming 으로 넘겨 고쳤다.
+    예전 정규식은 `260825_JDZ_DASH LWR_OP10_...ZIP` 에서 맨 앞
+    `260825`(날짜)를 품번으로 집어냈다. 품번은 컬러바 범위를 고르는
+    열쇠라 이게 틀리면 값이 통째로 어긋난다.
+    """
+    from zero_line_detection.file_naming import part_no_of
+
+    part_no = part_no_of(name)
+    if part_no:
+        return part_no.split("-")[0].split("/")[0]
+    return Path(name).stem
 
 
 def read_bgr(path: Path) -> np.ndarray:

@@ -80,6 +80,7 @@ from zero_line_detection.zero_points import (  # noqa: E402
 )
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 from zero_line_detection.key_points import select as select_key_points  # noqa: E402
+from zero_line_detection.file_naming import parse as parse_filename  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -325,6 +326,9 @@ def analyze_image(image: np.ndarray, filename: str,
     # 고르는 데 필요하다(zero_line.detect_zero_line 의 대체 경로).
     part_key = (part_no or "").strip().upper() or part_no_from_name(filename)
     part_span = colorbar_span_for(part_key)
+    # 현업 파일명 규칙에서 보정시트 머리말 거리를 읽어 둔다
+    # (차종·품명·공정·적용일자). 원소재만 파일명에 없다.
+    naming = parse_filename(filename)
 
     clean_image: np.ndarray | None = None
     label_count = 0
@@ -734,6 +738,7 @@ def analyze_image(image: np.ndarray, filename: str,
     return {
         "analysisId": analysis_id,
         "partNo": part_key,
+        "naming": naming.to_dict(),
         "keyPoints": [k.to_dict() for k in key_points],
         "keyPointsRejected": key_rejected,
         "knownParts": sorted(PRODUCT_COLORBAR_MM),
