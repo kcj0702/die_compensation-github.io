@@ -381,6 +381,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      장면을 통째로 다시 만들어 카메라 위치가 초기화된다. */
   const activeRef = useRef(active);
   activeRef.current = active;
+  /* 표시 모드(표면/모서리/삼각망)를 ref 로도 들고 있는다. 장면은 오버레이가
+     바뀔 때마다 통째로 다시 만들어지는데, 그때 새 객체는 전부 기본 표시
+     상태다. detail 이펙트는 detail 이 바뀔 때만 도니 다시 적용되지 않아
+     **모드가 저절로 풀렸다** — "시간 지나면 이렇게 됨" 이 이것이다. */
+  const detailRef = useRef<'solid' | 'edges' | 'wire'>('solid');
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -401,8 +406,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     renderer.localClippingEnabled = true;
     // 금속은 밝은 곳을 반사해야 형태가 읽힌다. 톤매핑 없이 두면
     // 반사 하이라이트가 흰색으로 다 타버린다.
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // 그림자는 끈다. team-15 뷰어에서 가져왔다가 되돌렸다 — 그쪽은
+    // 로봇·용접건처럼 **서로 떨어진 물체 여러 개**라 그림자가 공간을
+    // 설명해 준다. 우리는 얇은 판금 껍데기 **하나**뿐이라 자기그림자밖에
+    // 안 생기고, 두께가 없다시피 해서 앞뒤 면이 서로를 가려 얼룩진다
+    // (shadow acne). 형상이 깨져 보이던 원인이다.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.8;
     mount.appendChild(renderer.domElement);
@@ -516,8 +524,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       material.transparent = true;
       material.opacity = 0.28;
     }
-    surface.castShadow = true;
-    surface.receiveShadow = true;
     scene.add(surface);
     solidMesh.current = surface;
     surfaceRef.current = surface;
@@ -551,6 +557,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     wire.visible = false;
     wire.name = 'wire';
     scene.add(wire);
+
+    // 장면을 새로 만들었으니 지금 고른 표시 모드를 곧바로 입힌다
+    const shownAs = detailRef.current;
+    surface.visible = shownAs !== 'wire';
+    edges.visible = shownAs === 'edges';
+    wire.visible = shownAs === 'wire';
 
     // ── 홀 ───────────────────────────────────────────────────
     // 실측 부품은 Ø6mm 홀이 1062mm 짜리 형상에 박혀 있다. 실제 크기대로
@@ -833,13 +845,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     scene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.3));
     const key = new THREE.DirectionalLight(0xffffff, 0.85);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
-    key.castShadow = true;
-    key.shadow.mapSize.set(2048, 2048);
-    const cam = key.shadow.camera;
-    cam.left = cam.bottom = -radius * 1.4;
-    cam.right = cam.top = radius * 1.4;
-    cam.near = radius * 0.5;
-    cam.far = radius * 8;
     scene.add(key);
     const fill = new THREE.DirectionalLight(0x93c5fd, 0.3);
     fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
@@ -1381,6 +1386,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     edges.visible = detail === 'edges';
     if (wire) wire.visible = detail === 'wire';
   }, [detail]);
+
+  useEffect(() => { detailRef.current = detail; }, [detail]);
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
 
