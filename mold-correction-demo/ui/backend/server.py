@@ -1154,7 +1154,10 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     if not line_sources:
         line_sources = [l["points"] for l in analysis.get("simple_zero_lines", [])]
     # 띠 두께는 부품 크기에 맞춘다 — 고정 픽셀이면 큰 스캔에서 실오라기가 된다
-    band = max(int(round(min(stencil.shape) * 0.012)), 3)
+    # 화면 쪽에서 "삼각형 세 꼭짓점이 모두 도장 안" 일 때만 칠하도록
+    # 조건을 엄하게 했다(경계 가시 제거). 그만큼 띠가 얇아지므로 여기서
+    # 조금 넉넉하게 그린다.
+    band = max(int(round(min(stencil.shape) * 0.020)), 5)
     for pts in line_sources:
         arr = np.rint(np.asarray(pts, dtype=float)).astype(np.int32)
         if len(arr) >= 2:

@@ -652,11 +652,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         for (let i = 0; i < zeroIndex.count; i += 3) {
           const a = zeroIndex.getX(i), b = zeroIndex.getX(i + 1),
                 c = zeroIndex.getX(i + 2);
-          // 세 꼭짓점 중 둘 이상이 도장 안이면 그 삼각형을 칠한다.
-          // 하나만으로 하면 경계가 지저분하게 번진다.
-          const hits = (stencil[a] ? 1 : 0) + (stencil[b] ? 1 : 0)
-                     + (stencil[c] ? 1 : 0);
-          if (hits >= 2) keep.push(a, b, c);
+          // 세 꼭짓점이 **모두** 도장 안일 때만 칠한다.
+          //
+          // 둘 이상으로 두었더니 경계에서 가시처럼 뾰족한 조각이 튀어
+          // 나왔다. 판금 가장자리에는 화면과 거의 나란한 길쭉한 삼각형이
+          // 많은데, 그중 두 점만 걸려도 통째로 칠해지면서 긴 삼각형이
+          // 그대로 삐져나온다. 셋 다 요구하면 경계가 깔끔해진다.
+          if (stencil[a] && stencil[b] && stencil[c]) keep.push(a, b, c);
         }
         if (keep.length) {
           const patch = geometry.clone();
@@ -671,12 +673,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           overlayRoot.add(skin);
 
           // 무엇인지 적어 준다 — 빨간 면만 있으면 편차 색과 헷갈린다
+          // 이름표는 칠한 자리 **위에 바짝** 붙인다. 예전에는 반지름의
+          // 0.9배만큼 띄워서 형상에서 한참 떨어진 허공에 떴다.
           const seat = patch.boundingSphere?.center ?? new THREE.Vector3();
-          const spread = patch.boundingSphere?.radius ?? radius * 0.1;
           const tag = makeZoneLabel(
             overlay.zeroKind === 'areas' ? '제로라인 (영역)' : '제로라인',
             radius * 0.04);
-          tag.position.copy(seat).add(new THREE.Vector3(0, 0, spread * 0.9));
+          tag.position.copy(seat).add(new THREE.Vector3(0, 0, radius * 0.06));
           tag.renderOrder = 15;
           overlayRoot.add(tag);
         }
@@ -748,27 +751,33 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 라벨은 한 평면에 모아 둔다. 깊이가 제각각이면 다른 각도에서
       // 흩어져 보인다.
       const labelDepth = toArray(centre)[viewAxis]
-        + (geometry.boundingSphere?.radius ?? radius) * 0.55;
+        + (geometry.boundingSphere?.radius ?? radius) * 0.18;
 
       // [배치] 큰 원에 둘러 놓으니 지시선이 별처럼 퍼져 안 읽혔다.
       // 시트는 콜아웃을 **자기 점 바로 바깥**에 붙이고 겹칠 때만 조금씩
       // 밀어낸다. 같은 방법으로, 점에서 바깥쪽으로 짧게 빼고 겹치면
       // 한 칸씩 더 민다.
-      const labelSize = new THREE.Vector2(spread * 0.20, spread * 0.075);
+      // 라벨 자리는 **글자 크기** 기준으로 잡는다. 예전에는 부품 반지름
+      // (spread)에 비례해 0.16 배씩 밀어냈는데, 그러면 라벨이 형상 한참
+      // 바깥에 놓이고 지시선만 길어진다. 시트는 콜아웃을 자기 점 바로
+      // 옆에 붙이고, 겹칠 때만 조금씩 비킨다.
+      const tagHeight = radius * 0.038;              // makeLabel 과 같은 크기
+      const labelSize = new THREE.Vector2(tagHeight * 2.6, tagHeight * 1.25);
       const taken: THREE.Vector2[] = [];
       const seatFor = (plane: THREE.Vector2) => {
         const away = plane.clone().sub(middle);
         if (away.lengthSq() < 1e-9) away.set(1, 0);
         away.normalize();
-        for (let step = 0; step < 14; step += 1) {
+        for (let step = 0; step < 16; step += 1) {
           const spot = plane.clone().add(
-            away.clone().multiplyScalar(spread * (0.16 + step * 0.085)));
+            away.clone().multiplyScalar(labelSize.x * (0.7 + step * 0.55)));
           const clash = taken.some((other) =>
             Math.abs(other.x - spot.x) < labelSize.x
             && Math.abs(other.y - spot.y) < labelSize.y);
           if (!clash) { taken.push(spot); return spot; }
         }
-        const fallback = plane.clone().add(away.multiplyScalar(spread * 1.4));
+        const fallback = plane.clone().add(
+          away.multiplyScalar(labelSize.x * 9));
         taken.push(fallback);
         return fallback;
       };
