@@ -25,6 +25,7 @@ _SERVER_IMPORT_DB_DIR = tempfile.TemporaryDirectory()
 with patch.dict(
     os.environ,
     {
+        "AJIN_CORRECTION_DB_URL": "",
         "AJIN_CORRECTION_DB_PATH": str(
             Path(_SERVER_IMPORT_DB_DIR.name) / "import-correction-history.db"
         )
@@ -154,6 +155,72 @@ class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.db_patch.start()
         self.addCleanup(self.db_patch.stop)
+        self.env_patch = patch.dict(os.environ, {"AJIN_CORRECTION_DB_URL": ""})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
+    def test_mysql_url_is_parsed_without_exposing_credentials(self) -> None:
+        config = backend_server._mysql_connection_config(
+            "mysql://adc_user:p%40ss@db.internal:3307/ajin_adc"
+            "?charset=utf8mb4&connect_timeout=12"
+        )
+
+        self.assertEqual(config["host"], "db.internal")
+        self.assertEqual(config["port"], 3307)
+        self.assertEqual(config["user"], "adc_user")
+        self.assertEqual(config["password"], "p@ss")
+        self.assertEqual(config["database"], "ajin_adc")
+        self.assertEqual(config["charset"], "utf8mb4")
+        self.assertEqual(config["connection_timeout"], 12)
+        self.assertFalse(config["autocommit"])
+
+    def test_mysql_adapter_uses_server_parameter_markers(self) -> None:
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.statement = ""
+                self.params: tuple[object, ...] = ()
+
+            def execute(self, statement, params) -> None:
+                self.statement = statement
+                self.params = params
+
+            def close(self) -> None:
+                pass
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+                self.dictionary = False
+
+            def cursor(self, *, dictionary=False):
+                self.dictionary = dictionary
+                return self.cursor_instance
+
+        raw = FakeConnection()
+        connection = backend_server._CorrectionConnection(raw, "mysql")
+        cursor = connection.execute(
+            "SELECT * FROM correction_history WHERE part_no = ? AND id = ?",
+            ("64XX2", 7),
+        )
+
+        self.assertTrue(raw.dictionary)
+        self.assertEqual(
+            cursor.statement,
+            "SELECT * FROM correction_history WHERE part_no = %s AND id = %s",
+        )
+        self.assertEqual(cursor.params, ("64XX2", 7))
+
+    def test_invalid_mysql_url_is_rejected(self) -> None:
+        invalid_urls = (
+            "postgresql://user:pass@db/ajin",
+            "mysql://db/ajin",
+            "mysql://user@db",
+            "mysql://user@db/ajin?connect_timeout=slow",
+        )
+        for database_url in invalid_urls:
+            with self.subTest(database_url=database_url):
+                with self.assertRaises(ValueError):
+                    backend_server._mysql_connection_config(database_url)
 
     def test_legacy_database_is_migrated_without_changing_existing_row(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
@@ -402,6 +469,19 @@ class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(response.status_code, 422)
+
+    async def test_database_outage_returns_service_unavailable(self) -> None:
+        with patch.object(
+            backend_server,
+            "_get_correction_db",
+            side_effect=backend_server.CorrectionDatabaseError("offline"),
+        ):
+            response = await backend_server.list_corrections(
+                _json_request(method="GET", query={"partNo": "64XX2"})
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("error", _response_json(response))
 
 
 class UiBackendStrictReadingTest(unittest.TestCase):
