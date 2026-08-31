@@ -8,12 +8,14 @@ import math
 import os
 import sqlite3
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -21,7 +23,7 @@ import uvicorn
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 from starlette.concurrency import run_in_threadpool
 
@@ -43,6 +45,22 @@ from colormap_reader import build_lut  # noqa: E402
 from point_extractor import _sample_deviation_color  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
 from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
+from product_alignment.alignment import (  # noqa: E402
+    Alignment, estimate_alignment, is_inside, map_point, warp_scan_mask,
+)
+from product_alignment.compose import render_alignment_overlay  # noqa: E402
+# label_detector에도 같은 이름의 함수가 있다. 이쪽은 label_removal의 규칙을 쓰는
+# 부품 실루엣용이라 이름을 구분해 둔다.
+from product_alignment.masks import (  # noqa: E402
+    build_product_mask, build_scan_mask as build_part_silhouette,
+)
+from product_alignment.registry import (  # noqa: E402
+    AlignmentStore, ProductLibrary, part_number_from_name, read_image,
+)
+from point_selection import select_key_points  # noqa: E402
+from sheet_export import (  # noqa: E402
+    SheetPoint, SheetView, TitleBlock, build_sheet, crop_view,
+)
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
@@ -209,6 +227,12 @@ def _optional_source_entry_id(value: Any) -> int | None:
     return value
 
 
+# 제품데이터는 품번당 한 장으로 고정이고 스캔은 차수마다 새로 들어온다. 한 번
+# 등록해 두면 이후 스캔은 지금처럼 파일 하나만 올려도 자동으로 짝이 맞는다.
+PRODUCT_LIBRARY = ProductLibrary()
+ALIGNMENT_STORE = AlignmentStore()
+
+
 def _is_complete_qwen_model(candidate: Path) -> bool:
     """Return True only when the local model and every indexed shard exist."""
     try:
@@ -363,9 +387,92 @@ def _decode_image(payload: bytes) -> np.ndarray:
     return image
 
 
-def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
+def _resolve_product_image(
+    filename: str, uploaded: np.ndarray | None
+) -> tuple[np.ndarray | None, str | None, list[str]]:
+    """Pick the product-data image for this scan, upload first then library."""
+    warnings: list[str] = []
+    if uploaded is not None:
+        return uploaded, "업로드한 이미지", warnings
+
+    part_number = part_number_from_name(filename)
+    if part_number is None:
+        return None, None, warnings
+
+    match = PRODUCT_LIBRARY.find(part_number)
+    if match is None:
+        warnings.append(
+            f"품번 {part_number}의 제품데이터가 등록되어 있지 않습니다. "
+            "제품데이터 이미지를 함께 올리면 다음부터 자동으로 사용합니다."
+        )
+        return None, None, warnings
+
+    if not match.exact:
+        warnings.append(
+            f"{part_number}에 정확히 맞는 제품데이터가 없어 "
+            f"{match.part_number}로 등록된 이미지를 사용했습니다."
+        )
+    try:
+        return read_image(match.path), f"등록됨 · {match.part_number}", warnings
+    except ValueError as exc:
+        warnings.append(str(exc))
+        return None, None, warnings
+
+
+def _align_to_product(
+    image: np.ndarray,
+    product_image: np.ndarray,
+    part_number: str | None,
+    flip_x: bool | None,
+    flip_y: bool | None,
+) -> tuple[Any, np.ndarray | None, list[str]]:
+    """Estimate the scan-to-product transform, reusing a confirmed one."""
+    warnings: list[str] = []
+    scan_silhouette = build_part_silhouette(image)
+    product_mask = build_product_mask(product_image)
+
+    if flip_x is None and flip_y is None and part_number:
+        saved = ALIGNMENT_STORE.load(part_number)
+        if saved is not None:
+            flip_x, flip_y = saved.flip_x, saved.flip_y
+            warnings.append(
+                f"{part_number}에 확정 저장된 방향(좌우 {saved.flip_x}, "
+                f"상하 {saved.flip_y})을 사용했습니다."
+            )
+
+    alignment = estimate_alignment(
+        scan_silhouette, product_mask, flip_x=flip_x, flip_y=flip_y
+    )
+    overlay = render_alignment_overlay(
+        product_image, warp_scan_mask(alignment, scan_silhouette)
+    )
+    return alignment, overlay, warnings + list(alignment.warnings)
+
+
+def analyze_image(
+    image: np.ndarray,
+    filename: str,
+    product_upload: np.ndarray | None = None,
+    flip_x: bool | None = None,
+    flip_y: bool | None = None,
+) -> dict[str, Any]:
     height, width = image.shape[:2]
     errors: dict[str, str] = {}
+    part_number = part_number_from_name(filename)
+
+    product_image, product_source, product_warnings = _resolve_product_image(
+        filename, product_upload
+    )
+    alignment = None
+    alignment_overlay: np.ndarray | None = None
+    if product_image is not None:
+        try:
+            alignment, alignment_overlay, alignment_warnings = _align_to_product(
+                image, product_image, part_number, flip_x, flip_y
+            )
+            product_warnings.extend(alignment_warnings)
+        except Exception as exc:  # engine errors must be shown per engine
+            errors["product"] = str(exc)
 
     clean_image: np.ndarray | None = None
     label_count = 0
@@ -519,10 +626,36 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     except Exception as exc:
         errors["deviation"] = str(exc)
 
+    # 보정시트에는 검출된 라벨을 전부 올리지 않는다. 국소 극값과 부호가 바뀌는
+    # 지점만 기본으로 켜고, 나머지는 화면에서 켤 수 있게 남겨 둔다.
+    selection = select_key_points(points)
+    key_reasons = {key.point_id: list(key.reasons) for key in selection.keys}
+    for point in points:
+        reasons = key_reasons.get(point["id"])
+        if reasons:
+            point["keyReasons"] = reasons
+
+    # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
+    transferred = 0
+    if alignment is not None:
+        product_width, product_height = alignment.product_size
+        for point in points:
+            product_x, product_y = map_point(alignment, point["xPx"], point["yPx"])
+            if not is_inside(alignment, product_x, product_y):
+                continue
+            point["xProduct"] = round(product_x / product_width * 100, 3)
+            point["yProduct"] = round(product_y / product_height * 100, 3)
+            transferred += 1
+        if points and transferred < len(points):
+            product_warnings.append(
+                f"제품데이터 범위를 벗어난 포인트 {len(points) - transferred}개는 "
+                "전사하지 않았습니다."
+            )
+
     zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
     zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
     zero_warnings = list(zero_output.warnings) if zero_output is not None else []
-    warnings = zero_warnings + deviation_warnings
+    warnings = zero_warnings + deviation_warnings + product_warnings
 
     if qwen_reads:
         value_mode = "Qwen2.5-VL-3B 로컬 판독"
@@ -531,7 +664,19 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
 
     return {
         "source": {"name": filename, "width": width, "height": height},
+        "partNumber": part_number,
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
+        "productImage": (
+            _png_data_url(product_image) if product_image is not None else None
+        ),
+        "productSource": product_source,
+        "alignment": alignment.to_dict() if alignment is not None else None,
+        "alignmentOverlay": (
+            _png_data_url(alignment_overlay)
+            if alignment_overlay is not None
+            else None
+        ),
+        "keySelection": selection.to_dict(),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)
@@ -557,11 +702,13 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
             ),
             "qwenReads": qwen_reads,
             "qwenUnread": unread_labels,
+            "pointsTransferred": transferred,
         },
         "warnings": warnings,
         "warningsByEngine": {
             "deviation": deviation_warnings,
             "zero": zero_warnings,
+            "product": product_warnings,
         },
         "errors": errors,
         "valueMode": value_mode,
@@ -575,8 +722,14 @@ async def health(_: Request) -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "engines": ["label_removal", "deviation_extraction", "zero_line_detection"],
+            "engines": [
+                "label_removal",
+                "deviation_extraction",
+                "zero_line_detection",
+                "product_alignment",
+            ],
             "folderAvailable": FOLDER_ROOT.is_dir(),
+            "registeredProducts": len(PRODUCT_LIBRARY.registered()),
             "qwenCached": model_path is not None,
             "qwenLoaded": _reader is not None,
             "cuda": torch.cuda.is_available(),
@@ -585,18 +738,299 @@ async def health(_: Request) -> JSONResponse:
     )
 
 
+def _optional_flag(form: Any, name: str) -> bool | None:
+    """Read a tri-state form flag: absent means 'decide automatically'."""
+    raw = form.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def analyze(request: Request) -> JSONResponse:
     try:
-        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        form = await request.form(max_files=2, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
         payload = await upload.read()
         image = _decode_image(payload)
+
+        product_upload = form.get("product")
+        product_image = None
+        if product_upload is not None and hasattr(product_upload, "read"):
+            product_image = _decode_image(await product_upload.read())
+
         result = await run_in_threadpool(
-            analyze_image, image, getattr(upload, "filename", "scan.png")
+            analyze_image,
+            image,
+            getattr(upload, "filename", "scan.png"),
+            product_image,
+            _optional_flag(form, "flipX"),
+            _optional_flag(form, "flipY"),
         )
         return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+def realign_image(
+    image: np.ndarray,
+    filename: str,
+    product_upload: np.ndarray | None,
+    flip_x: bool | None,
+    flip_y: bool | None,
+    points: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Redo only the alignment and the point transfer.
+
+    Changing the orientation must not cost another Qwen pass, so the values
+    already read stay untouched and only the coordinates are recomputed.
+    """
+    part_number = part_number_from_name(filename)
+    product_image, product_source, warnings = _resolve_product_image(
+        filename, product_upload
+    )
+    if product_image is None:
+        raise ValueError("제품데이터 이미지가 없어 정렬을 다시 계산할 수 없습니다.")
+
+    alignment, overlay, alignment_warnings = _align_to_product(
+        image, product_image, part_number, flip_x, flip_y
+    )
+    warnings.extend(alignment_warnings)
+
+    product_width, product_height = alignment.product_size
+    mapped: list[dict[str, Any]] = []
+    for point in points:
+        try:
+            x_px = float(point["xPx"])
+            y_px = float(point["yPx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        product_x, product_y = map_point(alignment, x_px, y_px)
+        if not is_inside(alignment, product_x, product_y):
+            continue
+        mapped.append(
+            {
+                "id": point.get("id"),
+                "xProduct": round(product_x / product_width * 100, 3),
+                "yProduct": round(product_y / product_height * 100, 3),
+            }
+        )
+    if points and len(mapped) < len(points):
+        warnings.append(
+            f"제품데이터 범위를 벗어난 포인트 {len(points) - len(mapped)}개는 "
+            "전사하지 않았습니다."
+        )
+
+    return {
+        "partNumber": part_number,
+        "productImage": _png_data_url(product_image),
+        "productSource": product_source,
+        "alignment": alignment.to_dict(),
+        "alignmentOverlay": _png_data_url(overlay),
+        "points": mapped,
+        "warnings": warnings,
+    }
+
+
+async def realign(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=2, max_fields=8, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "스캔 이미지가 필요합니다."}, status_code=400)
+        image = _decode_image(await upload.read())
+
+        product_upload = form.get("product")
+        product_image = None
+        if product_upload is not None and hasattr(product_upload, "read"):
+            product_image = _decode_image(await product_upload.read())
+
+        raw_points = form.get("points")
+        points = json.loads(str(raw_points)) if raw_points else []
+        if not isinstance(points, list):
+            return JSONResponse({"error": "points는 배열이어야 합니다."}, status_code=400)
+
+        result = await run_in_threadpool(
+            realign_image,
+            image,
+            getattr(upload, "filename", "scan.png"),
+            product_image,
+            _optional_flag(form, "flipX"),
+            _optional_flag(form, "flipY"),
+            points,
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+def build_sheet_bytes(
+    product_image: np.ndarray, payload: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
+    """Turn the sheet the operator sees into the company Excel form.
+
+    Point coordinates arrive as percentages of the product image, which is the
+    same frame the UI draws in, so no alignment work is repeated here.
+    """
+    raw_points = payload.get("points") or []
+    points = [
+        SheetPoint(
+            point_id=str(item.get("id", index)),
+            text=str(item.get("text") or f"{float(item['value']):+.1f}"),
+            x_ratio=float(item["x"]) / 100.0,
+            y_ratio=float(item["y"]) / 100.0,
+        )
+        for index, item in enumerate(raw_points)
+    ]
+
+    title_values = payload.get("title") or {}
+    title = TitleBlock(
+        management_no=str(title_values.get("managementNo", "")),
+        part_name=str(title_values.get("partName", "")),
+        process=str(title_values.get("process", "")),
+        part_no=str(title_values.get("partNo", "")),
+        material=str(title_values.get("material", "")),
+        applied_date=str(title_values.get("appliedDate", "")),
+    )
+
+    views = [SheetView(image=product_image, points=points)]
+    skipped: list[str] = []
+    for index, region in enumerate(payload.get("details") or [], start=1):
+        label = str(region.get("label") or f"DETAIL {index}")
+        try:
+            views.append(
+                crop_view(
+                    product_image,
+                    points,
+                    (
+                        float(region["x"]) / 100.0,
+                        float(region["y"]) / 100.0,
+                        float(region["w"]) / 100.0,
+                        float(region["h"]) / 100.0,
+                    ),
+                    label,
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            skipped.append(f"{label}: {exc}")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output = Path(temp_dir) / "correction-sheet.xlsx"
+        report = build_sheet(views, title, output=output)
+        data = output.read_bytes()
+
+    summary = {
+        "pictures": report.pictures,
+        "labels": report.labels,
+        "leaders": report.leaders,
+        "warnings": report.warnings + skipped,
+    }
+    return data, summary
+
+
+async def sheet(request: Request) -> Response:
+    """Return the correction sheet as an .xlsx download."""
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        payload = json.loads(str(form.get("payload") or "{}"))
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "payload는 객체여야 합니다."}, status_code=400)
+
+        upload = form.get("product")
+        product_image = None
+        if upload is not None and hasattr(upload, "read"):
+            product_image = _decode_image(await upload.read())
+        else:
+            part_number = str(payload.get("partNumber", "")).strip().upper()
+            match = PRODUCT_LIBRARY.find(part_number) if part_number else None
+            if match is None:
+                return JSONResponse(
+                    {"error": "제품데이터 이미지를 찾지 못했습니다."}, status_code=400
+                )
+            product_image = read_image(match.path)
+
+        data, summary = await run_in_threadpool(
+            build_sheet_bytes, product_image, payload
+        )
+        name = f"{payload.get('partNumber') or 'correction'}-보정시트.xlsx"
+        quoted = quote(name)
+        return Response(
+            data,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
+                "X-Sheet-Summary": json.dumps(summary, ensure_ascii=False),
+            },
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def products(request: Request) -> JSONResponse:
+    """List the registered product-data images, or register one."""
+    if request.method == "GET":
+        return JSONResponse(
+            {
+                "entries": PRODUCT_LIBRARY.entries(),
+                "directory": str(PRODUCT_LIBRARY.directory),
+            }
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "제품데이터 이미지가 필요합니다."}, status_code=400)
+
+        raw_part_number = str(form.get("partNumber", "")).strip().upper()
+        part_number = raw_part_number or part_number_from_name(
+            getattr(upload, "filename", "")
+        )
+        if not part_number:
+            return JSONResponse(
+                {"error": "품번을 찾지 못했습니다. partNumber를 함께 보내 주세요."},
+                status_code=400,
+            )
+        if part_number_from_name(f"{part_number}.png") != part_number:
+            return JSONResponse(
+                {"error": f"품번 형식이 올바르지 않습니다: {part_number}"},
+                status_code=400,
+            )
+
+        image = _decode_image(await upload.read())
+        path = await run_in_threadpool(PRODUCT_LIBRARY.register, part_number, image)
+        return JSONResponse({"partNumber": part_number, "path": str(path)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def confirm_alignment(request: Request) -> JSONResponse:
+    """Store a human-confirmed orientation so later scans reuse it.
+
+    The orientation cannot always be decided from the masks -- a symmetric
+    panel scores every flip almost the same -- so this is what turns one
+    person's check into a permanent answer for that part number.
+    """
+    try:
+        payload = await request.json()
+        part_number = str(payload.get("partNumber", "")).strip().upper()
+        if not part_number:
+            return JSONResponse({"error": "품번이 필요합니다."}, status_code=400)
+
+        if payload.get("forget"):
+            removed = ALIGNMENT_STORE.forget(part_number)
+            return JSONResponse({"partNumber": part_number, "removed": removed})
+
+        alignment_payload = payload.get("alignment")
+        if not isinstance(alignment_payload, dict):
+            return JSONResponse({"error": "alignment 값이 필요합니다."}, status_code=400)
+
+        alignment = Alignment.from_dict(alignment_payload)
+        alignment.overridden = True
+        path = ALIGNMENT_STORE.save(part_number, alignment)
+        return JSONResponse({"partNumber": part_number, "path": str(path)})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
@@ -791,6 +1225,10 @@ app = Starlette(
         Route("/api/corrections", list_corrections, methods=["GET"]),
         Route("/api/corrections", delete_correction, methods=["DELETE"]),
         Route("/api/folders", folders, methods=["GET"]),
+        Route("/api/realign", realign, methods=["POST"]),
+        Route("/api/sheet", sheet, methods=["POST"]),
+        Route("/api/products", products, methods=["GET", "POST"]),
+        Route("/api/alignment", confirm_alignment, methods=["POST"]),
     ]
 )
 app.add_middleware(
@@ -798,6 +1236,8 @@ app.add_middleware(
     allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
+    # 시트 생성 결과 요약은 헤더로 오므로 브라우저가 읽을 수 있게 열어 준다.
+    expose_headers=["Content-Disposition", "X-Sheet-Summary"],
 )
 
 
