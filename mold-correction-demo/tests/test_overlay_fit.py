@@ -86,3 +86,30 @@ def test_비스듬히_기울어진_스캔도_맞춘다():
 
     fit = ov.fit_view(vertices, faces, grid)
     assert fit.iou > 0.85, f"기울어진 스캔을 못 맞춘다 (겹침 {fit.iou})"
+
+
+def test_얹힘_비율을_잰다():
+    """오버레이가 쓸 만한지는 겹침 넓이가 아니라 얹힘 비율로 가른다.
+
+    실측에서 껍질 겹침은 후하고(64XX2 96.9%) 실루엣은 박하다(42.2%).
+    둘 다 세 부품을 못 가르는데 얹힘 비율은 가른다
+    (91.0 / 75.5 / 29.8%).
+    """
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    rate = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
+    assert rate > 0.9, f"잘 맞은 자세인데 얹힘이 낮다 ({rate})"
+
+
+def test_얹힘_비율은_같은_입력에_같은_값():
+    """표본을 무작위로 뽑되 씨앗을 고정한다 — 볼 때마다 숫자가 바뀌면
+    사용자가 못 믿는다."""
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    first = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
+    second = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
+    assert first == second

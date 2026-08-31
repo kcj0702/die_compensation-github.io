@@ -36,7 +36,30 @@ import numpy as np
 FIT_GRID = 256
 # 이보다 겹침이 낮으면 맞췄다고 보기 어렵다.
 # 바깥 윤곽(구멍을 메운 실루엣) 기준이다 — 아래 설명 참고.
+# 겹침 기준. 이건 "자리를 잡았나" 의 대리 지표일 뿐이다.
 MIN_IOU = 0.75
+# 실제 기준: 스캔 부품 위의 점을 쏘았을 때 형상에 맞는 비율.
+#
+# 겹침만 보다가 두 번 속았다.
+#   - 껍질 겹침은 구멍과 오목한 곳을 메우고 재서 후하다. 실측 64XX2 는
+#     껍질 96.9% 인데 실루엣은 42.2% 다. 화면에 97% 라고 띄우면 사용자는
+#     "거의 완벽" 으로 읽는데 안쪽은 절반도 안 맞는다.
+#   - 그렇다고 실루엣으로 판정하면 멀쩡한 부품을 버린다. 판금을 비스듬히
+#     보면 투영 넓이가 원래 다르다 — 42% 가 정상이다.
+#
+# 오버레이가 하는 일은 "스캔의 한 점을 형상 어디에 얹느냐" 다. 그러니
+# 그것을 직접 재는 게 맞다. 실측 —
+#
+#     부품     껍질    실루엣   광선명중
+#     64XX2   96.9%   42.2%    91.0%
+#     67XX6   94.7%   39.8%    75.5%
+#     71XX2   28.1%   12.7%    29.8%
+#
+# 명중률만 세 부품을 깨끗이 가른다. 0.60 이면 앞 둘은 통과, 71XX2 는
+# 걸린다.
+MIN_HIT_RATE = 0.60
+# 명중률을 잴 때 쏴 보는 점 수. 많이 쏠 이유가 없다.
+HIT_SAMPLE = 300
 
 
 @dataclass
@@ -52,6 +75,7 @@ class ViewFit:
     origin_v: float
     iou: float             # 바깥 윤곽 겹침 — 자리를 맞췄는지
     detail_iou: float = 0.0  # 구멍까지 포함한 겹침 — 형상이 같은지
+    hit_rate: float = 0.0    # 스캔 위의 점이 형상에 얹히는 비율 — 실제 기준
     swap: bool = False     # 화면에서 90도 돌렸나 (가로세로 맞바꿈)
     angle: float = 0.0     # 평면에서 더 돌린 각(라디안). 90도 단위가 아니다.
     reliable: bool = False
@@ -250,6 +274,26 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask) -> ViewFit:
     return best
 
 
+def measure_hit_rate(fit: ViewFit, vertices: np.ndarray, faces: np.ndarray,
+                     part_mask, mesh=None, seed: int = 0) -> float:
+    """스캔 부품 위의 점을 쏘았을 때 형상에 맞는 비율.
+
+    오버레이가 실제로 하는 일을 그대로 재는 것이라, 겹침 넓이보다
+    정직한 기준이다(MIN_HIT_RATE 주석 참고).
+    """
+    mask = np.asarray(part_mask) > 0
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return 0.0
+    rng = np.random.default_rng(seed)     # 같은 입력이면 같은 값이 나오게
+    pick = rng.choice(len(xs), size=min(HIT_SAMPLE, len(xs)), replace=False)
+    points = [[int(xs[i]), int(ys[i])] for i in pick]
+    placed = unproject(points, vertices, faces, fit, mesh)
+    if not placed:
+        return 0.0
+    return float(sum(1 for spot in placed if spot is not None) / len(placed))
+
+
 def unproject(points_px, vertices: np.ndarray, faces: np.ndarray,
               fit: ViewFit, mesh=None) -> list:
     """화면 좌표를 표면 위의 3D 점으로 바꾼다.
@@ -366,5 +410,6 @@ def sample_deviation(vertices: np.ndarray, fit: ViewFit,
     return out
 
 
-__all__ = ["ViewFit", "MIN_IOU", "fit_view", "unproject",
+__all__ = ["ViewFit", "MIN_IOU", "MIN_HIT_RATE",
+           "fit_view", "measure_hit_rate", "unproject",
            "sample_deviation", "sample_flags", "to_pixels"]

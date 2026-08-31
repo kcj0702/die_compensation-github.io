@@ -1795,7 +1795,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
                 {overlay && <span className="cad-overlay-bar__note">
                   {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
-                  {' '}겹침 {Math.round(overlay.fit.iou * 100)}% ·
+                  {/* "겹침 97%" 만 띄우면 거의 완벽한 줄 안다. 그건 볼록
+                      껍질끼리 잰 값이고(구멍·오목한 곳을 메우고 비교),
+                      실측 64XX2 는 껍질 96.9% · 실루엣 42.2% 다.
+                      실제 기준인 얹힘 비율을 앞에 둔다. */}
+                  {' '}형상에 얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
+                  {' '}(윤곽 겹침 {Math.round(overlay.fit.iou * 100)}%) ·
                   {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px ·
                   {' '}제로라인 {overlay.zeroLines.length}개
                 </span>}

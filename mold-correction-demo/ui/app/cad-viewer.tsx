@@ -41,6 +41,9 @@ export type CadOverlay = {
   fit: {
     axis: number; sign: number; flip_u: boolean; flip_v: boolean;
     mm_per_px: number; iou: number; reliable: boolean;
+    /* 스캔 위의 점이 형상에 얹히는 비율. 겹침 넓이보다 이게 실제 기준이다 —
+       껍질 겹침은 후하고(실측 64XX2 96.9%) 실루엣은 박하다(42.2%). */
+    hit_rate?: number; detail_iou?: number;
   };
   zeroLines: { line_id: number | null; points: [number, number, number][] }[];
   /* 정점마다 0 = 아님 · 1 = 제로라인(띠) · 2 = 제로 영역.
@@ -1656,9 +1659,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
     {overlay && !overlay.fit.reliable && (
       <p className="cad-viewer__warn">
-        CAD 겉모양과 스캔이 {Math.round(overlay.fit.iou * 100)}% 만 겹쳐
-        제로라인·보정량·편차색을 형상에 얹지 않았습니다 (기준 75%).
-        틀린 자리에 그리는 것보다 안 그리는 쪽을 택했습니다 —
+        스캔 위의 점 중 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}% 만
+        형상에 얹혔습니다 (기준 60%). 제로라인·보정량·편차색을 그리지
+        않았습니다 — 틀린 자리에 그리는 것보다 안 그리는 쪽을 택했습니다.
         이 부품은 "시트 단면 표기" 로 제로라인을 계산해 주세요.
       </p>
     )}

@@ -1093,6 +1093,12 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     shifted = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
     fit = ov.fit_view(vertices, faces, analysis["part_mask"])
+    # 겹침 넓이가 아니라 **점이 형상에 얹히는 비율**로 판정한다.
+    # 껍질 겹침은 후하고(64XX2 96.9%) 실루엣은 박하다(42.2%) — 둘 다
+    # 오버레이가 쓸 만한지를 못 가린다. overlay.MIN_HIT_RATE 참고.
+    fit.hit_rate = round(ov.measure_hit_rate(
+        fit, vertices, faces, analysis["part_mask"], shifted), 4)
+    fit.reliable = fit.hit_rate >= ov.MIN_HIT_RATE
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
     # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
