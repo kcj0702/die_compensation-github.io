@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import cv2
 import numpy as np
@@ -30,6 +31,26 @@ UI_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = UI_DIR.parent
 WORKSPACE_DIR = PROJECT_DIR.parent
 DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
+
+
+def _load_local_environment(env_path: Path) -> None:
+    """Load non-committed local settings without overriding process variables."""
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_local_environment(UI_DIR / ".env")
 
 # deviation_extraction currently uses local-style imports (import config), so
 # its own folder must precede the project root on sys.path.
@@ -86,25 +107,172 @@ CORRECTION_DB_PATH = Path(
         "AJIN_CORRECTION_DB_PATH", str(UI_DIR / "backend" / "correction_history.db")
     )
 )
+CORRECTION_DB_URL = os.environ.get("AJIN_CORRECTION_DB_URL", "").strip()
 CORRECTION_ACTIONS = frozenset(
     {"edit", "reset_auto", "reset_all", "restore_before", "reapply", "revise"}
 )
 CORRECTION_MODES = frozenset({"auto", "manual"})
 
 
-@contextmanager
-def _get_correction_db() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(CORRECTION_DB_PATH)
-    conn.row_factory = sqlite3.Row
+class CorrectionDatabaseError(RuntimeError):
+    """Raised when the shared correction-history database is unavailable."""
+
+
+def _active_correction_db_url() -> str:
+    return os.environ.get("AJIN_CORRECTION_DB_URL", CORRECTION_DB_URL).strip()
+
+
+def _mysql_connection_config(database_url: str) -> dict[str, Any]:
+    parsed = urlsplit(database_url)
+    if parsed.scheme not in {"mysql", "mysql+mysqlconnector"}:
+        raise ValueError(
+            "AJIN_CORRECTION_DB_URL must start with mysql:// or "
+            "mysql+mysqlconnector://."
+        )
+    database = unquote(parsed.path.lstrip("/"))
+    if not parsed.hostname or not parsed.username or not database:
+        raise ValueError(
+            "AJIN_CORRECTION_DB_URL requires a host, user, and database name."
+        )
+    query = parse_qs(parsed.query)
+    charset = query.get("charset", ["utf8mb4"])[-1]
+    timeout_text = query.get("connect_timeout", ["10"])[-1]
     try:
-        with conn:
-            yield conn
+        connection_timeout = max(1, min(60, int(timeout_text)))
+    except ValueError as exc:
+        raise ValueError("connect_timeout must be an integer from 1 to 60.") from exc
+    config: dict[str, Any] = {
+        "host": parsed.hostname,
+        "port": parsed.port or 3306,
+        "user": unquote(parsed.username),
+        "password": unquote(parsed.password or ""),
+        "database": database,
+        "charset": charset,
+        "connection_timeout": connection_timeout,
+        "autocommit": False,
+    }
+    ssl_ca = query.get("ssl_ca", [""])[-1].strip()
+    if ssl_ca:
+        config.update(
+            ssl_ca=ssl_ca,
+            ssl_verify_cert=True,
+            ssl_verify_identity=True,
+        )
+    return config
+
+
+class _CorrectionConnection:
+    def __init__(self, raw_connection: Any, dialect: str) -> None:
+        self.raw_connection = raw_connection
+        self.dialect = dialect
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> Any:
+        cursor = (
+            self.raw_connection.cursor(dictionary=True)
+            if self.dialect == "mysql"
+            else self.raw_connection.cursor()
+        )
+        statement = query.replace("?", "%s") if self.dialect == "mysql" else query
+        try:
+            cursor.execute(statement, params)
+        except Exception as exc:
+            cursor.close()
+            if self.dialect == "mysql":
+                raise CorrectionDatabaseError(
+                    "MySQL correction-history query failed."
+                ) from exc
+            raise
+        return cursor
+
+
+@contextmanager
+def _get_correction_db() -> Iterator[_CorrectionConnection]:
+    database_url = _active_correction_db_url()
+    if database_url:
+        try:
+            import mysql.connector
+
+            raw_connection = mysql.connector.connect(
+                **_mysql_connection_config(database_url)
+            )
+        except (ImportError, ValueError) as exc:
+            raise CorrectionDatabaseError(str(exc)) from exc
+        except Exception as exc:
+            raise CorrectionDatabaseError(
+                "Could not connect to the MySQL correction-history database."
+            ) from exc
+        connection = _CorrectionConnection(raw_connection, "mysql")
+    else:
+        raw_connection = sqlite3.connect(CORRECTION_DB_PATH)
+        raw_connection.row_factory = sqlite3.Row
+        connection = _CorrectionConnection(raw_connection, "sqlite")
+    try:
+        yield connection
+        raw_connection.commit()
+    except CorrectionDatabaseError:
+        raw_connection.rollback()
+        raise
+    except Exception as exc:
+        raw_connection.rollback()
+        if connection.dialect == "mysql":
+            raise CorrectionDatabaseError(
+                "MySQL correction-history operation failed."
+            ) from exc
+        raise
     finally:
-        conn.close()
+        raw_connection.close()
 
 
 def _init_correction_db() -> None:
     with _get_correction_db() as conn:
+        if conn.dialect == "mysql":
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS correction_history (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    part_no VARCHAR(255) NOT NULL,
+                    scan_name VARCHAR(255) NOT NULL,
+                    point_id VARCHAR(128) NOT NULL,
+                    old_value DOUBLE NULL,
+                    new_value DOUBLE NULL,
+                    worker VARCHAR(255) NULL,
+                    created_at VARCHAR(32) NOT NULL,
+                    action VARCHAR(32) NOT NULL DEFAULT 'edit',
+                    old_mode VARCHAR(16) NULL,
+                    new_mode VARCHAR(16) NULL,
+                    coefficient DOUBLE NULL,
+                    source_entry_id BIGINT UNSIGNED NULL,
+                    PRIMARY KEY (id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            columns = {
+                row["Field"]
+                for row in conn.execute("SHOW COLUMNS FROM correction_history").fetchall()
+            }
+            migrations = (
+                ("action", "VARCHAR(32) NOT NULL DEFAULT 'edit'"),
+                ("old_mode", "VARCHAR(16) NULL"),
+                ("new_mode", "VARCHAR(16) NULL"),
+                ("coefficient", "DOUBLE NULL"),
+                ("source_entry_id", "BIGINT UNSIGNED NULL"),
+            )
+            for name, declaration in migrations:
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE correction_history ADD COLUMN {name} {declaration}"
+                    )
+            indexes = {
+                row["Key_name"]
+                for row in conn.execute("SHOW INDEX FROM correction_history").fetchall()
+            }
+            if "idx_correction_history_part_scan_id" not in indexes:
+                conn.execute(
+                    "CREATE INDEX idx_correction_history_part_scan_id "
+                    "ON correction_history (part_no, scan_name, id DESC)"
+                )
+            return
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS correction_history (
@@ -581,6 +749,9 @@ async def health(_: Request) -> JSONResponse:
             "qwenLoaded": _reader is not None,
             "cuda": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "correctionDatabase": (
+                "mysql" if _active_correction_db_url() else "sqlite"
+            ),
         }
     )
 
@@ -701,6 +872,11 @@ async def create_correction(request: Request) -> JSONResponse:
         return JSONResponse(_correction_row_to_dict(row))
     except (TypeError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
+        )
 
 
 async def delete_correction(request: Request) -> JSONResponse:
@@ -711,9 +887,15 @@ async def delete_correction(request: Request) -> JSONResponse:
         entry_id = None
     if not entry_id or entry_id <= 0:
         return JSONResponse({"error": "삭제할 이력 id가 필요합니다."}, status_code=400)
-    with _get_correction_db() as conn:
-        cursor = conn.execute(
-            "DELETE FROM correction_history WHERE id = ?", (entry_id,)
+    try:
+        with _get_correction_db() as conn:
+            cursor = conn.execute(
+                "DELETE FROM correction_history WHERE id = ?", (entry_id,)
+            )
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
         )
     if cursor.rowcount == 0:
         return JSONResponse({"error": "해당 이력을 찾을 수 없습니다."}, status_code=404)
@@ -735,8 +917,14 @@ async def list_corrections(request: Request) -> JSONResponse:
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id DESC LIMIT 200"
-    with _get_correction_db() as conn:
-        rows = conn.execute(query, tuple(params)).fetchall()
+    try:
+        with _get_correction_db() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
+        )
     return JSONResponse({"entries": [_correction_row_to_dict(row) for row in rows]})
 
 
