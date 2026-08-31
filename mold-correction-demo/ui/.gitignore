@@ -41,3 +41,6 @@ next-env.d.ts
 # python local engine cache
 __pycache__/
 *.py[cod]
+
+# 작업자별 로컬 보정 이력 (기기마다 다르므로 커밋하지 않음)
+/backend/correction_history.db

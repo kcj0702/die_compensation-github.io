@@ -5,9 +5,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlencode
 from unittest.mock import patch
 
 import numpy as np
@@ -18,13 +21,59 @@ SERVER_PATH = PROJECT_ROOT / "ui" / "backend" / "server.py"
 SPEC = importlib.util.spec_from_file_location("ajin_ui_backend_server", SERVER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 backend_server = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(backend_server)
+_SERVER_IMPORT_DB_DIR = tempfile.TemporaryDirectory()
+with patch.dict(
+    os.environ,
+    {
+        "AJIN_CORRECTION_DB_PATH": str(
+            Path(_SERVER_IMPORT_DB_DIR.name) / "import-correction-history.db"
+        )
+    },
+):
+    SPEC.loader.exec_module(backend_server)
 
 from label_detector import LabelCandidate  # noqa: E402
 
 
 def _candidate(box: tuple[int, int, int, int], point: tuple[int, int]) -> LabelCandidate:
     return LabelCandidate(box=box, point_xy=point, label_color="white", traced=True)
+
+
+def _json_request(
+    payload: object | None = None,
+    *,
+    method: str = "POST",
+    query: dict[str, str] | None = None,
+):
+    body = b"" if payload is None else json.dumps(payload).encode("utf-8")
+    delivered = False
+
+    async def receive():
+        nonlocal delivered
+        if delivered:
+            return {"type": "http.disconnect"}
+        delivered = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    query_string = urlencode(query or {}).encode("ascii")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": "/api/corrections",
+        "raw_path": b"/api/corrections",
+        "query_string": query_string,
+        "headers": [(b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+    return backend_server.Request(scope, receive)
+
+
+def _response_json(response) -> dict:
+    return json.loads(response.body.decode("utf-8"))
 
 
 class _Reader:
@@ -93,6 +142,266 @@ class UiBackendModelDiscoveryTest(unittest.TestCase):
                 found = backend_server._find_qwen_model()
 
         self.assertEqual(found, model_dir.resolve())
+
+
+class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.db_path = Path(self.temp_dir.name) / "correction-history.db"
+        self.db_patch = patch.object(
+            backend_server, "CORRECTION_DB_PATH", self.db_path
+        )
+        self.db_patch.start()
+        self.addCleanup(self.db_patch.stop)
+
+    def test_legacy_database_is_migrated_without_changing_existing_row(self) -> None:
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute(
+                """
+                CREATE TABLE correction_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    part_no TEXT NOT NULL,
+                    scan_name TEXT NOT NULL,
+                    point_id TEXT NOT NULL,
+                    old_value REAL,
+                    new_value REAL,
+                    worker TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO correction_history "
+                "(part_no, scan_name, point_id, old_value, new_value, worker, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "64XX2",
+                    "legacy.png",
+                    "P-14",
+                    -0.2,
+                    -0.1,
+                    "tester",
+                    "2026-08-27T17:39:04",
+                ),
+            )
+
+        backend_server._init_correction_db()
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(correction_history)")
+            }
+            row = conn.execute(
+                "SELECT id, part_no, scan_name, point_id, old_value, new_value, "
+                "worker, created_at, action, old_mode, new_mode, coefficient, "
+                "source_entry_id FROM correction_history"
+            ).fetchone()
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+
+        self.assertTrue(
+            {"action", "old_mode", "new_mode", "coefficient", "source_entry_id"}
+            <= columns
+        )
+        self.assertEqual(
+            row,
+            (
+                1,
+                "64XX2",
+                "legacy.png",
+                "P-14",
+                -0.2,
+                -0.1,
+                "tester",
+                "2026-08-27T17:39:04",
+                "edit",
+                None,
+                None,
+                None,
+                None,
+            ),
+        )
+        self.assertEqual(user_version, 1)
+
+    async def test_post_round_trip_supports_metadata_and_legacy_payloads(self) -> None:
+        backend_server._init_correction_db()
+        first_response = await backend_server.create_correction(
+            _json_request(
+                {
+                    "partNo": "64XX2",
+                    "scanName": "scan-a.png",
+                    "pointId": "P-14",
+                    "oldValue": -0.24,
+                    "newValue": -0.1,
+                    "worker": "tester",
+                    "action": "edit",
+                    "oldMode": "auto",
+                    "newMode": "manual",
+                    "coefficient": 1.15,
+                }
+            )
+        )
+        first = _response_json(first_response)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(first["action"], "edit")
+        self.assertEqual(first["oldMode"], "auto")
+        self.assertEqual(first["newMode"], "manual")
+        self.assertEqual(first["coefficient"], 1.15)
+        self.assertIsNone(first["sourceEntryId"])
+
+        restore_response = await backend_server.create_correction(
+            _json_request(
+                {
+                    "partNo": "64XX2",
+                    "scanName": "scan-a.png",
+                    "pointId": "P-14",
+                    "oldValue": -0.1,
+                    "newValue": -0.24,
+                    "worker": "reviewer",
+                    "action": "restore_before",
+                    "oldMode": "manual",
+                    "newMode": "auto",
+                    "coefficient": 1.15,
+                    "sourceEntryId": first["id"],
+                }
+            )
+        )
+        restored = _response_json(restore_response)
+        self.assertEqual(restore_response.status_code, 200)
+        self.assertEqual(restored["action"], "restore_before")
+        self.assertEqual(restored["sourceEntryId"], first["id"])
+
+        legacy_response = await backend_server.create_correction(
+            _json_request(
+                {
+                    "partNo": "64XX2",
+                    "scanName": "scan-a.png",
+                    "pointId": "P-15",
+                    "oldValue": 0.2,
+                    "newValue": None,
+                    "worker": "tester",
+                }
+            )
+        )
+        legacy = _response_json(legacy_response)
+        self.assertEqual(legacy_response.status_code, 200)
+        self.assertEqual(legacy["action"], "edit")
+        self.assertIsNone(legacy["oldMode"])
+        self.assertIsNone(legacy["newMode"])
+        self.assertIsNone(legacy["coefficient"])
+        self.assertIsNone(legacy["sourceEntryId"])
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            original = conn.execute(
+                "SELECT action, old_mode, new_mode, coefficient, source_entry_id "
+                "FROM correction_history WHERE id = ?",
+                (first["id"],),
+            ).fetchone()
+        self.assertEqual(original, ("edit", "auto", "manual", 1.15, None))
+
+    async def test_get_can_filter_by_part_number_and_scan_name(self) -> None:
+        backend_server._init_correction_db()
+        records = (
+            ("64XX2", "scan-a.png", "P-01"),
+            ("64XX2", "scan-b.png", "P-02"),
+            ("OTHER", "scan-a.png", "P-03"),
+        )
+        for part_no, scan_name, point_id in records:
+            response = await backend_server.create_correction(
+                _json_request(
+                    {
+                        "partNo": part_no,
+                        "scanName": scan_name,
+                        "pointId": point_id,
+                        "oldValue": 0.0,
+                        "newValue": 0.1,
+                    }
+                )
+            )
+            self.assertEqual(response.status_code, 200)
+
+        part_response = await backend_server.list_corrections(
+            _json_request(method="GET", query={"partNo": "64XX2"})
+        )
+        part_entries = _response_json(part_response)["entries"]
+        self.assertEqual(
+            [(entry["scanName"], entry["pointId"]) for entry in part_entries],
+            [("scan-b.png", "P-02"), ("scan-a.png", "P-01")],
+        )
+
+        scan_response = await backend_server.list_corrections(
+            _json_request(
+                method="GET",
+                query={"partNo": "64XX2", "scanName": "scan-a.png"},
+            )
+        )
+        scan_entries = _response_json(scan_response)["entries"]
+        self.assertEqual(len(scan_entries), 1)
+        self.assertEqual(scan_entries[0]["pointId"], "P-01")
+
+        scan_only_response = await backend_server.list_corrections(
+            _json_request(method="GET", query={"scanName": "scan-a.png"})
+        )
+        scan_only_entries = _response_json(scan_only_response)["entries"]
+        self.assertEqual(
+            [entry["partNo"] for entry in scan_only_entries], ["OTHER", "64XX2"]
+        )
+
+    async def test_post_rejects_nonfinite_numbers_before_inserting(self) -> None:
+        backend_server._init_correction_db()
+        invalid_fields = (
+            ("oldValue", float("nan")),
+            ("newValue", float("inf")),
+            ("coefficient", float("-inf")),
+            ("newValue", "0.3"),
+            ("oldValue", True),
+            ("oldValue", 10**400),
+        )
+        for field, value in invalid_fields:
+            with self.subTest(field=field, value=value):
+                payload = {
+                    "partNo": "64XX2",
+                    "scanName": "scan-a.png",
+                    "pointId": "P-01",
+                    "oldValue": 0.0,
+                    "newValue": 0.1,
+                }
+                payload[field] = value
+                response = await backend_server.create_correction(
+                    _json_request(payload)
+                )
+                self.assertEqual(response.status_code, 422)
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM correction_history").fetchone()[0]
+        self.assertEqual(count, 0)
+
+    async def test_post_rejects_unknown_action_mode_and_source_id(self) -> None:
+        backend_server._init_correction_db()
+        invalid_metadata = (
+            {"action": "delete"},
+            {"oldMode": "unknown"},
+            {"newMode": 1},
+            {"sourceEntryId": 0},
+            {"sourceEntryId": True},
+            {"sourceEntryId": 2**63},
+        )
+        for extra in invalid_metadata:
+            with self.subTest(extra=extra):
+                response = await backend_server.create_correction(
+                    _json_request(
+                        {
+                            "partNo": "64XX2",
+                            "scanName": "scan-a.png",
+                            "pointId": "P-01",
+                            "oldValue": 0.0,
+                            "newValue": 0.1,
+                            **extra,
+                        }
+                    )
+                )
+                self.assertEqual(response.status_code, 422)
 
 
 class UiBackendStrictReadingTest(unittest.TestCase):

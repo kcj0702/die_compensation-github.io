@@ -6,8 +6,11 @@ import base64
 import json
 import math
 import os
+import sqlite3
 import sys
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -75,6 +78,135 @@ QWEN_REQUIRED_FILES = (
 )
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
+
+# 보정치 수동 수정 이력을 남기는 로컬 DB. 스캔 이미지·도면 데이터를 외부로 보낼 수 없는
+# 사내 보안정책과 같은 이유로, 외부 SQL 서버가 아니라 이 백엔드가 로컬에 직접 들고 있다.
+CORRECTION_DB_PATH = Path(
+    os.environ.get(
+        "AJIN_CORRECTION_DB_PATH", str(UI_DIR / "backend" / "correction_history.db")
+    )
+)
+CORRECTION_ACTIONS = frozenset(
+    {"edit", "reset_auto", "reset_all", "restore_before", "reapply", "revise"}
+)
+CORRECTION_MODES = frozenset({"auto", "manual"})
+
+
+@contextmanager
+def _get_correction_db() -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(CORRECTION_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
+def _init_correction_db() -> None:
+    with _get_correction_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS correction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                part_no TEXT NOT NULL,
+                scan_name TEXT NOT NULL,
+                point_id TEXT NOT NULL,
+                old_value REAL,
+                new_value REAL,
+                worker TEXT,
+                created_at TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'edit',
+                old_mode TEXT,
+                new_mode TEXT,
+                coefficient REAL,
+                source_entry_id INTEGER
+            )
+            """
+        )
+        # The first version of the local history DB only had the columns above
+        # ``created_at``.  Keep those rows intact and add metadata in place so a
+        # UI/backend update never discards an operator's existing audit trail.
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(correction_history)").fetchall()
+        }
+        migrations = (
+            ("action", "TEXT NOT NULL DEFAULT 'edit'"),
+            ("old_mode", "TEXT"),
+            ("new_mode", "TEXT"),
+            ("coefficient", "REAL"),
+            ("source_entry_id", "INTEGER"),
+        )
+        for name, declaration in migrations:
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE correction_history ADD COLUMN {name} {declaration}"
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_correction_history_part_scan_id "
+            "ON correction_history (part_no, scan_name, id DESC)"
+        )
+        current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version < 1:
+            conn.execute("PRAGMA user_version = 1")
+
+
+_init_correction_db()
+
+
+def _correction_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "partNo": row["part_no"],
+        "scanName": row["scan_name"],
+        "pointId": row["point_id"],
+        "oldValue": row["old_value"],
+        "newValue": row["new_value"],
+        "worker": row["worker"],
+        "createdAt": row["created_at"],
+        "action": row["action"],
+        "oldMode": row["old_mode"],
+        "newMode": row["new_mode"],
+        "coefficient": row["coefficient"],
+        "sourceEntryId": row["source_entry_id"],
+    }
+
+
+def _optional_finite_number(value: Any, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number or null.")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be a finite number or null.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be a finite number or null.")
+    return number
+
+
+def _optional_correction_mode(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in CORRECTION_MODES:
+        choices = ", ".join(sorted(CORRECTION_MODES))
+        raise ValueError(f"{field_name} must be one of: {choices}, or null.")
+    return value
+
+
+def _optional_source_entry_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > 2**63 - 1
+    ):
+        raise ValueError("sourceEntryId must be a positive integer or null.")
+    return value
 
 
 def _is_complete_qwen_model(candidate: Path) -> bool:
@@ -520,6 +652,94 @@ async def sample(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+async def create_correction(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("Request body must be a JSON object.")
+        part_no = str(body.get("partNo") or "").strip()
+        point_id = str(body.get("pointId") or "").strip()
+        if not part_no or not point_id:
+            return JSONResponse({"error": "partNo와 pointId가 필요합니다."}, status_code=400)
+        scan_name = str(body.get("scanName") or "").strip()
+        old_value = _optional_finite_number(body.get("oldValue"), "oldValue")
+        new_value = _optional_finite_number(body.get("newValue"), "newValue")
+        worker = str(body.get("worker") or "").strip() or None
+        action = body["action"] if "action" in body else "edit"
+        if not isinstance(action, str) or action not in CORRECTION_ACTIONS:
+            choices = ", ".join(sorted(CORRECTION_ACTIONS))
+            raise ValueError(f"action must be one of: {choices}.")
+        old_mode = _optional_correction_mode(body.get("oldMode"), "oldMode")
+        new_mode = _optional_correction_mode(body.get("newMode"), "newMode")
+        coefficient = _optional_finite_number(body.get("coefficient"), "coefficient")
+        source_entry_id = _optional_source_entry_id(body.get("sourceEntryId"))
+        created_at = datetime.now().isoformat(timespec="seconds")
+        with _get_correction_db() as conn:
+            cursor = conn.execute(
+                "INSERT INTO correction_history "
+                "(part_no, scan_name, point_id, old_value, new_value, worker, created_at, "
+                "action, old_mode, new_mode, coefficient, source_entry_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    part_no,
+                    scan_name,
+                    point_id,
+                    old_value,
+                    new_value,
+                    worker,
+                    created_at,
+                    action,
+                    old_mode,
+                    new_mode,
+                    coefficient,
+                    source_entry_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM correction_history WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return JSONResponse(_correction_row_to_dict(row))
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def delete_correction(request: Request) -> JSONResponse:
+    raw_id = request.query_params.get("id")
+    try:
+        entry_id = int(raw_id) if raw_id is not None else None
+    except ValueError:
+        entry_id = None
+    if not entry_id or entry_id <= 0:
+        return JSONResponse({"error": "삭제할 이력 id가 필요합니다."}, status_code=400)
+    with _get_correction_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM correction_history WHERE id = ?", (entry_id,)
+        )
+    if cursor.rowcount == 0:
+        return JSONResponse({"error": "해당 이력을 찾을 수 없습니다."}, status_code=404)
+    return JSONResponse({"id": entry_id, "deleted": True})
+
+
+async def list_corrections(request: Request) -> JSONResponse:
+    part_no = request.query_params.get("partNo")
+    scan_name = request.query_params.get("scanName")
+    query = "SELECT * FROM correction_history"
+    conditions: list[str] = []
+    params: list[Any] = []
+    if part_no:
+        conditions.append("part_no = ?")
+        params.append(part_no)
+    if scan_name:
+        conditions.append("scan_name = ?")
+        params.append(scan_name)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id DESC LIMIT 200"
+    with _get_correction_db() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    return JSONResponse({"entries": [_correction_row_to_dict(row) for row in rows]})
+
+
 def _safe_folder(relative_path: str) -> Path:
     candidate = (FOLDER_ROOT / relative_path).resolve()
     if candidate != FOLDER_ROOT and FOLDER_ROOT not in candidate.parents:
@@ -567,13 +787,16 @@ app = Starlette(
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
         Route("/api/sample", sample, methods=["POST"]),
+        Route("/api/corrections", create_correction, methods=["POST"]),
+        Route("/api/corrections", list_corrections, methods=["GET"]),
+        Route("/api/corrections", delete_correction, methods=["DELETE"]),
         Route("/api/folders", folders, methods=["GET"]),
     ]
 )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
