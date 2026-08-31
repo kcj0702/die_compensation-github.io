@@ -331,6 +331,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const [noteDraft, setNoteDraft] = useState<
     { at: [number, number, number]; text: string; x: number; y: number } | null>(null);
   /* 공정 구역 — 시트의 분홍 영역. 찍은 자리 둘레를 칠하고 번호를 붙인다. */
+  /* 보정 후 형상을 몇 배로 부풀려 볼지. 1 이면 실제 그대로(=안 보인다).
+     메인 이펙트의 의존성에 들어가므로 반드시 그보다 **앞에서** 선언해야
+     한다 — 뒤에 두면 의존성 배열이 평가될 때 아직 초기화 전이다. */
+  const [exaggeration, setExaggeration] = useState(30);
   const [zoning, setZoning] = useState(false);
   const [zoneRadius, setZoneRadius] = useState(0.12);   // 부품 크기 대비
   const [measure, setMeasure] = useState<
@@ -483,8 +487,24 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     if (morph && morphMode !== 'off'
         && morph.positions.length === mesh.positions.length) {
       const after = new THREE.BufferGeometry();
+      // 변형을 **과장해서** 보여준다.
+      //
+      // 실제 보정량은 부품 크기의 0.13~0.16% 다 —
+      //     64XX2  1492mm 에 2.0mm    화면에서 0.90px
+      //     67XX6  2043mm 에 3.0mm    화면에서 0.99px
+      //     71XX2  1230mm 에 2.0mm    화면에서 1.09px
+      // 전부 1픽셀 안팎이라 눈으로는 원리적으로 구분할 수 없다. 겹쳐
+      // 놓아도 색만 다르고 형상은 똑같아 보인다. 해석 소프트웨어가
+      // 변형을 수십 배 부풀려 보여주는 이유가 이것이다.
+      //
+      // 부풀린 형상은 **보는 용도**다. STL 로 내보내는 값은 손대지 않는다.
+      const puffed = new Float32Array(morph.positions.length);
+      for (let i = 0; i < morph.positions.length; i += 1) {
+        puffed[i] = mesh.positions[i]
+          + (morph.positions[i] - mesh.positions[i]) * exaggeration;
+      }
       after.setAttribute('position',
-        new THREE.Float32BufferAttribute(morph.positions, 3));
+        new THREE.Float32BufferAttribute(puffed, 3));
       after.setIndex(mesh.indices);
       after.computeVertexNormals();
       // 얼마나 밀렸는지 색으로 — 살을 붙인 쪽이 분홍, 깎은 쪽이 하늘색
@@ -1216,7 +1236,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       mount.removeChild(renderer.domElement);
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode, sections]);
+      morph, morphMode, sections, exaggeration]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -1417,6 +1437,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         bottom:52px 로 못 박아 뒀는데, 아래 버튼 줄이 두 줄로 접히면
         그 위로 겹쳐 올라와 둘 다 누르기 어려웠다. */}
     <div className="cad-viewer__controls">
+    {morph && morphMode !== 'off' && (
+      <div className="cad-viewer__section cad-viewer__puff">
+        <label htmlFor="cad-puff">변형 과장</label>
+        <input id="cad-puff" type="range" min={1} max={100} step={1}
+          value={exaggeration}
+          onChange={(event) => setExaggeration(Number(event.target.value))} />
+        <span>{exaggeration}배</span>
+        <em>실제 보정량은 부품 크기의 0.1%대라 1배로는 안 보입니다 ·
+          내보내는 STL 은 실제 값입니다</em>
+      </div>
+    )}
     <div className="cad-viewer__section">
       <label htmlFor="cad-clip">단면</label>
       <input id="cad-clip" type="range" min={-1} max={1} step={0.01}

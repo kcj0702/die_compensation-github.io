@@ -646,3 +646,9 @@ button { cursor: pointer; }
 .cad-viewer__side > * { pointer-events: auto; }
 .cad-viewer__side .cad-viewer__bar { position: static; }
 .cad-viewer__side .cad-viewer__legend { position: static; margin-top: auto; }
+
+/* 변형 과장 — 실제 보정량(부품 크기의 0.1%대)은 눈에 안 보인다 */
+.cad-viewer__puff { border-color: rgba(255,95,168,.45); }
+.cad-viewer__puff label { color: #ffbfe0; }
+.cad-viewer__puff input { accent-color: #ff5fa8; }
+.cad-viewer__puff em { color: #8fa3b4; font-size: 8px; font-style: normal; max-width: 300px; }
