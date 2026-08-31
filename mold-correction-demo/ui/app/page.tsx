@@ -18,10 +18,23 @@ type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 /* source 가 'colormap' 이면 작업자가 찍은 추정 포인트다. 라벨을 읽어 얻은 실측값과
    섞이지 않도록 화면에서도 구분해 보여준다. */
-type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap' };
+/* xProduct/yProduct 는 같은 포인트를 제품데이터 이미지 기준 %로 다시 적은 값이다.
+   정렬에 실패했거나 제품데이터가 없으면 비어 있다. */
+/* keyReasons 는 보정시트에 기본으로 올릴 이유다: peak(국소 극값), sign_change(부호 반전), extreme(전체 최대·최소). */
+type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[] };
+type KeySelection = { ids: string[]; total: number; selected: number; peaks: number; signChanges: number; extremes: number };
+/* 스캔을 제품데이터 위로 옮기는 변환. margin 은 1위와 2위 방향의 점수 차이고,
+   대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
+type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; score: number }[]; warnings: string[] };
 type AnalysisResult = {
   source: { name: string; width: number; height: number };
+  partNumber: string | null;
   cleanImage: string | null;
+  productImage: string | null;
+  productSource: string | null;
+  alignment: AlignmentInfo | null;
+  alignmentOverlay: string | null;
+  keySelection?: KeySelection;
   zeroOverlay: string | null;
   zeroMask: string | null;
   points: PointResult[];
@@ -32,16 +45,17 @@ type AnalysisResult = {
     validCandidates?: number;
     qwenReads: number;
     qwenUnread?: number;
+    pointsTransferred?: number;
     zeroRegions: number;
     zeroRatio: number;
     zeroTolerance: number | null;
   };
   warnings: string[];
-  warningsByEngine?: Partial<Record<Engine, string[]>>;
-  errors: Partial<Record<Engine, string>>;
+  warningsByEngine?: Partial<Record<Engine | 'product', string[]>>;
+  errors: Partial<Record<Engine | 'product', string>>;
   valueMode: string;
 };
-type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string };
+type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string };
 type FolderEntry = { name: string; path: string; isDirectory: boolean; size: number | null; modified: string };
 type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
 type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
@@ -800,10 +814,12 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   })}</div>;
 }
 
-function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
-  const sourceAspect = scan.result!.source.width / scan.result!.source.height;
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
+  const sourceAspect = frameWidth / frameHeight;
   const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
   const [regions, setRegions] = useState<DetailRegion[]>([]);
+  /* 엑셀 내보내기가 Detail 영역을 알아야 해서 위로 올려 준다. */
+  useEffect(() => { onRegionsChange?.(regions); }, [regions, onRegionsChange]);
   const [layouts, setLayouts] = useState<SheetLayout[]>([{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }]);
   const [hiddenDetailPointIds, setHiddenDetailPointIds] = useState<Record<string, Set<string>>>({});
   const [selectedLayoutId, setSelectedLayoutId] = useState('front');
@@ -811,7 +827,7 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
   const updateLayout = (next: SheetLayout) => setLayouts((current) => current.map((layout) => layout.id === next.id ? next : layout));
   const createDetail = (region: DetailRegion) => {
     const detailCount = layouts.filter((layout) => layout.kind === 'detail').length;
-    const detailAspect = region.w * scan.result!.source.width / (region.h * scan.result!.source.height);
+    const detailAspect = region.w * frameWidth / (region.h * frameHeight);
     const nextLayout: SheetLayout = { id: `layout-${region.id}`, kind: 'detail', regionId: region.id, x: 68, y: 7 + (detailCount % 3) * 29, ...fitAspectSize(detailAspect, 28, 25) };
     setRegions((current) => [...current, region]); setLayouts((current) => [...current, nextLayout]);
     setSelectedRegionId(region.id); setSelectedLayoutId(nextLayout.id); setDetailMode(false);
@@ -826,7 +842,7 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
   const selectedLayout = layouts.find((layout) => layout.id === selectedLayoutId) || layouts[0];
   const aspectFor = (layout: SheetLayout) => {
     const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
-    return region ? region.w * scan.result!.source.width / (region.h * scan.result!.source.height) : sourceAspect;
+    return region ? region.w * frameWidth / (region.h * frameHeight) : sourceAspect;
   };
   const setSelectedSize = (key: 'w' | 'h', value: number) => {
     if (!selectedLayout) return;
@@ -839,7 +855,7 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
   };
   const updateDetailRegion = (next: DetailRegion) => {
     setRegions((current) => current.map((item) => item.id === next.id ? next : item));
-    const nextAspect = next.w * scan.result!.source.width / (next.h * scan.result!.source.height);
+    const nextAspect = next.w * frameWidth / (next.h * frameHeight);
     setLayouts((current) => current.map((layout) => layout.regionId === next.id ? normalizeBox({ ...layout, ...fitAspectSize(nextAspect, layout.w, 100) }, 0) : layout));
   };
 
@@ -849,7 +865,7 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, visibleP
       const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
       if (layout.kind === 'detail' && !region) return null;
       const title = layout.kind === 'front' ? '정면도 · FRONT VIEW' : region!.label;
-      const imageAspect = region ? region.w * scan.result!.source.width / (region.h * scan.result!.source.height) : sourceAspect;
+      const imageAspect = region ? region.w * frameWidth / (region.h * frameHeight) : sourceAspect;
       const detailPoints = region ? points.filter((point) => point.x >= region.x && point.x <= region.x + region.w && point.y >= region.y && point.y <= region.y + region.h).map((point) => ({ ...point, x: (point.x - region.x) / region.w * 100, y: (point.y - region.y) / region.h * 100 })) : points;
       const layoutVisiblePointIds = layout.kind === 'front' ? visiblePointIds : new Set(detailPoints.filter((point) => !hiddenDetailPointIds[layout.id]?.has(point.id)).map((point) => point.id));
       const toggleLayoutPoint = layout.kind === 'front' ? onPointToggle : (id: string) => setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); if (hidden.has(id)) hidden.delete(id); else hidden.add(id); return { ...current, [layout.id]: hidden }; });
@@ -916,6 +932,8 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
       setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'analyzing', error: undefined } : scan));
       try {
         const form = new FormData(); form.append('file', target.file, target.name);
+        /* 제품데이터를 직접 붙였으면 함께 보낸다. 안 붙였으면 서버가 품번으로 등록분을 찾는다. */
+        if (target.productFile) form.append('product', target.productFile, target.productFile.name);
         const response = await fetch(`${API_BASE}/api/analyze`, { method: 'POST', body: form });
         const data = await response.json() as AnalysisResult & { error?: string };
         if (!response.ok) throw new Error(data.error || '분석 중 오류가 발생했습니다.');
@@ -926,12 +944,24 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
       }
     }
   };
-  const removeScan = (id: string) => setScans((current) => { const target = current.find((item) => item.id === id); if (target) URL.revokeObjectURL(target.url); return current.filter((item) => item.id !== id); });
+  const removeScan = (id: string) => setScans((current) => { const target = current.find((item) => item.id === id); if (target) { URL.revokeObjectURL(target.url); if (target.productUrl) URL.revokeObjectURL(target.productUrl); } return current.filter((item) => item.id !== id); });
+  /* 제품데이터는 품번당 한 장이라 보통은 서버에 등록된 걸 자동으로 쓴다. 아직 등록이
+     없는 품번만 여기서 직접 붙여 주면 되고, 붙인 뒤에는 서버가 등록해 다음부터 자동이다. */
+  const attachProduct = (id: string, file: File) => setScans((current) => current.map((scan) => {
+    if (scan.id !== id) return scan;
+    if (scan.productUrl) URL.revokeObjectURL(scan.productUrl);
+    return { ...scan, productFile: file, productUrl: URL.createObjectURL(file), status: scan.status === 'done' ? 'ready' : scan.status };
+  }));
+  const detachProduct = (id: string) => setScans((current) => current.map((scan) => {
+    if (scan.id !== id) return scan;
+    if (scan.productUrl) URL.revokeObjectURL(scan.productUrl);
+    return { ...scan, productFile: undefined, productUrl: undefined };
+  }));
   return <section className="page page--workspace">
     <div className="page-heading"><div><span className="kicker"><Sparkles size={14} /> 실제 로컬 엔진</span><h2>스캔 이미지를 한 번에 분석하세요</h2><p>업로드한 이미지는 이 PC의 세 엔진으로 처리되며 외부 서버로 전송되지 않습니다.</p></div><div className="step-pills"><span className="done"><Check size={14} /> 1. 이미지 등록</span><span className={analyzingCount ? 'active' : ''}>2. 엔진 분석</span><span>3. 보정 시트</span></div></div>
     <div className="workspace-grid"><div className="upload-panel card"><div className="card-title"><div><h3>스캔 이미지 등록</h3><p>PNG, JPG, WEBP · 여러 파일 동시 선택 가능</p></div><span className="count-chip">{scans.length}개 등록</span></div>
       <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} /><span className="dropzone__icon"><UploadCloud size={29} /></span><b>스캔 이미지를 여기에 놓으세요</b><span>또는 클릭하여 파일 선택</span><em>여러 품번의 이미지를 동시에 올릴 수 있습니다</em></label>
-      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
+      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span><span className="product-slot">{scan.productFile ? <><ImageIcon size={12} /> 제품데이터 {scan.productFile.name}<button type="button" onClick={() => detachProduct(scan.id)} aria-label="제품데이터 해제">해제</button></> : <label><input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && attachProduct(scan.id, event.target.files[0])} /><UploadCloud size={12} /> 제품데이터 직접 지정 (없으면 품번으로 자동)</label>}</span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
       <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '대기 이미지 전체 분석 시작'}<ArrowRight size={18} /></button>
     </div><aside className="engine-panel"><div className="card engine-overview"><div className="card-title"><div><h3>분석 엔진</h3><p>실제 연결 상태</p></div><span className={`live-dot ${backendOnline === false ? 'offline' : ''}`}>{backendOnline == null ? '확인 중' : backendOnline ? '연결됨' : '연결 안 됨'}</span></div>{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const meta = engineMeta[key]; return <div className="engine-row" key={key}><span className="engine-row__number" style={{ background: `${meta.color}16`, color: meta.color }}>0{index + 1}</span><div><b>{meta.name}</b><span>{meta.short}</span></div>{backendOnline ? <ShieldCheck size={18} color={meta.color} /> : <X size={18} color="#a2aab4" />}</div>; })}</div><div className="tip-card"><span><Gauge size={20} /></span><div><b>편차값 판독 방식</b><p>Qwen2.5-VL-3B를 RTX GPU에서 실행하며, 모델은 인터넷 없이 로컬 파일만 사용합니다.</p></div></div></aside></div>
   </section>;
@@ -951,17 +981,49 @@ function engineSummary(engine: Engine, result: AnalysisResult) {
   return { stat: `${result.stats.zeroRegions}개`, detail: `부품 면적의 ${(result.stats.zeroRatio * 100).toFixed(1)}% · 실제 검출 결과` };
 }
 
-function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsToggle }: { scan: ScanItem; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void }) {
+/* 방향 판정은 상하좌우가 대칭인 부품에서는 갈리지 않는다. 그래서 근거 수치와 반전
+   버튼을 함께 두고, 사람이 확정한 방향만 품번에 저장해 다음 스캔부터 다시 묻지 않는다. */
+function AlignmentBar({ alignment, partNumber, source, transferred, total, busy, confirmed, onFlip, onConfirm }: { alignment: AlignmentInfo; partNumber: string | null; source: string | null; transferred: number; total: number; busy: boolean; confirmed: boolean; onFlip?: (flipX?: boolean, flipY?: boolean) => void; onConfirm?: () => void }) {
+  const trusted = alignment.confident;
+  return <div className={`alignment-bar ${trusted ? '' : 'alignment-bar--check'}`}>
+    <span className="alignment-bar__state">{trusted ? <><ShieldCheck size={14} /> 자동 판정 신뢰 가능</> : <><MoveRight size={14} /> 방향 확인 필요</>}</span>
+    <span className="alignment-bar__facts"><b>{partNumber || '품번 미확인'}</b><small>{source || '제품데이터 없음'}</small><small>외형 {(alignment.outlineIou * 100).toFixed(1)}% · 구멍 {(alignment.holeIou * 100).toFixed(1)}% · 2위와 격차 {alignment.margin.toFixed(3)}</small><small>전사 {transferred}/{total}개</small></span>
+    {onFlip && <span className="alignment-bar__actions">{/* 분석 결과는 화면에 남아 있으므로, 엔진이 바뀌면 좌표만 다시 받아 온다. Qwen 판독은 다시 하지 않는다. */}<button type="button" disabled={busy} onClick={() => onFlip()} title="정렬만 다시 계산합니다. 방향은 자동 판정과 확정 저장분을 따릅니다">정렬 다시 계산</button><button type="button" disabled={busy} onClick={() => onFlip(!alignment.flipX, alignment.flipY)}>좌우 뒤집기</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, !alignment.flipY)}>상하 뒤집기</button>{onConfirm && <button type="button" className="primary" disabled={busy || confirmed || !partNumber} onClick={onConfirm}>{confirmed ? <><Check size={13} /> 품번에 저장됨</> : '이 방향으로 확정'}</button>}</span>}
+  </div>;
+}
+
+function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsToggle, onRealign, onConfirmAlignment }: { scan: ScanItem; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
   const [engine, setEngine] = useState<Engine>('label');
+  /* 편차 뷰는 세 가지로 본다: 스캔 위, 제품데이터 위, 그리고 정렬 확인용 실루엣 겹침. */
+  const [frame, setFrame] = useState<'scan' | 'product' | 'overlay'>('scan');
+  const [busy, setBusy] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
   const result = scan.result!; const meta = engineMeta[engine]; const summary = engineSummary(engine, result);
   const engineWarnings = result.warningsByEngine?.[engine] ?? (engine === 'zero' ? result.warnings : []);
   const visibleLabelIds = new Set(result.points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
-  const image = engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
+  const alignment = result.alignment;
+  const productReady = engine === 'deviation' && Boolean(result.productImage && alignment);
+  const showFrame = productReady ? frame : 'scan';
+  /* 제품데이터 뷰에서는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다. */
+  const productPoints = result.points.filter((point) => point.xProduct !== undefined && point.yProduct !== undefined).map((point) => ({ ...point, x: point.xProduct!, y: point.yProduct! }));
+  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
+  const frameWidth = showFrame === 'scan' || !alignment ? result.source.width : alignment.productSize[0];
+  const frameHeight = showFrame === 'scan' || !alignment ? result.source.height : alignment.productSize[1];
   const toggleLabel = onPointToggle;
   const allLabelsVisible = result.points.length > 0 && visibleLabelIds.size === result.points.length;
+  const runRealign = async (flipX?: boolean, flipY?: boolean) => {
+    if (!onRealign || busy) return;
+    setBusy(true); setConfirmed(false);
+    try { await onRealign(flipX, flipY); } finally { setBusy(false); }
+  };
+  const runConfirm = async () => {
+    if (!onConfirmAlignment || busy) return;
+    setBusy(true);
+    try { await onConfirmAlignment(); setConfirmed(true); } finally { setBusy(false); }
+  };
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
-    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
+    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div><div>{productReady && <div className="frame-toggles">{([['scan', '스캔 위'], ['product', '제품데이터 위'], ['overlay', '정렬 확인']] as const).map(([key, label]) => <button key={key} type="button" className={showFrame === key ? 'active' : ''} onClick={() => setFrame(key)}>{label}</button>)}</div>}{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div></div>{productReady && alignment && <AlignmentBar alignment={alignment} partNumber={result.partNumber} source={result.productSource} transferred={productPoints.length} total={result.points.length} busy={busy} confirmed={confirmed} onFlip={onRealign ? runRealign : undefined} onConfirm={onConfirmAlignment ? runConfirm : undefined} />}<div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'}>{engine === 'deviation' && showFrame !== 'overlay' && <CorrectionPoints coefficient={-1} points={showFrame === 'product' ? productPoints : result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div></aside>
     </div></section>;
 }
@@ -1027,28 +1089,75 @@ function SheetTitleBlock({ values, onChange }: { values: SheetTitleValues; onCha
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void }) {
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeyPointsOnly, onAllPointsToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeyPointsOnly: () => void; onAllPointsToggle: (visible: boolean) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void }) {
   const result = scan.result!; const points = result.points; const [coefficient, setCoefficient] = useState(1); const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
+  /* 보정시트에 들어가는 그림은 편차 히트맵이 아니라 깨끗한 제품데이터다.
+     정렬된 제품데이터가 있으면 그쪽을 기본으로 쓰고, 없을 때만 스캔으로 물러선다. */
+  const alignment = result.alignment;
+  const productReady = Boolean(result.productImage && alignment);
+  const [useProduct, setUseProduct] = useState(true);
+  const onProduct = productReady && useProduct;
+  /* 제로라인 오버레이는 스캔 좌표계에 그려진 이미지라 제품데이터 위에는 얹을 수 없다. */
+  const zeroReady = Boolean(result.zeroOverlay) && !onProduct;
+  const frameWidth = onProduct ? alignment!.productSize[0] : result.source.width;
+  const frameHeight = onProduct ? alignment!.productSize[1] : result.source.height;
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const [addPointMode, setAddPointMode] = useState(false);
+  /* 보정시트에는 검출된 라벨을 전부 올리지 않는다. 품번을 처음 열 때 주요 포인트만
+     켜 두고, 그 뒤로 작업자가 손댄 것은 다시 건드리지 않는다. */
+  const keySelection = result.keySelection;
+  const presetAppliedRef = useRef('');
+  useEffect(() => {
+    if (presetAppliedRef.current === scan.id) return;
+    presetAppliedRef.current = scan.id;
+    if (keySelection?.ids.length && hiddenPointIds.size === 0) onKeyPointsOnly();
+  }, [scan.id, keySelection, hiddenPointIds.size, onKeyPointsOnly]);
   const [sampling, setSampling] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
+  /* 엑셀 내보내기 */
+  const [detailRegions, setDetailRegions] = useState<DetailRegion[]>([]);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const removeAddedPoint = (id: string) => setAddedPoints((current) => current.filter((item) => item.id !== id));
   const addPointAt = async (xNorm: number, yNorm: number) => {
     setSampling(true); setSampleError(null);
     try {
+      /* 클릭 좌표는 화면에 보이는 이미지 기준이다. 색 역산은 편차 스캔에서만
+         가능하므로, 제품데이터를 보고 있으면 변환을 되짚어 스캔 좌표로 보낸다. */
+      let sampleX = xNorm; let sampleY = yNorm;
+      if (onProduct && alignment) {
+        const [a, , tx, , d, ty] = alignment.matrix;
+        const [productW, productH] = alignment.productSize;
+        const [scanW, scanH] = alignment.scanSize;
+        if (!a || !d) { setSampleError('정렬 정보가 올바르지 않습니다.'); return; }
+        sampleX = ((xNorm / 100 * productW - tx) / a) / scanW * 100;
+        sampleY = ((yNorm / 100 * productH - ty) / d) / scanH * 100;
+        if (sampleX < 0 || sampleX > 100 || sampleY < 0 || sampleY > 100) {
+          setSampleError('스캔 범위를 벗어난 지점입니다.'); return;
+        }
+      }
       const form = new FormData();
       form.append('file', scan.file);
-      form.append('x', String(xNorm));
-      form.append('y', String(yNorm));
+      form.append('x', String(sampleX));
+      form.append('y', String(sampleY));
       const response = await fetch(`${API_BASE}/api/sample`, { method: 'POST', body: form });
       const data = await response.json() as { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
       if (!response.ok) { setSampleError(data?.error || '편차값을 추정하지 못했습니다.'); return; }
+      /* 응답은 스캔 좌표다. 엔진 포인트와 같은 규칙으로 제품 좌표도 함께 담아 둔다. */
+      let productCoords: { xProduct?: number; yProduct?: number } = {};
+      if (alignment) {
+        const [a, , tx, , d, ty] = alignment.matrix;
+        const [productW, productH] = alignment.productSize;
+        productCoords = {
+          xProduct: (a * data.xPx + tx) / productW * 100,
+          yProduct: (d * data.yPx + ty) / productH * 100,
+        };
+      }
       setAddedPoints((current) => [...current, {
         id: `M-${String(current.length + 1).padStart(2, '0')}`,
-        xPx: data.xPx, yPx: data.yPx, x: data.x, y: data.y,
+        xPx: data.xPx, yPx: data.yPx, x: data.x, y: data.y, ...productCoords,
         value: data.value, labelColor: 'white', confidence: 'colormap', source: 'colormap',
       }]);
     } catch (error) {
@@ -1059,7 +1168,13 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   };
   /* 시트에는 엔진이 찾은 포인트와 작업자가 찍은 포인트를 함께 올린다.
      표시 여부도 합친 목록 기준으로 계산해야 추가한 포인트의 라벨이 숨김 처리되지 않는다. */
-  const sheetPoints = [...points, ...addedPoints];
+  /* 제품데이터 위에 올릴 때는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다.
+     전사되지 않은 포인트는 제품데이터 밖으로 나간 것이라 시트에서 뺀다. */
+  const sheetPoints = [...points, ...addedPoints].flatMap((point) => {
+    if (!onProduct) return [point];
+    if (point.xProduct === undefined || point.yProduct === undefined) return [];
+    return [{ ...point, x: point.xProduct, y: point.yProduct }];
+  });
   const visiblePointIds = new Set(sheetPoints.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
   const createAnnotation = (annotation: Annotation) => setAnnotations((current) => [...current, annotation]);
   const commitAnnotation = (annotation: Annotation) => setAnnotations((current) => current.map((item) => item.id === annotation.id ? annotation : item));
@@ -1099,14 +1214,58 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const displayFor = (point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [coefficient, points, pointOverrides]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
-  const baseImage = showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
+  const baseImage = onProduct
+    ? result.productImage!
+    : showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
+  /* 사내 엑셀 양식으로 내보낸다. 좌표는 제품데이터 기준이라 제품데이터 뷰일 때만 맞는다. */
+  const saveExcel = async () => {
+    if (exporting || !onProduct) return;
+    setExporting(true); setExportError(null);
+    try {
+      const payload = {
+        partNumber: result.partNumber,
+        title: {
+          managementNo: sheetTitle.managementNo, partName: sheetTitle.partName,
+          process: sheetTitle.process, partNo: sheetTitle.partNo,
+          material: sheetTitle.material, appliedDate: sheetTitle.appliedDate,
+        },
+        points: sheetPoints.filter((point) => visiblePointIds.has(point.id)).map((point) => {
+          const display = displayFor(point);
+          return { id: point.id, x: point.x, y: point.y, text: `${display > 0 ? '+' : ''}${display.toFixed(1)}` };
+        }),
+        details: detailRegions.map((region) => ({ x: region.x, y: region.y, w: region.w, h: region.h, label: region.label })),
+      };
+      const form = new FormData();
+      form.append('payload', JSON.stringify(payload));
+      if (result.productImage) {
+        const blob = await (await fetch(result.productImage)).blob();
+        form.append('product', blob, 'product.png');
+      }
+      const response = await fetch(`${API_BASE}/api/sheet`, { method: 'POST', body: form });
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(problem.error || '엑셀을 만들지 못했습니다.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${result.partNumber || scan.partNo}-보정시트.xlsx`;
+      document.body.appendChild(link); link.click(); link.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : '엔진 서버에 연결하지 못했습니다.');
+    } finally {
+      setExporting(false);
+    }
+  };
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.zeroOverlay}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div>{keySelection && keySelection.total > 0 && <div className="point-preset" title={`피크 ${keySelection.peaks} · 부호변화 ${keySelection.signChanges} · 최대최소 ${keySelection.extremes}`}><span>포인트</span><button type="button" className={visiblePointIds.size === keySelection.selected ? 'active' : ''} onClick={onKeyPointsOnly}>주요 {keySelection.selected}</button><button type="button" className={visiblePointIds.size === sheetPoints.length ? 'active' : ''} onClick={() => onAllPointsToggle(true)}>전체 {keySelection.total}</button></div>}<div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={onProduct ? '제로라인은 스캔 좌표계 이미지라 제품데이터 위에는 겹칠 수 없습니다' : ''}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
-      <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
+      <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b></span><button type="button" className="sheet-print" onClick={saveExcel} disabled={exporting || !onProduct} title={onProduct ? '사내 보정시트 양식(.xlsx)으로 내보냅니다. 값은 엑셀에서 수정할 수 있는 텍스트박스입니다.' : '제품데이터 위에 올렸을 때만 내보낼 수 있습니다.'}><File size={14} /> {exporting ? '엑셀 만드는 중' : '보정 시트 엑셀 저장'}</button><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button></div>{exportError && <div className="sheet-note sheet-note--error"><X size={15} /><span>{exportError}</span></div>}
     </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={onClearAllOverrides}>모든 수정 취소</button>}</div></aside></div>{folderAvailable && <Explorer />}
   </section>;
 }
@@ -1121,6 +1280,12 @@ export default function Home() {
   const sheetTitle = completedScan ? sheetTitlesByScan[completedScan.id] || createDefaultSheetTitleValues(completedScan) : undefined;
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
   const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
+  /* 주요 포인트만 남긴다. 나머지는 지우지 않고 숨기기만 해서 언제든 다시 켤 수 있다. */
+  const showOnlyKeyPoints = () => completedScan && setHiddenPointIdsByScan((current) => {
+    const keys = new Set(completedScan.result!.keySelection?.ids || []);
+    if (!keys.size) return current;
+    return { ...current, [completedScan.id]: new Set(completedScan.result!.points.filter((point) => !keys.has(point.id)).map((point) => point.id)) };
+  });
   const setPointOverride = (id: string, value: number | null) => completedScan && setPointOverridesByScan((current) => { const next = { ...(current[completedScan.id] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [completedScan.id]: next }; });
   const clearAllOverrides = () => completedScan && setPointOverridesByScan((current) => ({ ...current, [completedScan.id]: {} }));
   const annotations = completedScan ? annotationsByScan[completedScan.id] || [] : [];
@@ -1130,7 +1295,40 @@ export default function Home() {
     const targetScan = completedScan;
     setSheetTitlesByScan((current) => ({ ...current, [targetScan.id]: { ...(current[targetScan.id] || createDefaultSheetTitleValues(targetScan)), [field]: value } }));
   };
+  /* 방향만 다시 계산한다. Qwen 판독은 그대로 두고 좌표만 옮겨 받는다. */
+  const realign = async (flipX?: boolean, flipY?: boolean) => {
+    if (!completedScan?.result) return;
+    const target = completedScan;
+    const form = new FormData();
+    form.append('file', target.file, target.name);
+    if (target.productFile) form.append('product', target.productFile, target.productFile.name);
+    /* 반전을 지정하지 않으면 서버가 자동 판정과 확정 저장분을 따른다. 단순 재계산이 그 경우다. */
+    if (flipX !== undefined) form.append('flipX', String(flipX));
+    if (flipY !== undefined) form.append('flipY', String(flipY));
+    form.append('points', JSON.stringify(target.result!.points.map((point) => ({ id: point.id, xPx: point.xPx, yPx: point.yPx }))));
+    const response = await fetch(`${API_BASE}/api/realign`, { method: 'POST', body: form });
+    const data = await response.json() as { alignment?: AlignmentInfo; alignmentOverlay?: string; productImage?: string; productSource?: string; points?: { id: string; xProduct: number; yProduct: number }[]; warnings?: string[]; error?: string };
+    if (!response.ok || !data.alignment) throw new Error(data.error || '정렬을 다시 계산하지 못했습니다.');
+    const moved = new Map((data.points || []).map((point) => [point.id, point]));
+    setScans((current) => current.map((scan) => scan.id !== target.id || !scan.result ? scan : { ...scan, result: {
+      ...scan.result,
+      alignment: data.alignment!,
+      alignmentOverlay: data.alignmentOverlay ?? scan.result.alignmentOverlay,
+      productImage: data.productImage ?? scan.result.productImage,
+      productSource: data.productSource ?? scan.result.productSource,
+      points: scan.result.points.map((point) => { const next = moved.get(point.id); return next ? { ...point, xProduct: next.xProduct, yProduct: next.yProduct } : { ...point, xProduct: undefined, yProduct: undefined }; }),
+      stats: { ...scan.result.stats, pointsTransferred: moved.size },
+      warningsByEngine: { ...scan.result.warningsByEngine, product: data.warnings || [] },
+    } }));
+  };
+  const confirmAlignment = async () => {
+    const alignment = completedScan?.result?.alignment;
+    const partNumber = completedScan?.result?.partNumber;
+    if (!alignment || !partNumber) return;
+    const response = await fetch(`${API_BASE}/api/alignment`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ partNumber, alignment }) });
+    if (!response.ok) throw new Error('정렬을 저장하지 못했습니다.');
+  };
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} />}</div></main>;
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeyPointsOnly={showOnlyKeyPoints} onAllPointsToggle={setAllPointsVisible} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} />}</div></main>;
 }

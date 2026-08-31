@@ -51,19 +51,59 @@ if not defined AJIN_PNPM (
   set "AJIN_PNPM=%APPDATA%\npm\pnpm.cmd"
 )
 
-REM ── Python 가상환경 찾기 ──────────────────────────────────────
-set "AJIN_PYTHON=%~dp0..\..\.venv\Scripts\python.exe"
-if not exist "%AJIN_PYTHON%" set "AJIN_PYTHON=%~dp0..\.venv\Scripts\python.exe"
-if not exist "%AJIN_PYTHON%" (
-  echo [ERROR] Python 가상환경을 찾지 못했습니다.
-  echo         찾은 위치: %~dp0..\..\.venv\Scripts\python.exe
+REM ── Python 찾기 ───────────────────────────────────────────────
+REM Node 와 같은 방식이다. 특정 경로를 박아 두지 않고 아래 순서로 찾는다.
+REM   첫째 AJIN_PYTHON 직접 지정, 둘째 저장소 안의 .venv, 셋째 PATH 의 python.
+REM 마지막 경우는 엔진 의존성을 실제로 import 해 보고 통과한 것만 쓴다.
+REM conda 처럼 이미 의존성이 갖춰진 환경이 있으면 venv 를 새로 만들 필요가 없다.
+if defined AJIN_PYTHON (
+  if not exist "!AJIN_PYTHON!" (
+    echo [ERROR] AJIN_PYTHON 이 가리키는 파일이 없습니다: !AJIN_PYTHON!
+    pause
+    exit /b 1
+  )
+) else (
+  set "AJIN_PYTHON=%~dp0..\..\.venv\Scripts\python.exe"
+  if not exist "!AJIN_PYTHON!" set "AJIN_PYTHON=%~dp0..\.venv\Scripts\python.exe"
+  if not exist "!AJIN_PYTHON!" (
+    set "AJIN_PYTHON="
+    for /f "delims=" %%P in ('where python 2^>nul') do (
+      if not defined AJIN_PYTHON (
+        "%%P" -c "import cv2, numpy, starlette, uvicorn" >nul 2>nul && set "AJIN_PYTHON=%%P"
+      )
+    )
+  )
+)
+
+if not defined AJIN_PYTHON (
+  echo [ERROR] 엔진을 실행할 Python 을 찾지 못했습니다.
+  echo         .venv 도 없고, PATH 의 python 에도 cv2/starlette/uvicorn 이 없습니다.
   echo.
-  echo   저장소 루트에서 아래를 실행해 만드세요:
+  echo   이미 의존성이 깔린 Python 이 있으면 그 경로를 지정하세요:
+  echo     set AJIN_PYTHON=C:\path\to\python.exe
+  echo.
+  echo   또는 저장소 루트에서 가상환경을 만드세요:
   echo     python -m venv .venv
+  echo     .venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
   echo     .venv\Scripts\python.exe -m pip install -r mold-correction-demo\deviation_extraction\requirements.txt
-  echo     .venv\Scripts\python.exe -m pip install starlette uvicorn
+  echo     .venv\Scripts\python.exe -m pip install -r mold-correction-demo\ui\backend\requirements.txt
   pause
   exit /b 1
+)
+echo 엔진 Python: !AJIN_PYTHON!
+
+REM Qwen 판독기는 transformers 4.49 이상을 요구한다. 낮으면 서버는 뜨고 정렬과
+REM 라벨 검출도 되지만 편차값을 못 읽어 결과 포인트가 0개로 나온다. 화면에는
+REM 원인이 잘 드러나지 않으므로 여기서 미리 알린다.
+"!AJIN_PYTHON!" -c "import sys,transformers; v=transformers.__version__.split('.'); sys.exit(0 if [int(v[0]),int(v[1])] >= [4,49] else 1)" >nul 2>nul
+if errorlevel 1 (
+  echo.
+  echo [주의] 이 Python 의 transformers 가 4.49 미만이거나 설치되어 있지 않습니다.
+  echo        정렬과 라벨 검출은 동작하지만 Qwen 편차값 판독이 실패해
+  echo        검출 포인트가 0개로 표시됩니다.
+  echo        의존성이 갖춰진 다른 환경이 있으면 이렇게 지정하세요:
+  echo          set AJIN_PYTHON=C:\path\to\python.exe
+  echo.
 )
 
 REM 보안 방침상 외부 모델 다운로드를 막는다 (8/12 멘토링 확인 사항)

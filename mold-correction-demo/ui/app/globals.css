@@ -438,3 +438,65 @@ button { cursor: pointer; }
   padding:0; border:1.5px solid #fff; border-radius:50%; color:#fff; background:#7c5cd6; cursor:pointer;
   box-shadow:0 1px 4px rgba(0,0,0,.3); }
 .add-point-remove:hover { background:#c8341f; transform:scale(1.15); }
+
+/* ── 제품데이터 정렬 · 포인트 전사 ──────────────────────────── */
+/* 제품데이터는 품번당 한 장이라 보통 서버 등록분이 자동으로 붙는다. 등록이 없는
+   품번만 이 슬롯에서 직접 지정하면 되고, 그 뒤로는 다시 물어보지 않는다. */
+.product-slot { display:flex; align-items:center; gap:5px; margin-top:3px; color:#78838f; font-size:9px; }
+.product-slot label { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border:1px dashed #c6ccd3;
+  border-radius:5px; color:#6d7988; cursor:pointer; }
+.product-slot label:hover { border-color:#ffb51b; color:#111; background:#fff9e9; }
+.product-slot label input { display:none; }
+.product-slot button { padding:1px 5px; border:0; border-radius:4px; color:#a3634c; background:#fbeee9; cursor:pointer; font-size:9px; }
+.product-slot button:hover { color:#fff; background:#c65034; }
+
+.frame-toggles { display:inline-flex; padding:2px; border:1px solid var(--line); border-radius:7px; background:#f6f7f9; }
+.frame-toggles button { padding:5px 9px; border:0; border-radius:5px; color:#77828f; background:transparent; cursor:pointer; font-size:9px; }
+.frame-toggles button.active { color:#25303d; background:#fff; box-shadow:0 1px 3px rgba(31,43,54,.16); font-weight:700; }
+
+/* 정렬 근거를 숫자로 같이 보여 준다. 격차가 작으면 자동 판정을 믿을 수 없다는 뜻이고,
+   그때는 사람이 반전을 눌러 맞춘 뒤 품번에 확정 저장한다. */
+.alignment-bar { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; padding:8px 14px;
+  border-bottom:1px solid var(--line); background:#f2f8f5; font-size:9px; }
+.alignment-bar--check { background:#fdf5e8; }
+.alignment-bar__state { display:inline-flex; align-items:center; gap:5px; color:#177a5e; font-weight:800; white-space:nowrap; }
+.alignment-bar--check .alignment-bar__state { color:#a56a12; }
+.alignment-bar__facts { display:flex; align-items:center; flex-wrap:wrap; gap:4px 10px; color:#6d7988; }
+.alignment-bar__facts b { color:#334257; font-size:10px; }
+.alignment-bar__actions { display:inline-flex; gap:6px; margin-left:auto; }
+.alignment-bar__actions button { display:inline-flex; align-items:center; gap:4px; height:26px; padding:0 9px;
+  border:1px solid var(--line); border-radius:6px; color:#5d6875; background:#fff; cursor:pointer; font-size:9px; }
+.alignment-bar__actions button:hover:not(:disabled) { border-color:#ffb51b; color:#111; background:#fff9e9; }
+.alignment-bar__actions button.primary { border-color:#2f7d63; color:#fff; background:#2f7d63; }
+.alignment-bar__actions button.primary:hover:not(:disabled) { border-color:#25664f; color:#fff; background:#25664f; }
+.alignment-bar__actions button:disabled { opacity:.55; cursor:default; }
+
+/* 보정시트 베이스를 제품데이터로 바꾸는 토글. 다른 레이어와 구분되게 파란 계열로 둔다. */
+.layer-toggles button.active.blue { color:#1d5fa8; border-color:#b3cdea; background:#f1f7fd; }
+.layer-toggles button.active.blue i { background:#2c73b5; }
+.layer-toggles button:disabled { opacity:.5; cursor:default; }
+
+/* 레이아웃 제목 막대는 편집용 손잡이다. 항상 떠 있으면 제품데이터처럼 여백이
+   거의 없는 이미지의 윗부분을 덮고, 인쇄물에까지 그대로 찍힌다.
+   선택했거나 마우스를 올렸을 때만 보이게 하고 인쇄에서는 뺀다. */
+/* 프레임 위가 아니라 바로 위쪽에 띄운다. 제품데이터는 부품이 이미지 가장자리까지
+   꽉 차 있어서, 프레임 안에 두면 선택했을 때 부품 윗부분을 그대로 가린다. */
+.sheet-layout__bar { top:-21px; opacity:0; pointer-events:none; transition:opacity .12s ease;
+  border:1px solid #b8bec2; border-bottom:0; border-radius:3px 3px 0 0; }
+.sheet-layout:hover .sheet-layout__bar,
+.sheet-layout.selected .sheet-layout__bar { opacity:1; pointer-events:auto; }
+@media print { body.adc-printing .sheet-layout__bar { display:none!important; } }
+
+/* 보정시트에 올릴 포인트 묶음 전환. 주요 포인트만 남기는 게 기본이고,
+   필요하면 검출된 전체를 다시 켤 수 있다. */
+.point-preset { display:inline-flex; align-items:center; gap:4px; padding:2px 2px 2px 8px;
+  border:1px solid var(--line); border-radius:7px; background:#f6f7f9; }
+.point-preset > span { color:#8b95a2; font-size:8px; letter-spacing:.04em; }
+.point-preset button { height:24px; padding:0 8px; border:0; border-radius:5px; color:#77828f;
+  background:transparent; cursor:pointer; font-size:8px; }
+.point-preset button.active { color:#25303d; background:#fff; box-shadow:0 1px 3px rgba(31,43,54,.16); font-weight:700; }
+
+/* 엑셀 내보내기 실패는 조용히 넘어가면 안 되므로 시트 하단에 그대로 띄운다. */
+.sheet-note--error { color:#a4342a; background:#fdf1ef; border-top:1px solid #f0cdc6; }
+.sheet-note--error svg { color:#c8341f; }
+.sheet-print:disabled { opacity:.5; cursor:default; }

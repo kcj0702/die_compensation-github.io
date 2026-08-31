@@ -2,11 +2,19 @@ data/raw/*
 data/sample/*
 data/intermediate/*
 data/output/*
+# 등록된 제품데이터 이미지와 품번별 확정 정렬은 회사 자료라 커밋하지 않는다.
+data/product/*
+data/alignment/*
+# 사내 보정시트 엑셀 양식도 마찬가지다.
+data/template/*
 
 !data/raw/.gitkeep
 !data/sample/.gitkeep
 !data/intermediate/.gitkeep
 !data/output/.gitkeep
+!data/product/.gitkeep
+!data/alignment/.gitkeep
+!data/template/.gitkeep
 
 __pycache__/
 *.py[cod]
