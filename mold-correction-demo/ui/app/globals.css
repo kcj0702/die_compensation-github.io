@@ -607,3 +607,7 @@ button { cursor: pointer; }
 
 /* 시트 머리말에서 파일명으로 알 수 없는 칸 — 지어내지 않고 비운다 */
 .sheet-title-block__blank { color: #b9c0c8; }
+
+/* 3D 화면은 탭을 옮겨도 살려 두고 감추기만 한다(읽어 둔 CAD 를 지키려고).
+   클래스 규칙이 display 를 잡으면 hidden 속성이 밀리므로 못 박아 둔다. */
+.page[hidden] { display: none; }

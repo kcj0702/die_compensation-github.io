@@ -252,10 +252,14 @@ function makeZoneLabel(text: string, height: number): THREE.Sprite {
   return sprite;
 }
 
-export function CadViewer({ mesh, showHoles, overlay, sheetValues,
+export function CadViewer({ active = true, mesh, showHoles, overlay, sheetValues,
                            onCorrectionChange, notes, onNotesChange,
                            onCapture, regions, onRegionsChange,
                            morph, morphMode = 'off' }: {
+  /* 감춰져 있으면 그리지 않는다. 3D 화면을 안 보고 있어도
+     컴포넌트는 살아 있어서(읽어 둔 CAD 를 지키려고) 그냥 두면
+     보이지도 않는 화면을 계속 GPU 로 그린다. */
+  active?: boolean;
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
@@ -336,6 +340,11 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     if (sizes.length === 1) return `홀 ${holes.length} · Ø${sizes[0]}`;
     return `홀 ${holes.length} · ${sizes.length}종`;
   }, [holes]);
+
+  /* 보이는지 여부는 ref 로 넘긴다. 의존성에 넣으면 탭을 옮길 때마다
+     장면을 통째로 다시 만들어 카메라 위치가 초기화된다. */
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -721,8 +730,12 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     scene.add(fill);
 
     // ── 카메라 ───────────────────────────────────────────────
+    // 감춰진 채로 만들어지면 mount 크기가 0 이라 0/0 = NaN 이 되고
+    // 카메라 위치가 통째로 NaN 이 된다. 크기를 얻을 때까지는 임시 비율을
+    // 쓰고, ResizeObserver 가 보이는 순간 제대로 맞춘다.
     const camera = new THREE.PerspectiveCamera(
-      42, mount.clientWidth / mount.clientHeight, radius * 0.01, radius * 60);
+      42, (mount.clientWidth / mount.clientHeight) || 16 / 9,
+      radius * 0.01, radius * 60);
     // 스캔이 바라본 방향이 있으면 그쪽에 세운다. 안 그러면 얇은 쪽에서
     // 보게 되어 형상이 선처럼 보인다(실측: 판넬이 한 축으로 155mm 다).
     // 바운딩 **구**가 아니라 **상자**로 맞춘다.
@@ -970,7 +983,7 @@ export function CadViewer({ mesh, showHoles, overlay, sheetValues,
     let loop = 0;
     const tick = () => {
       loop = requestAnimationFrame(tick);
-      renderer.render(scene, camera);
+      if (activeRef.current) renderer.render(scene, camera);
     };
     tick();
 
