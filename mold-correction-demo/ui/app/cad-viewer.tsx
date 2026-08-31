@@ -29,6 +29,13 @@ export type CadHole = {
   wrap?: number; faces?: number;
 };
 
+/** /api/cad-sections 가 돌려주는, 시트 단면 표기로 계산한 제로라인.
+ *  다른 제로라인과 달리 **추정이 없다** — 시트가 준 좌표로 CAD 를 자른 것이다. */
+export type CadSection = {
+  label: string; axis: number; value: number;
+  polylines: [number, number, number][][]; point_count: number;
+};
+
 /** /api/cad-overlay 가 돌려주는, CAD 표면 위로 옮겨진 스캔 결과. */
 export type CadOverlay = {
   fit: {
@@ -96,7 +103,8 @@ export const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', 
 const SURFACE = 0x8fa3b4;
 const HOLE_TINT = 0xff8b3d;
 const PLANE_TINT = 0x35d68a;
-const ZERO_TINT = 0xff3b30;      // 제로라인
+const ZERO_TINT = 0xff3b30;      // 제로라인 (스캔에서 추정한 것)
+const SECTION_TINT = 0x21c07a;  // 시트 단면으로 계산한 제로라인 (오차 없음)
 // 최종 보정시트("보정 적용 내용")의 표기 — 노란 콜아웃, 빨간 점과 지시선.
 const CALLOUT_FILL = '#ffef3a';
 const CALLOUT_EDGE = '#3a3a3a';
@@ -252,7 +260,7 @@ function makeZoneLabel(text: string, height: number): THREE.Sprite {
   return sprite;
 }
 
-export function CadViewer({ active = true, mesh, showHoles, overlay, sheetValues,
+export function CadViewer({ active = true, sections, mesh, showHoles, overlay, sheetValues,
                            onCorrectionChange, notes, onNotesChange,
                            onCapture, regions, onRegionsChange,
                            morph, morphMode = 'off' }: {
@@ -260,6 +268,8 @@ export function CadViewer({ active = true, mesh, showHoles, overlay, sheetValues
      컴포넌트는 살아 있어서(읽어 둔 CAD 를 지키려고) 그냥 두면
      보이지도 않는 화면을 계속 GPU 로 그린다. */
   active?: boolean;
+  /* 시트 단면 표기로 계산한 제로라인. 오차 없는 값이라 굵게 그린다. */
+  sections?: CadSection[] | null;
   mesh: CadMesh; showHoles: boolean; overlay?: CadOverlay | null;
   /* 포인트 아이디 -> 최종 보정량(mm). 시트에서 숨긴 포인트는 빠져 있다. */
   sheetValues?: Record<string, number> | null;
@@ -720,6 +730,27 @@ export function CadViewer({ active = true, mesh, showHoles, overlay, sheetValues
     scene.add(overlayRoot);
     overlayGroup.current = overlayRoot;
 
+    // ── 시트 단면으로 계산한 제로라인 ────────────────────────
+    // 색을 읽거나 실루엣을 맞춘 게 아니라 시트가 준 좌표로 CAD 를 자른
+    // 것이라 오차가 없다. 그래서 추정한 제로라인과 색을 구분해 그린다.
+    if (sections?.length) {
+      const sectionRoot = new THREE.Group();
+      const tint = new THREE.LineBasicMaterial({
+        color: SECTION_TINT, depthTest: false });
+      for (const section of sections) {
+        for (const poly of section.polylines) {
+          if (poly.length < 2) continue;
+          const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(
+              poly.map(([x, y, z]) => new THREE.Vector3(x, y, z))),
+            tint);
+          line.renderOrder = 11;
+          sectionRoot.add(line);
+        }
+      }
+      scene.add(sectionRoot);
+    }
+
     // ── 조명 ─────────────────────────────────────────────────
     scene.add(new THREE.HemisphereLight(0xdfeaf5, 0x1b2732, 1.15));
     const key = new THREE.DirectionalLight(0xffffff, 1.5);
@@ -1017,7 +1048,7 @@ export function CadViewer({ active = true, mesh, showHoles, overlay, sheetValues
       mount.removeChild(renderer.domElement);
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode]);
+      morph, morphMode, sections]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {

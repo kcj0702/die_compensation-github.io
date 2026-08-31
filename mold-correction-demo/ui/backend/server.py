@@ -1252,6 +1252,65 @@ async def cad_morph_stl(request: Request) -> Response:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def cad_sections_for(cad_id: str, notes: str, side: str) -> dict[str, Any]:
+    """보정시트가 적어 둔 단면 위치(H:300 · T:1700)로 제로라인을 계산한다.
+
+    다른 제로라인은 전부 추정이다 — 색을 읽거나 실루엣을 맞춘다. 이건
+    아니다. 시트가 준 숫자로 CAD 를 자르기만 하므로 오차가 없다.
+    (section_zero.py 에 축을 어떻게 확정했는지 적어 뒀다.)
+
+    좌표는 화면용 메시와 같은 자리로 옮겨서 준다 — to_web_mesh 가 정점을
+    원점으로 당겨 놨기 때문에 그만큼 빼지 않으면 형상에서 멀리 뜬다.
+    """
+    from zero_line_detection.section_zero import (
+        parse_notes, zero_lines_from_notes,
+    )
+
+    entry = _cad_cache.get(cad_id)
+    if entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+
+    parsed = parse_notes(notes)
+    if not parsed:
+        raise ValueError(
+            "단면 표기를 찾지 못했습니다. 시트에 적힌 대로 "
+            "'H : 300' 이나 'T : 1700' 처럼 넣어 주세요.")
+
+    lines = zero_lines_from_notes(entry["mesh"], parsed, side=side)
+    # offset 은 numpy 배열일 수 있다 — `or` 로 기본값을 주면
+    # "truth value of an array is ambiguous" 로 터진다.
+    raw = entry.get("offset")
+    offset = [0.0, 0.0, 0.0] if raw is None else [float(v) for v in raw]
+    shifted = []
+    for line in lines:
+        moved = [[[p[0] - offset[0], p[1] - offset[1], p[2] - offset[2]]
+                  for p in poly] for poly in line.polylines]
+        item = line.to_dict()
+        item["polylines"] = moved
+        shifted.append(item)
+
+    return {"notes": [f"{k}:{v:g}" for k, v in parsed],
+            "sections": shifted,
+            "unmatched": [f"{k}:{v:g}" for k, v in parsed
+                          if not any(s["label"] == f"{k}:{v:g}" for s in shifted)]}
+
+
+async def cad_sections(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            cad_sections_for,
+            str(body.get("cadId") or ""),
+            str(body.get("notes") or ""),
+            str(body.get("side") or "both"),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_overlay(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -1432,6 +1491,7 @@ app = Starlette(
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
         Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),
         Route("/api/sheet-excel", sheet_excel, methods=["POST"]),

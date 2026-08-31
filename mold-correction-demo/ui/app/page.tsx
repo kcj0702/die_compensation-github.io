@@ -7,7 +7,7 @@ import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, C
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
-import { CIRCLED, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
+import { CIRCLED, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -1424,6 +1424,33 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
   const [morphState, setMorphState] = useState<'idle' | 'working' | 'error'>('idle');
   const [morphError, setMorphError] = useState<string | null>(null);
+  /* 보정시트가 적어 둔 단면 위치로 계산하는 제로라인. 71XX2 시트의
+     "H : 300" · "T : 1700" 같은 표기가 부품 좌표(mm)라, 그 평면으로
+     CAD 를 자르면 제로라인이 **추정 없이** 나온다. */
+  const [sectionNotes, setSectionNotes] = useState('');
+  const [sections, setSections] = useState<CadSection[] | null>(null);
+  const [sectionSide, setSectionSide] = useState<'both' | 'lh' | 'rh'>('both');
+  const [sectionError, setSectionError] = useState<string | null>(null);
+  const [sectionState, setSectionState] = useState<'idle' | 'working'>('idle');
+
+  const cutSections = async () => {
+    if (!mesh?.cadId) return;
+    setSectionState('working'); setSectionError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-sections`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cadId: mesh.cadId, notes: sectionNotes, side: sectionSide }),
+      });
+      const data = await response.json() as { sections?: CadSection[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '자르지 못했습니다.');
+      setSections(data.sections ?? []);
+    } catch (err) {
+      setSectionError(String((err as Error).message || err));
+      setSections(null);
+    } finally {
+      setSectionState('idle');
+    }
+  };
 
   const morphPayload = () => {
     const spots: Record<string, [number, number, number]> = {};
@@ -1564,6 +1591,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
      캐시에 있으면 즉시 돌아온다. */
   useEffect(() => {
     setMorph(null); setMorphMode('off'); setMorphError(null);
+    setSections(null); setSectionError(null);
     if (overlayScanId) requestOverlay(overlayScanId, mesh?.cadId);
     else setOverlay(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1697,7 +1725,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 </span>)}
               </div>}
               <div className="cad-viewer">
-                <CadViewer active={active} mesh={mesh} showHoles={showHoles} overlay={overlay}
+                <CadViewer active={active} sections={sections} mesh={mesh} showHoles={showHoles} overlay={overlay}
                   sheetValues={sheetValues?.values ?? null}
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
@@ -1709,6 +1737,39 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   notes={notesByCad[notesKey] ?? []}
                   onNotesChange={(next) => notesKey && setNotesByCad(
                     (current) => ({ ...current, [notesKey]: next }))} />
+              </div>
+              {/* 보정시트가 적어 둔 단면 위치로 제로라인을 계산한다.
+                  스캔이 없어도 되고 추정이 없다 — 시트 숫자로 CAD 를 자를 뿐이다. */}
+              <div className="cad-section-bar">
+                <label htmlFor="cad-sections">시트 단면 표기</label>
+                <input id="cad-sections" type="text" value={sectionNotes}
+                  placeholder="예: H : 300   H : 250   T : 1700"
+                  onChange={(event) => setSectionNotes(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') void cutSections(); }} />
+                <select aria-label="좌우" value={sectionSide}
+                  onChange={(event) => setSectionSide(event.target.value as typeof sectionSide)}>
+                  <option value="both">양쪽</option>
+                  <option value="lh">LH</option>
+                  <option value="rh">RH</option>
+                </select>
+                <button type="button" className="tool-button" onClick={cutSections}
+                  disabled={sectionState === 'working' || !sectionNotes.trim()}>
+                  {sectionState === 'working' ? '자르는 중…' : '제로라인 계산'}
+                </button>
+                {sections && sections.length > 0 && <>
+                  <span className="cad-section-bar__ok">
+                    {sections.map((s) => `${s.label}`).join(' · ')} ·
+                    {' '}곡선 {sections.reduce((n, s) => n + s.polylines.length, 0)}개
+                  </span>
+                  <button type="button" className="tool-button"
+                    onClick={() => setSections(null)}>지우기</button>
+                </>}
+                {sections && sections.length === 0 &&
+                  <span className="cad-overlay-bar__err">그 자리에서 잘리지 않았습니다</span>}
+                {sectionError && <span className="cad-overlay-bar__err">{sectionError}</span>}
+                <span className="cad-section-bar__note">
+                  H = 높이(Z) · T = 전후(X) · 시트 숫자로 CAD 를 자르므로 추정이 없습니다
+                </span>
               </div>
               <div className="viewer-legend">
                 <span>
