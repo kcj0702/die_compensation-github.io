@@ -1728,17 +1728,24 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCadId]);
 
-  /* CAD 마다 따로 들고 있는다 — 부품이 다르면 맞춘 값도 다르다. */
+  /* CAD 마다 따로 들고 있는다 — 부품이 다르면 맞춘 값도 다르다.
+     열쇠는 **파일 이름**이다. cadId 는 파일을 다시 읽을 때마다 새로
+     생겨서(서버 캐시에서 밀려나면 다시 올린다) 맞춰 둔 값이 날아간다 —
+     notesByCad·regionsByCad 와 같은 이유다. */
   const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
-  const adjust = adjustByCad[activeCadId] ?? NO_ADJUST;
+  const adjustKey = mesh?.summary.name ?? '';
+  const adjust = adjustByCad[adjustKey] ?? NO_ADJUST;
   const [showAlign, setShowAlign] = useState(false);
 
   /* 손으로 맞춘 정렬이 바뀌면 다시 얹는다. */
   const nudge = (next: Partial<FitAdjust>) => {
-    if (!activeCadId || !overlayScanId) return;
+    // activeCadId 는 cadId 가 없을 때 파일 이름으로 떨어진다(keyOf).
+    // 서버에 보낼 때는 반드시 진짜 cadId 를 써야 한다.
+    const cadId = mesh?.cadId;
+    if (!cadId || !adjustKey || !overlayScanId) return;
     const moved = { ...adjust, ...next };
-    setAdjustByCad((current) => ({ ...current, [activeCadId]: moved }));
-    requestOverlay(overlayScanId, activeCadId, undefined, false, moved);
+    setAdjustByCad((current) => ({ ...current, [adjustKey]: moved }));
+    requestOverlay(overlayScanId, cadId, undefined, false, moved);
   };
 
   const requestOverlay = (scanId: string, forCadId?: string,
@@ -1753,7 +1760,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다.
     // 제로라인을 손봤으면 다른 결과이므로 열쇠에 같이 넣는다.
     const applied = edits ?? zeroEditsByScan[scanId] ?? [];
-    const placed = moved ?? adjustByCad[cadId] ?? NO_ADJUST;
+    const placed = moved ?? adjustByCad[adjustKey] ?? NO_ADJUST;
     const stamp = applied.length ? `:${JSON.stringify(applied)}` : '';
     const sameAsAuto = placed.angle === 0 && placed.dx === 0
       && placed.dy === 0 && placed.scale === 1;
