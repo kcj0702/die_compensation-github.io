@@ -21,6 +21,10 @@
 크게 반영하고, 영향 반경 밖은 0 으로 떨어뜨린다. 반경을 두지 않으면
 부품 반대편 보정량까지 옅게 섞여 형상이 전체적으로 부푼다.
 
+다만 정규화만 하면 안 된다. 포인트가 하나일 때 반경 안이 통째로 같은
+값이 되어 원판을 찍어 놓은 꼴이 되고, 반경 끝에서 절벽이 생긴다.
+값(정규화한 보간)과 덮개(포인트에 얼마나 가까운가)를 나눠 구해 곱한다.
+
 [거리는 직선이 아니라 표면을 따라 잰다]
 판금은 접혀 있다. 플랜지를 세워 두면 직선거리로는 붙어 있어도 **판을
 따라가면 멀다.** 직선거리로 재면 보정 포인트 하나가 틈 건너편 살까지
@@ -102,6 +106,18 @@ def displacement_field(
 
     shift = np.zeros(len(vertices), dtype=float)
     weight_sum = np.zeros(len(vertices), dtype=float)
+    # 가장자리에서 부드럽게 0 으로 내리는 덮개.
+    #
+    # 역거리 가중을 **정규화만** 하면 포인트가 하나일 때 반경 안이
+    # 통째로 같은 값이 된다 — 나누는 순간 가중치가 지워지기 때문이다.
+    # 그러면 보정 후 형상이 원판을 찍어 놓은 것처럼 되고 반경 끝에서
+    # 절벽이 생긴다. 금형 형상으로 쓸 수 없다.
+    #
+    # 그래서 값과 덮개를 나눠서 구한다 — 값은 정규화한 보간값이고,
+    # 덮개는 "이 자리가 어느 포인트에든 얼마나 가까운가" 다.
+    # 1 - Π(1 - w) 는 포인트 자리에서 1, 모든 반경 밖에서 0 이고,
+    # 가중치가 양 끝에서 기울기 0 이라 이어 붙인 자리도 매끄럽다.
+    cover = np.ones(len(vertices), dtype=float)
     for index, (spot, value) in enumerate(zip(spots, values)):
         distance = (along[index] if along is not None
                     else np.linalg.norm(vertices - spot, axis=1))
@@ -116,11 +132,12 @@ def displacement_field(
         weight = (1.0 - ratio ** 2) ** power
         shift[near] += weight * value
         weight_sum[near] += weight
+        cover[near] *= (1.0 - weight)
 
     busy = weight_sum > 1e-9
     shift[busy] /= weight_sum[busy]
     shift[~busy] = 0.0
-    return shift
+    return shift * (1.0 - cover)
 
 
 def surface_distances(vertices: np.ndarray, faces: np.ndarray,

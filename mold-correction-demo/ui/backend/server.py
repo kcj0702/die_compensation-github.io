@@ -1094,12 +1094,55 @@ def scan_part_for_cad(cad_name: str) -> str | None:
     return None
 
 
+def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
+    """보정시트에서 손본 제로라인을 그대로 따른다.
+
+    3D 의 제로라인은 시트가 정하는 것이라, 시트에서 옮기거나 숨긴 것이
+    3D 에 안 비치면 둘이 어긋난다. 옮김은 그림 좌표(px)로 받아 **광선을
+    쏘기 전에** 더한다 — 3D 에서 따로 밀면 표면에서 떠 버린다.
+    """
+    if not zero_edits:
+        return raw_lines
+    moved: list = []
+    for index, line in enumerate(raw_lines):
+        edit = next((e for e in zero_edits
+                     if int(e.get("index", -1)) == index), None)
+        if edit is None:
+            moved.append(line)
+            continue
+        if edit.get("hidden"):
+            continue
+        dx = float(edit.get("dx") or 0.0)
+        dy = float(edit.get("dy") or 0.0)
+        moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
+                                         for p in line["points"]]})
+    return moved
+
+
 # 자세 후보를 몇 개까지 광선으로 검증할지. 하나에 1초 안쪽이다.
 OVERLAY_TRIES = 6
 
+# 스캔을 CAD 에 얹은 결과. 같은 짝을 다시 보는 일이 잦다(탭을 옮기거나
+# 제로라인을 손봤다 되돌리거나). 실측 20초짜리를 다시 돌릴 이유가 없다.
+_overlay_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_OVERLAY_CACHE_MAX = 12
+
+
+def reset_overlay_cache() -> None:
+    """시험에서 캐시가 새어 나가지 않게 비운다."""
+    _overlay_cache.clear()
+
+
+def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
+                 fit_adjust=None) -> str:
+    return "|".join([cad_id, analysis_id,
+                     json.dumps(zero_edits or [], sort_keys=True),
+                     json.dumps(fit_adjust or {}, sort_keys=True)])
+
 
 def cad_overlay_for(cad_id: str, analysis_id: str,
-                    zero_edits: list | None = None) -> dict[str, Any]:
+                    zero_edits: list | None = None,
+                    fit_adjust: dict | None = None) -> dict[str, Any]:
     """스캔에서 뽑은 제로라인·포인트를 CAD 표면 위의 3D 좌표로 옮긴다.
 
     보정량은 여기서 계산하지 않는다. 최종 보정시트는 작업자가 값을
@@ -1118,6 +1161,11 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     analysis = _analysis_cache.get(analysis_id)
     if analysis is None:
         raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
+
+    cache_key = _overlay_key(cad_id, analysis_id, zero_edits, fit_adjust)
+    if cache_key in _overlay_cache:
+        _overlay_cache.move_to_end(cache_key)
+        return _overlay_cache[cache_key]
 
     mesh = cad_entry["mesh"]
     offset = cad_entry["offset"]
@@ -1157,6 +1205,21 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
                         cut_axis, cut_mid, cut_side)
 
     fit, vertices, faces, shifted, cut_axis, cut_mid, cut_side = best
+
+    # 작업자가 손으로 맞춘 값이 있으면 그대로 따른다. 자동 정합은
+    # 실루엣만 보므로 몇 퍼센트가 모자랄 수 있는데, 그때 사람이 조금
+    # 돌리고 옮겨서 맞출 수 있어야 쓸 수 있는 도구가 된다.
+    if fit_adjust:
+        fit = ov.nudge_fit(
+            fit, analysis["part_mask"].shape,
+            angle_deg=float(fit_adjust.get("angle") or 0.0),
+            dx=float(fit_adjust.get("dx") or 0.0),
+            dy=float(fit_adjust.get("dy") or 0.0),
+            scale=float(fit_adjust.get("scale") or 1.0))
+        # 손으로 옮겼으면 얹힘도 다시 잰다 — 나아졌는지 보여야 한다
+        fit.hit_rate = round(ov.measure_hit_rate(
+            fit, vertices, faces, analysis["part_mask"], shifted), 4)
+
     fit.reliable = fit.hit_rate >= ov.MIN_HIT_RATE
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
@@ -1185,26 +1248,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         raw_lines = [{"line_id": l.get("line_id"), "points": l["points"]}
                      for l in analysis.get("simple_zero_lines", [])]
 
-    # 보정시트에서 손본 제로라인을 그대로 따른다.
-    #
-    # 3D 의 제로라인은 시트가 정하는 것이라, 시트에서 옮기거나 숨긴 것이
-    # 3D 에 안 비치면 둘이 어긋난다. 옮김은 그림 좌표(px)로 받아 **광선을
-    # 쏘기 전에** 더한다 — 3D 에서 따로 밀면 표면에서 떠 버린다.
-    if zero_edits:
-        moved: list = []
-        for index, line in enumerate(raw_lines):
-            edit = next((e for e in zero_edits
-                         if int(e.get("index", -1)) == index), None)
-            if edit is None:
-                moved.append(line)
-                continue
-            if edit.get("hidden"):
-                continue
-            dx = float(edit.get("dx") or 0.0)
-            dy = float(edit.get("dy") or 0.0)
-            moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
-                                             for p in line["points"]]})
-        raw_lines = moved
+    raw_lines = apply_zero_edits(raw_lines, zero_edits)
 
     lines = []
     dropped_line_points = 0
@@ -1367,7 +1411,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
             surface = [v if mine[i] else None
                        for i, v in enumerate(surface)]
 
-    return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
+    answer = {
+            "fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
             "zeroSurface": zero_surface,
             "zeroAreas": zero_areas,
@@ -1381,6 +1426,11 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
                 [round(float(np.nanmin(analysis["values"][analysis["part_mask"] > 0])), 2),
                  round(float(np.nanmax(analysis["values"][analysis["part_mask"] > 0])), 2)]
                 if analysis.get("part_mask") is not None else None)}
+
+    _overlay_cache[cache_key] = answer
+    while len(_overlay_cache) > _OVERLAY_CACHE_MAX:
+        _overlay_cache.popitem(last=False)
+    return answer
 
 
 def sheet_excel_for(analysis_id: str, corrections: dict,
@@ -1640,6 +1690,7 @@ async def cad_overlay(request: Request) -> JSONResponse:
             str(body.get("cadId") or ""),
             str(body.get("analysisId") or ""),
             body.get("zeroEdits") or None,
+            body.get("fitAdjust") or None,
         )
         return JSONResponse(result)
     except ValueError as exc:

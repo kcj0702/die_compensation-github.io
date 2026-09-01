@@ -36,6 +36,10 @@ type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_d
    시트가 제로라인의 주인이고 3D 는 그 결과를 보여 주는 자리다.
    옮김은 **그림 좌표(px)** 다. 3D 좌표로 밀면 표면에서 뜬다. */
 export type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean };
+/* 작업자가 손으로 맞춘 정렬. 자동 정합은 실루엣만 보므로 몇 퍼센트가
+   모자랄 수 있다 — 그때 조금 돌리고 옮겨 맞춘다. */
+export type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
+const NO_ADJUST: FitAdjust = { angle: 0, dx: 0, dy: 0, scale: 1 };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
@@ -1724,8 +1728,22 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCadId]);
 
+  /* CAD 마다 따로 들고 있는다 — 부품이 다르면 맞춘 값도 다르다. */
+  const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
+  const adjust = adjustByCad[activeCadId] ?? NO_ADJUST;
+  const [showAlign, setShowAlign] = useState(false);
+
+  /* 손으로 맞춘 정렬이 바뀌면 다시 얹는다. */
+  const nudge = (next: Partial<FitAdjust>) => {
+    if (!activeCadId || !overlayScanId) return;
+    const moved = { ...adjust, ...next };
+    setAdjustByCad((current) => ({ ...current, [activeCadId]: moved }));
+    requestOverlay(overlayScanId, activeCadId, undefined, false, moved);
+  };
+
   const requestOverlay = (scanId: string, forCadId?: string,
-                          edits?: ZeroEdit[], retried = false) => {
+                          edits?: ZeroEdit[], retried = false,
+                          moved?: FitAdjust) => {
     const cadId = forCadId ?? mesh?.cadId;
     setOverlayScanId(scanId);
     setOverlayError(null);
@@ -1735,8 +1753,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다.
     // 제로라인을 손봤으면 다른 결과이므로 열쇠에 같이 넣는다.
     const applied = edits ?? zeroEditsByScan[scanId] ?? [];
+    const placed = moved ?? adjustByCad[cadId] ?? NO_ADJUST;
     const stamp = applied.length ? `:${JSON.stringify(applied)}` : '';
-    const cacheKey = `${cadId}:${analysisId}${stamp}`;
+    const sameAsAuto = placed.angle === 0 && placed.dx === 0
+      && placed.dy === 0 && placed.scale === 1;
+    const cacheKey = `${cadId}:${analysisId}${stamp}`
+      + (sameAsAuto ? '' : `:${JSON.stringify(placed)}`);
     const cached = overlayCache.current[cacheKey];
     if (cached) { setOverlay(cached); setOverlayStatus('idle'); return; }
     setOverlay(null);
@@ -1744,7 +1766,8 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     fetch(`${API_BASE}/api/cad-overlay`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cadId, analysisId,
-                             zeroEdits: applied.length ? applied : undefined }),
+                             zeroEdits: applied.length ? applied : undefined,
+                             fitAdjust: sameAsAuto ? undefined : placed }),
     })
       .then(async (response) => {
         const data = await response.json() as CadOverlay & { error?: string };
@@ -1946,6 +1969,42 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 </span>
                 <span>{summary?.n_faces.toLocaleString()} 삼각형</span>
               </div>
+              {overlay && showAlign && <div className="cad-align">
+                <div className="cad-align__head">
+                  <b>정렬 맞추기</b>
+                  <span>자동 정합은 겉모양만 봅니다. 스캔에 안 보이는 살이
+                    있으면 몇 %가 모자랍니다 — 여기서 맞추면 얹힘이 바로
+                    다시 계산됩니다.</span>
+                </div>
+                <div className="cad-align__rows">
+                  <span className="cad-align__group">
+                    <label>이동</label>
+                    <button type="button" onClick={() => nudge({ dx: adjust.dx - 4 })}>←</button>
+                    <button type="button" onClick={() => nudge({ dx: adjust.dx + 4 })}>→</button>
+                    <button type="button" onClick={() => nudge({ dy: adjust.dy - 4 })}>↑</button>
+                    <button type="button" onClick={() => nudge({ dy: adjust.dy + 4 })}>↓</button>
+                    <i>{adjust.dx.toFixed(0)}, {adjust.dy.toFixed(0)} px</i>
+                  </span>
+                  <span className="cad-align__group">
+                    <label>회전</label>
+                    <button type="button" onClick={() => nudge({ angle: adjust.angle - 1 })}>↺</button>
+                    <button type="button" onClick={() => nudge({ angle: adjust.angle + 1 })}>↻</button>
+                    <i>{adjust.angle.toFixed(0)}°</i>
+                  </span>
+                  <span className="cad-align__group">
+                    <label>크기</label>
+                    <button type="button" onClick={() => nudge({ scale: Math.max(0.5, adjust.scale - 0.02) })}>−</button>
+                    <button type="button" onClick={() => nudge({ scale: Math.min(2, adjust.scale + 0.02) })}>+</button>
+                    <i>{Math.round(adjust.scale * 100)}%</i>
+                  </span>
+                  <button type="button" className="cad-align__reset"
+                    onClick={() => nudge({ ...NO_ADJUST })}>자동으로 되돌리기</button>
+                  <b className={`cad-align__rate${overlay.fit.reliable ? ' is-ok' : ''}`}>
+                    얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
+                    {overlay.fit.reliable ? ' · 표시함' : ' · 기준 60% 미달'}
+                  </b>
+                </div>
+              </div>}
               {analysed.length > 0 && <div className="cad-overlay-bar">
                 <label htmlFor="cad-overlay-scan">스캔 결과 올리기</label>
                 <select id="cad-overlay-scan" value={overlayScanId}
@@ -1958,6 +2017,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                     </option>
                   ))}
                 </select>
+                {overlay && <button type="button"
+                  className={`cad-align__toggle${showAlign ? ' is-on' : ''}`}
+                  onClick={() => setShowAlign((v) => !v)}
+                  title="자동 정합이 조금 어긋났을 때 손으로 맞춥니다">
+                  정렬 맞추기
+                </button>}
                 {overlayStatus === 'loading' && <span className="cad-overlay-bar__note">올리는 중…</span>}
                 {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
                 {overlay && <span className="cad-overlay-bar__note">

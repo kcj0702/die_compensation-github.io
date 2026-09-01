@@ -113,3 +113,142 @@ def test_얹힘_비율은_같은_입력에_같은_값():
     first = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
     second = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
     assert first == second
+
+
+def test_한_파일에_두_짝이면_갈라_준다():
+    """LH·RH 가 같이 든 CAD.
+
+    실측 71XX1-DR000 이 그렇다 — Y 한가운데 3% 띠에 정점이 0개이고
+    좌우가 91,895 대 91,926 이다. 스캔은 한 짝뿐이라 합친 실루엣과는
+    맞지 않는다(얹힘 31.3%).
+    """
+    left = trimesh.creation.box(extents=[400, 60, 100])
+    left.apply_translation([0, -200, 0])
+    right = trimesh.creation.box(extents=[400, 60, 100])
+    right.apply_translation([0, 200, 0])
+    both = trimesh.util.concatenate([left, right])
+
+    halves = ov.split_sides(np.asarray(both.vertices, float),
+                            np.asarray(both.faces))
+    assert len(halves) == 2, "두 짝을 못 갈랐다"
+    for points, cells, axis, _mid, _side in halves:
+        assert axis == 1, "Y 로 갈려야 한다"
+        assert len(cells) > 0
+        assert len(points) == len(both.vertices) // 2
+
+
+def test_붙어_있는_부품은_안_가른다():
+    vertices, faces = _bar()
+    halves = ov.split_sides(vertices, faces)
+    assert len(halves) == 1
+    assert halves[0][2] == -1, "자르는 축이 없어야 한다"
+
+
+def test_갈라도_면이_안_깨진다():
+    """가른 뒤 면 번호가 새 정점 번호를 가리켜야 한다."""
+    left = trimesh.creation.box(extents=[100, 40, 40])
+    left.apply_translation([0, 0, -120])
+    right = trimesh.creation.box(extents=[100, 40, 40])
+    right.apply_translation([0, 0, 120])
+    both = trimesh.util.concatenate([left, right])
+    for points, cells, *_rest in ov.split_sides(
+            np.asarray(both.vertices, float), np.asarray(both.faces)):
+        assert cells.min() >= 0
+        assert cells.max() < len(points)
+
+
+def test_자리와_배율을_다듬어_더_잘_맞춘다():
+    """CAD 에만 있는 살이 바운딩 상자를 키우면 전체가 밀린다.
+
+    실측 71XX2 가 이것 때문에 각도를 다 훑고도 57.7% 에서 멈췄다.
+    """
+    import cv2
+
+    vertices, faces = _bar()
+    # 스캔에는 막대 본체만 보이고, CAD 에는 위로 뻗은 살이 더 있다
+    tab = trimesh.creation.box(extents=[60, 60, 40])
+    tab.apply_translation([-160, 0, 65])
+    grown = trimesh.util.concatenate([
+        trimesh.Trimesh(vertices=vertices, faces=faces, process=False), tab])
+
+    mask = np.zeros((300, 500), np.uint8)
+    cv2.rectangle(mask, (60, 110), (440, 190), 255, -1)
+    fit = ov.fit_view(np.asarray(grown.vertices, float),
+                      np.asarray(grown.faces), mask)
+    # 살이 붙어 있어도 본체가 마스크에 얹혀야 한다
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    rate = ov.measure_hit_rate(fit, vertices, faces, mask, mesh)
+    assert rate > 0.6, f"살이 붙으니 본체가 밀렸다 (얹힘 {rate:.2f})"
+
+
+def test_손으로_옮기면_그만큼_옮겨진다():
+    """작업자가 화면에서 밀면 딱 그 픽셀만큼 움직여야 한다."""
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    before = np.stack(ov.to_pixels(vertices, fit), axis=1).astype(float)
+
+    moved = ov.nudge_fit(fit, mask.shape, dx=12.0, dy=-7.0)
+    after = np.stack(ov.to_pixels(vertices, moved), axis=1).astype(float)
+    gap = after - before
+    assert abs(gap[:, 0].mean() - 12.0) < 1.0, f"가로가 안 맞다 {gap[:, 0].mean()}"
+    assert abs(gap[:, 1].mean() + 7.0) < 1.0, f"세로가 안 맞다 {gap[:, 1].mean()}"
+
+
+def test_돌릴_때_그림_밖으로_날아가지_않는다():
+    """원점을 축으로 돌리면 조금만 돌려도 부품이 사라진다."""
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    before = np.stack(ov.to_pixels(vertices, fit), axis=1).astype(float)
+    moved = ov.nudge_fit(fit, mask.shape, angle_deg=8.0)
+    after = np.stack(ov.to_pixels(vertices, moved), axis=1).astype(float)
+    assert np.linalg.norm(after.mean(axis=0) - before.mean(axis=0)) < 20.0, (
+        "가운데가 크게 밀렸다 — 그림 한가운데를 축으로 돌리지 않았다")
+
+
+def test_배율도_가운데를_축으로_한다():
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    before = np.stack(ov.to_pixels(vertices, fit), axis=1).astype(float)
+    moved = ov.nudge_fit(fit, mask.shape, scale=1.2)
+    after = np.stack(ov.to_pixels(vertices, moved), axis=1).astype(float)
+
+    span_before = before.max(axis=0) - before.min(axis=0)
+    span_after = after.max(axis=0) - after.min(axis=0)
+    assert np.allclose(span_after / span_before, 1.2, atol=0.05), (
+        f"1.2배가 안 됐다 {span_after / span_before}")
+    assert np.linalg.norm(after.mean(axis=0) - before.mean(axis=0)) < 25.0
+
+
+def test_손대지_않으면_그대로다():
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    same = ov.nudge_fit(fit, mask.shape)
+    assert same.to_dict() == fit.to_dict()
+
+
+def test_딱_맞는_부품은_부풀리지_않는다():
+    """자리를 고를 때 재현율만 좇으면 형상을 키워 마스크를 덮는 쪽이 이긴다.
+
+    껍질 겹침이 뚜렷하게 좋은 자세가 있으면 그것을 지켜야 한다.
+    """
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    xs, ys = ov.to_pixels(vertices, fit)
+    inside = ((xs >= 0) & (xs < mask.shape[1])
+              & (ys >= 0) & (ys < mask.shape[0]))
+    assert inside.mean() > 0.95, (
+        f"형상이 그림 밖으로 부풀었다 ({inside.mean():.2f})")
+
+
+def test_자세를_여러_개_받을_수_있다():
+    vertices, faces = _bar()
+    got = ov.fit_view(vertices, faces, _mask(400, 100), top_k=4)
+    assert isinstance(got, list) and len(got) == 4
+    assert all(hasattr(f, "mm_per_px") for f in got)
+    # 겹침이 좋은 순이어야 한다
+    assert got[0].iou >= got[-1].iou

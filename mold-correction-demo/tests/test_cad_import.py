@@ -142,3 +142,52 @@ def test_mesh_roundtrip_via_stl(plate_step: Path, tmp_path: Path) -> None:
     mesh = mesh_io.load_mesh(stl_path)
     bounds = mesh_io.mesh_bounds(mesh)
     assert np.allclose(bounds.size, PLATE, atol=0.6), bounds.size
+
+
+def test_더_큰_홀_안의_턱은_홀로_안_센다(tmp_path: Path) -> None:
+    """같은 자리에 큰 원통과 작은 원통이 겹쳐 있으면 하나다.
+
+    실측 67XX6-DR050 에서 홀이 180개 나왔는데, 중심이 3mm 안에 겹친
+    쌍만 104개였다. Ø12 홀 안에 Ø6.3 원통이 비껴 앉아 있는 식이다 —
+    나란히 뚫린 두 구멍일 수 없다.
+    """
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+    plate = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 80.0, 80.0, 6.0).Shape()
+    wide = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(40, 40, -1), gp_Dir(0, 0, 1)), 6.0, 4.0).Shape()
+    narrow = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(41, 40, 2.5), gp_Dir(0, 0, 1)), 3.0, 5.0).Shape()
+    shape = BRepAlgoAPI_Cut(
+        BRepAlgoAPI_Cut(plate, wide).Shape(), narrow).Shape()
+
+    kinds = [c.kind for c in step_reader.find_cylinders(shape)]
+    assert kinds.count("hole") == 1, f"턱까지 홀로 셌다: {kinds}"
+    assert "step" in kinds, "안쪽 턱을 표시하지 않았다"
+
+
+def test_떨어져_있는_같은_축_홀은_따로_센다() -> None:
+    """위아래 플랜지에 각각 뚫린 볼트홀.
+
+    축이 같다고 한 덩어리로 보면 사이의 빈 구간까지 높이에 들어가
+    감김이 무너져 둘 다 굽힘 R 로 밀려난다 — 실측 71XX1 에서 홀이
+    44 -> 28 개로 줄고 Ø8.4 짜리 12개가 통째로 사라졌다.
+    """
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Cut
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox, BRepPrimAPI_MakeCylinder
+    from OCP.gp import gp_Ax2, gp_Dir, gp_Pnt
+
+    lower = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 0), 60.0, 60.0, 4.0).Shape()
+    upper = BRepPrimAPI_MakeBox(gp_Pnt(0, 0, 30), 60.0, 60.0, 4.0).Shape()
+    from OCP.BRepAlgoAPI import BRepAlgoAPI_Fuse
+    plates = BRepAlgoAPI_Fuse(lower, upper).Shape()
+    drill = BRepPrimAPI_MakeCylinder(
+        gp_Ax2(gp_Pnt(30, 30, -5), gp_Dir(0, 0, 1)), 5.0, 50.0).Shape()
+    shape = BRepAlgoAPI_Cut(plates, drill).Shape()
+
+    holes = [c for c in step_reader.find_cylinders(shape) if c.kind == "hole"]
+    assert len(holes) == 2, f"떨어진 두 홀을 하나로 봤다: {len(holes)}개"
+    for hole in holes:
+        assert hole.height < 10.0, f"빈 구간까지 높이에 넣었다: {hole.height}"

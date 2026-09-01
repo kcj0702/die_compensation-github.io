@@ -27,13 +27,13 @@ import numpy as np
 #
 # [값을 어떻게 정했나 — 실측 67XX6, 제로 영역이 그림의 5.6%]
 #   채움  조각  네모수  진짜 영역 중 덮음  네모 중 헛덮음
-#   0.50    6      17            98%            43%
-#   0.50    8      19            98%            41%
-#   0.62    6      23            92%            41%
-#   0.72    8      37            76%            39%
-# 잘게 쪼개도 헛덮음이 40% 아래로는 안 내려간다 — 굽은 띠를 네모로
-# 싸는 이상 어쩔 수 없다. 그러면 **네모 수가 적고 빠뜨리지 않는** 쪽이
-# 낫다. 17개로 98% 를 덮는 (0.50, 6) 을 쓴다.
+#   0.50    6      20           100%            40%
+#   0.62    6      29           100%            35%
+#   0.72    6      33           100%            32%
+#   0.72    8      40           100%            29%
+# 어느 값이든 빠뜨리지는 않는다(영역을 갈라 쓰므로). 남는 것은 네모
+# 수와 헛덮음의 맞바꿈인데, 헛덮음 5%를 줄이려고 네모를 20 -> 29 개로
+# 늘리면 화면이 다시 지저분해진다. 적은 쪽을 쓴다.
 MIN_FILL = 0.50
 # 한 영역을 이보다 잘게 쪼개지 않는다.
 MAX_PIECES = 6
@@ -52,15 +52,42 @@ def _fill(points: np.ndarray) -> float:
 
 
 def _split(points: np.ndarray) -> list:
-    """긴 축의 한가운데에서 두 쪽으로 가른다."""
+    """긴 축의 한가운데에서 두 쪽으로 가른다.
+
+    [왜 점이 아니라 채운 영역을 가르나]
+    처음에는 윤곽 **점**을 선 기준으로 두 무리로 나눴다. 그런데
+    cv2.findContours 는 곧은 변을 꼭짓점 몇 개로 줄여 준다 — ㄱ 자
+    영역이 점 6개로 오면 한쪽에 3개가 안 남아 가르기가 실패하고,
+    통짜 네모가 그대로 나온다(빈 데까지 덮는 바로 그 경우다).
+
+    그래서 폴리곤을 한 번 채워 놓고 **픽셀을 가른다.** 점이 몇 개든
+    상관없고, 오목한 모양도 제대로 갈린다.
+    """
+    low = points.min(axis=0)
+    size = points.max(axis=0) - low + 1
+    canvas = np.zeros((int(size[1]) + 2, int(size[0]) + 2), np.uint8)
+    cv2.fillPoly(canvas, [points - low + 1], 1)
+
     (mid, (width, height), angle) = cv2.minAreaRect(points)
     turn = np.deg2rad(angle)
     along = (np.array([np.cos(turn), np.sin(turn)]) if width >= height
              else np.array([-np.sin(turn), np.cos(turn)]))
-    reach = (points - np.asarray(mid)) @ along
-    near = points[reach <= 0]
-    far = points[reach > 0]
-    return [part for part in (near, far) if len(part) >= 3]
+
+    ys, xs = np.mgrid[0:canvas.shape[0], 0:canvas.shape[1]]
+    world_x = xs + low[0] - 1
+    world_y = ys + low[1] - 1
+    reach = (world_x - mid[0]) * along[0] + (world_y - mid[1]) * along[1]
+
+    out: list = []
+    for keep in (reach <= 0, reach > 0):
+        piece = (canvas & keep.astype(np.uint8))
+        found, _h = cv2.findContours(piece, cv2.RETR_EXTERNAL,
+                                     cv2.CHAIN_APPROX_SIMPLE)
+        for contour in found:
+            if cv2.contourArea(contour) < MIN_AREA_PX:
+                continue
+            out.append(contour.reshape(-1, 2) + low - 1)
+    return out
 
 
 def boxes_of(contour, budget: int = MAX_PIECES) -> list:

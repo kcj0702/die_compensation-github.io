@@ -315,3 +315,61 @@ class UiBackendStrictReadingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZeroLineEditTest(unittest.TestCase):
+    """보정시트에서 손본 제로라인이 3D 로 그대로 간다."""
+
+    def test_옮김은_광선을_쏘기_전에_더해진다(self) -> None:
+        lines = [{"line_id": 1, "points": [[10.0, 10.0], [20.0, 10.0]]},
+                 {"line_id": 2, "points": [[30.0, 30.0], [40.0, 30.0]]}]
+        edits = [{"index": 0, "dx": 5.0, "dy": -3.0}]
+        moved = backend_server.apply_zero_edits(lines, edits)
+        self.assertEqual(moved[0]["points"], [[15.0, 7.0], [25.0, 7.0]])
+        self.assertEqual(moved[1]["points"], lines[1]["points"],
+                         "손대지 않은 선은 그대로여야 한다")
+
+    def test_숨긴_선은_빠진다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [1.0, 1.0]]},
+                 {"line_id": 2, "points": [[2.0, 2.0], [3.0, 3.0]]}]
+        left = backend_server.apply_zero_edits(
+            lines, [{"index": 0, "hidden": True}])
+        self.assertEqual(len(left), 1)
+        self.assertEqual(left[0]["line_id"], 2)
+
+    def test_손댄_것이_없으면_그대로다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [1.0, 1.0]]}]
+        self.assertEqual(backend_server.apply_zero_edits(lines, None), lines)
+        self.assertEqual(backend_server.apply_zero_edits(lines, []), lines)
+
+    def test_없는_번호는_무시한다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [1.0, 1.0]]}]
+        left = backend_server.apply_zero_edits(
+            lines, [{"index": 7, "dx": 100.0}])
+        self.assertEqual(left, lines)
+
+
+class OverlayCacheTest(unittest.TestCase):
+    """같은 짝을 다시 얹을 때 다시 계산하지 않는다."""
+
+    def setUp(self) -> None:
+        backend_server.reset_overlay_cache()
+
+    def tearDown(self) -> None:
+        backend_server.reset_overlay_cache()
+
+    def test_손본_내역이_다르면_다른_열쇠다(self) -> None:
+        same = backend_server._overlay_key("c", "a", [{"index": 0, "dx": 1}])
+        again = backend_server._overlay_key("c", "a", [{"index": 0, "dx": 1}])
+        other = backend_server._overlay_key("c", "a", [{"index": 0, "dx": 2}])
+        self.assertEqual(same, again)
+        self.assertNotEqual(same, other)
+
+    def test_빈_내역과_없는_내역은_같은_열쇠다(self) -> None:
+        self.assertEqual(backend_server._overlay_key("c", "a", None),
+                         backend_server._overlay_key("c", "a", []))
+
+    def test_CAD_가_만료되면_캐시를_보기_전에_알린다(self) -> None:
+        with self.assertRaises(ValueError) as caught:
+            backend_server.cad_overlay_for("없는CAD", "없는분석")
+        self.assertIn("CAD", str(caught.exception))

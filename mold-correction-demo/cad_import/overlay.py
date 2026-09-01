@@ -201,6 +201,24 @@ FIT_ANGLE_SPAN = 30.0
 FIT_ANGLE_STEP = 2.5
 # 각도를 훑어 볼 후보 수(1차로 추린 것 중 위에서부터).
 FIT_REFINE_TOP = 4
+# 자리를 고를 때 무엇으로 점수를 매길지.
+#
+#   'f2'      재현율에 2배 무게를 준 F 점수. 살이 더 있는 부품에서는
+#             재현율처럼, 딱 맞는 부품에서는 겹침처럼 행동한다.
+#   'recall'  스캔 마스크 중 형상이 덮은 비율. 얹힘과 뜻은 가장 가깝지만
+#             형상을 부풀리는 쪽이 이긴다(합성 시험에서 깨졌다).
+#   'iou'     껍질 겹침. CAD 에 살이 더 있으면 그만큼 깎인다.
+#
+# 실측 (자리 다듬기 단계의 점수만 바꿔 재봄) —
+#     부품     iou     recall
+#     64XX2   99.7%    99.7%
+#     67XX6   91.7%    91.7%
+#     71XX2   61.7%    67.7%   <- 살이 더 있는 부품에서 갈린다
+# 배율을 0.88~1.12 로 묶어 두었으므로 재현율만 좇아 부풀어 오르지는
+# 않는다. 같은 값이면 세부 겹침으로 가른다.
+FIT_PLACE_SCORE = 'f2'
+# 껍질 겹침이 이만큼 안쪽이면 "비슷하다" 고 보고 F2 로 고른다.
+FIT_HULL_BAND = 0.02
 
 # 위치·배율 다듬기.
 #
@@ -241,14 +259,17 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
 
     단계마다 얹힘이 얼마나 오르는지 (실측) —
 
-        부품     1단계만   +각도 훑기   +자리 다듬기   +LH/RH 가르기
-        64XX2     99.7%      99.7%        99.7%          99.7%
-        67XX6     73.3%      73.3%        91.7%          91.7%
-        71XX2     31.3%      55.0%        61.0%          67.7%
+        부품    1단계만  +각도  +자리  +좌우 가르기  +얹힘으로 재선정
+        64XX2    99.7%  99.7%  99.7%      99.7%          99.7%
+        67XX6    73.3%  73.3%  91.7%      91.7%          91.7%
+        71XX2    31.3%  55.0%  57.7%      61.0%          67.7%
+
+    마지막 칸이 실제로 쓰는 값이다(server.OVERLAY_TRIES 참고 — 자세
+    후보 몇 개에 광선을 쏴서 고른다).
 
     71XX2 가 오래 30% 대에 묶여 있었는데, 그게 "이 부품은 스캔으로 못
     맞춘다" 로 보였던 이유다. 실제로는 각도 · 자리 · 좌우 세 가지가
-    한꺼번에 어긋나 있었다.
+    한꺼번에 어긋나 있었다. 어느 하나만 고쳐서는 기준(60%)을 못 넘는다.
     """
     # 자세를 찾는 데는 **실루엣**만 있으면 된다. 격자가 FIT_GRID 라
     # 삼각형을 다 그릴 필요가 없다.
@@ -327,6 +348,19 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
         hull_union = int((solid | mask_solid).sum())
         hull = ((float((solid & mask_solid).sum()) / hull_union)
                 if hull_union else 0.0)
+        # 스캔 마스크 중 형상이 덮은 비율(재현율)과, 형상 중 마스크에
+        # 들어간 비율(정밀도). 얹힘과 뜻이 가까운 것은 재현율이다 —
+        # CAD 에만 있는 살에 벌점을 주지 않는다.
+        #
+        # 다만 재현율만 좇으면 형상을 부풀려 마스크를 덮어 버리는 쪽이
+        # 이긴다(합성 시험에서 확인). 그래서 재현율에 2배 무게를 준
+        # F2 를 쓴다 — 살이 더 있는 부품에서는 재현율처럼, 딱 맞는
+        # 부품에서는 겹침처럼 행동한다.
+        both = float((shape_bool & mask_bool).sum())
+        recall = both / max(int(mask_bool.sum()), 1)
+        precision = both / max(int(shape_bool.sum()), 1)
+        f2 = ((5.0 * precision * recall / (4.0 * precision + recall))
+              if (precision + recall) > 0 else 0.0)
 
         # 격자 좌표 g = scale*(mm - base_lo) + shift 를 ViewFit 의
         # mm_per_px·원점으로 되돌린다.
@@ -335,7 +369,7 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
         offset = shift - scale * base_lo
         origin_u = -mm_per_px * mx0 - offset[0] / scale
         origin_v = -mm_per_px * my0 - offset[1] / scale
-        return detail, hull, mm_per_px, origin_u, origin_v
+        return detail, hull, f2, mm_per_px, origin_u, origin_v
 
     # ── 1차: 24가지 조합을 주축 각도 하나로 훑는다 ───────────
     combos: list = []
@@ -396,7 +430,8 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
             for factor in scales:
                 for dx in shifts_x:
                     for dy in shifts_y:
-                        detail, hull, mm_per_px, origin_u, origin_v = place(
+                        (detail, hull, f2, mm_per_px,
+                         origin_u, origin_v) = place(
                             projected, base_lo, base_scale, factor, dx, dy)
                         moved = ViewFit(
                             axis=fit.axis, sign=fit.sign, flip_u=fit.flip_u,
@@ -404,12 +439,20 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
                             mm_per_px=float(mm_per_px),
                             origin_u=float(origin_u), origin_v=float(origin_v),
                             iou=round(hull, 4), detail_iou=round(detail, 4))
-                        # 1차와 같은 기준 — 껍질 먼저, 세부 나중.
-                        # 세부만으로 골라 봤더니 얇은 형상에서 무너졌다.
-                        here.append(((round(hull, 3), detail), moved,
-                                     factor, dx, dy))
-            here.sort(key=lambda item: item[0], reverse=True)
-            return here
+                        tie = f2 if FIT_PLACE_SCORE == 'f2' else detail
+                        here.append((hull, tie, moved, factor, dx, dy))
+            # 껍질 겹침이 **가장 좋은 것과 비슷한** 것들만 남기고, 그
+            # 안에서 F2 로 고른다.
+            #
+            # 껍질만 보면 71XX2 처럼 겹침이 평평한 부품에서 자리를 못
+            # 고른다(60.0%). F2 만 보면 딱 맞는 부품에서 형상을 부풀린
+            # 자세가 이긴다(합성 시험이 깨졌다). 밴드를 두면 둘 다 된다 —
+            # 겹침이 뚜렷하면 밴드가 정답만 남기고, 평평하면 F2 가 고른다.
+            top = max(item[0] for item in here)
+            near = [item for item in here if item[0] >= top - FIT_HULL_BAND]
+            near.sort(key=lambda item: (item[1], item[0]), reverse=True)
+            return [((round(item[0], 4), item[1]), item[2], item[3],
+                     item[4], item[5]) for item in near]
 
         coarse_best = scan_around(
             FIT_PLACE_SCALES, FIT_PLACE_SHIFTS, FIT_PLACE_SHIFTS)
@@ -585,11 +628,17 @@ def split_sides(vertices, faces):
     합친 실루엣을 한 짝짜리 스캔에 맞출 수는 없다 — 얹힘이 30% 에서
     막혔고, 그래서 제로라인·보정량을 아예 안 그렸다.
 
-    갈라진 것을 어떻게 아나. 이 파일은 Y 한가운데 3% 띠에 정점이
-    **0 개** 이고 좌우가 91,895 대 91,926 이다. 붙어 있는 부품이라면
-    가운데에 살이 있어야 한다. 실측 64XX1 은 그 띠에 6,240 개(2.1%),
-    67XX6 은 18,934 개(6.3%) 라 갈라지지 않는다 — 이 셋을 한 규칙으로
-    가릴 수 있다.
+    갈라진 것을 어떻게 아나. **가운데 평면을 가로지르는 삼각형이 하나도
+    없으면** 두 덩어리다. 붙어 있으면 살이 이어져 있으니 반드시 걸친
+    삼각형이 있다.
+
+    정점만 세면 안 된다 — 정점이 성긴 메시는 가운데에 점이 없어도
+    삼각형이 그 위를 덮고 있다. 실제로 정육면체 하나(정점 8개)를 넣어
+    보면 가운데 띠에 정점이 0개라 두 짝으로 잘못 갈렸다.
+
+    실측 71XX1-DR000 은 Y 한가운데 띠에 정점이 0개이고 좌우가
+    91,895 대 91,926 이다. 64XX1 은 6,240 개(2.1%), 67XX6 은
+    18,934 개(6.3%) 라 애초에 걸리지 않는다.
 
     Returns:
         [(정점, 면, 자르는 축, 가운데, 어느 쪽), ...].
@@ -609,9 +658,13 @@ def split_sides(vertices, faces):
         if span <= 0:
             continue
         middle = (low[axis] + high[axis]) / 2.0
+        left = points[:, axis] < middle
+        # 가운데를 **걸친 삼각형**이 하나라도 있으면 이어져 있는 것이다
+        touching = left[cells]
+        if np.any(touching.any(axis=1) & ~touching.all(axis=1)):
+            continue
         if np.any(np.abs(points[:, axis] - middle) < span * SPLIT_BAND):
             continue      # 가운데에 살이 있다 — 한 덩어리다
-        left = points[:, axis] < middle
         share = float(left.sum()) / len(points)
         if not (SPLIT_BALANCE <= share <= 1.0 - SPLIT_BALANCE):
             continue      # 한쪽이 부스러기다 — 두 짝이 아니다
@@ -630,6 +683,53 @@ def split_sides(vertices, faces):
             return halves
     return [(points, cells, -1, 0.0, 0)]
 
+def nudge_fit(fit: "ViewFit", mask_shape, angle_deg: float = 0.0,
+              dx: float = 0.0, dy: float = 0.0,
+              scale: float = 1.0) -> "ViewFit":
+    """사람이 손으로 자세를 조금 옮긴다.
+
+    [왜 필요한가]
+    자동 정합은 실루엣만 보고 맞춘다. 스캔에 안 보이는 살이 있거나
+    부품이 살짝 휘어 찍혔으면 몇 퍼센트가 모자란다 — 실측 71XX2 가
+    얹힘 60% 언저리라 기준선에 걸친다. 그럴 때 작업자가 조금 돌리고
+    옮겨서 맞출 수 있어야 실제로 쓸 수 있는 도구가 된다.
+
+    돌리기와 배율은 **그림 한가운데**를 축으로 한다. 원점을 축으로 하면
+    조금만 돌려도 부품이 화면 밖으로 날아가 손으로 맞출 수가 없다.
+
+    Args:
+        mask_shape: 스캔 마스크의 (높이, 너비).
+        angle_deg: 시계 방향으로 돌릴 각도.
+        dx, dy: 화면 픽셀로 옮길 양.
+        scale: 1.0 이면 그대로, 1.05 면 5% 크게.
+    """
+    height, width = int(mask_shape[0]), int(mask_shape[1])
+    centre = np.array([width / 2.0, height / 2.0], dtype=float)
+    origin = np.array([fit.origin_u, fit.origin_v], dtype=float)
+    mm_per_px = float(fit.mm_per_px)
+
+    turn = float(np.deg2rad(angle_deg))
+    if turn:
+        spin = np.array([[np.cos(turn), -np.sin(turn)],
+                         [np.sin(turn), np.cos(turn)]])
+        origin = spin @ origin + mm_per_px * (spin @ centre - centre)
+
+    factor = float(scale) if scale else 1.0
+    if factor != 1.0:
+        origin = origin + mm_per_px * centre * (factor - 1.0) / factor
+        mm_per_px = mm_per_px / factor
+
+    origin = origin - np.array([dx, dy], dtype=float) * mm_per_px
+
+    moved = ViewFit(**{**asdict(fit),
+                       "angle": float(fit.angle) + turn,
+                       "mm_per_px": float(mm_per_px),
+                       "origin_u": float(origin[0]),
+                       "origin_v": float(origin[1])})
+    return moved
+
+
 __all__ = ["ViewFit", "MIN_IOU", "MIN_HIT_RATE",
-           "fit_view", "measure_hit_rate", "split_sides", "unproject",
+           "fit_view", "measure_hit_rate", "nudge_fit", "split_sides",
+           "unproject",
            "sample_deviation", "sample_flags", "to_pixels"]
