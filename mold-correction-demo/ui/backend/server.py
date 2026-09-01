@@ -1153,8 +1153,35 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
         placed = ov.unproject(_densify(pts), vertices, faces, fit, shifted)
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
-        if len(kept) >= 2:
-            lines.append({"line_id": line.get("line_id"), "points": kept})
+        if len(kept) < 2:
+            continue
+
+        # 표면에 얹힌 구간과 **빈 공간을 지나는 구간**을 나눠 준다.
+        #
+        # 광선이 빗나갔다는 것은 그 자리에 부품이 없다는 뜻이다(구멍·
+        # 개구부). 이어서 실선으로 그리면 없는 자리에 선이 있는 것처럼
+        # 보인다 — 받은 파이프라인은 "inner openings and holes are
+        # traversable" 라 링 부품에서 실제로 빈 데를 지난다. 그 구간은
+        # 화면에서 점선으로 그려 사실대로 보이게 한다.
+        runs: list = []
+        current: list = []
+        for spot in placed:
+            if spot is None:
+                if len(current) >= 2:
+                    runs.append(current)
+                current = []
+            else:
+                current.append(spot)
+        if len(current) >= 2:
+            runs.append(current)
+
+        gaps = [[runs[i][-1], runs[i + 1][0]] for i in range(len(runs) - 1)]
+        lines.append({
+            "line_id": line.get("line_id"),
+            "points": kept,          # 예전 형식 — 통째로 이은 것
+            "runs": runs,            # 표면에 얹힌 구간 (실선)
+            "gaps": gaps,            # 빈 공간을 지나는 구간 (점선)
+        })
 
     # 컬러바 범위 밖의 값은 판독 오류다. 실측(JD_67XX6, 컬러바 +3.0~-3.0)
     # 에서 +9.00 이 5건 나왔다. 3D 에 얹으면 화살표 길이 기준을 잡아먹어

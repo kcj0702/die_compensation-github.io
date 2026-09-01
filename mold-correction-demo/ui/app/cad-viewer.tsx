@@ -45,7 +45,14 @@ export type CadOverlay = {
        껍질 겹침은 후하고(실측 64XX2 96.9%) 실루엣은 박하다(42.2%). */
     hit_rate?: number; detail_iou?: number;
   };
-  zeroLines: { line_id: number | null; points: [number, number, number][] }[];
+  zeroLines: {
+    line_id: number | null;
+    points: [number, number, number][];
+    /* 표면에 얹힌 구간(실선)과 빈 공간을 지나는 구간(점선).
+       구멍 위를 실선으로 그리면 없는 자리에 선이 있는 것처럼 보인다. */
+    runs?: [number, number, number][][];
+    gaps?: [number, number, number][][];
+  }[];
   /* 정점마다 0 = 아님 · 1 = 제로라인(띠) · 2 = 제로 영역.
      선을 공간에 띄우는 대신 **표면을 칠한다** — 곡면을 그대로 따라간다. */
   zeroSurface?: number[];
@@ -306,14 +313,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
-  const [detail, setDetail] = useState<CadDetail>('edges');
+  const [detail] = useState<CadDetail>('solid');   // 표면만 쓴다
   const [showPlanes, setShowPlanes] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
   /* 홀을 누르면 지름과 좌표를 띄운다 — 데이텀을 고를 때 필요하다. */
   const [picked, setPicked] = useState<CadHole | null>(null);
   /* 편차를 표면에 입힐지. 부품이 회색 덩어리로만 보이면 편차 프로젝트에서
      3D 가 할 일이 없다. */
-  const [showHeat, setShowHeat] = useState(true);
+  const [showHeat] = useState(false);   // 편차 색은 화면에서 뺐다
   /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다. */
   const [clip, setClip] = useState(0);          // 0 이면 끔, 아니면 자르는 위치
   const [clipRatio, setClipRatio] = useState(0);
@@ -668,7 +675,28 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 점들을 이으면 곡면을 그대로 따라간다.
       const lift = radius * 0.004;
       for (const line of overlay.zeroLines || []) {
-        const pts = (line.points || []).map(([x, y, z]) => new THREE.Vector3(x, y, z));
+        // 빈 공간을 지나는 구간은 점선으로. 부품이 없는 자리라 실선으로
+        // 그리면 거짓이 된다 — 받은 파이프라인은 구멍을 지나갈 수 있게
+        // 돼 있어서 링 부품(선루프)에서 실제로 빈 데를 가로지른다.
+        for (const gap of line.gaps ?? []) {
+          if (gap.length < 2) continue;
+          const dashed = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(
+              gap.map(([x, y, z]) => new THREE.Vector3(x, y, z))),
+            new THREE.LineDashedMaterial({
+              color: ZERO_TINT, dashSize: radius * 0.02,
+              gapSize: radius * 0.014, transparent: true, opacity: 0.75,
+            }));
+          dashed.computeLineDistances();   // 이걸 해야 점선이 보인다
+          dashed.renderOrder = 9;
+          overlayRoot.add(dashed);
+        }
+
+        // 표면에 얹힌 구간만 실선(관)으로 그린다
+        const runs = line.runs?.length
+          ? line.runs : (line.points?.length ? [line.points] : []);
+        for (const run of runs) {
+        const pts = run.map(([x, y, z]) => new THREE.Vector3(x, y, z));
         if (pts.length < 2) continue;
         const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
         // depthTest 를 끄면 형상에 가려야 할 뒷면 부분까지 앞에 그려져
@@ -683,6 +711,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           }));
         tube.renderOrder = 9;
         overlayRoot.add(tube);
+        }
       }
 
       // 영역형(67XX6 처럼 시트가 면으로 표기한 것)만 표면을 칠한다
@@ -1513,20 +1542,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         <span><i style={{ background: '#ffef3a' }} />보정량 (mm)</span>
         <span><i style={{ background: '#e01b1b' }} />보정 지점과 지시선</span>
         <span><i style={{ background: '#ff3b30' }} />제로라인</span>
+        <span><i style={{ background: 'repeating-linear-gradient(90deg,#ff3b30 0 4px,transparent 4px 7px)' }} />빈 공간을 지나는 구간</span>
         <small>보정시트와 같은 표기입니다</small>
       </div>
     )}
     </div>
 
     <div className="cad-viewer__hud">
-      <div className="cad-viewer__seg" role="group" aria-label="표시 방식">
-        {([['solid', '표면'], ['edges', '모서리'], ['wire', '삼각망']] as const).map(
-          ([value, label]) => (
-            <button key={value} type="button"
-              className={detail === value ? 'is-on' : ''}
-              onClick={() => setDetail(value)}>{label}</button>
-          ))}
-      </div>
+      {/* 표면만 쓴다. 모서리·삼각망은 형상 확인용으로 넣었는데 실제
+          작업에는 안 쓰이고 버튼 줄만 길어졌다. 편차 색도 뺀다 —
+          정합이 조금만 어긋나도 엉뚱한 자리가 물들어 오해를 부르고,
+          제대로 맞아도 색이 옅어 잘 읽히지 않았다. */}
       <button type="button" className={showPlanes ? 'is-on' : ''}
         onClick={() => setShowPlanes((v) => !v)}>
         평면 {mesh.planes?.length ?? 0}
@@ -1558,10 +1584,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           <em>{sheetCount - overlayPoints}개 숨김</em>
         )}
       </span>}
-      {overlay?.surfaceDeviation?.length ? (
-        <button type="button" className={showHeat ? 'is-on' : ''}
-          onClick={() => setShowHeat((v) => !v)}>편차 색</button>
-      ) : null}
       <button type="button" className={measuring ? 'is-on' : ''}
         onClick={() => { setMeasuring((v) => !v); setMeasure(null); setNoting(false); }}>
         측정
