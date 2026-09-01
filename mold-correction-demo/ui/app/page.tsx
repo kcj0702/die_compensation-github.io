@@ -46,6 +46,11 @@ type AnalysisResult = {
   /* 보정시트에 적을 만한 포인트만 골라낸 것. 스캔에는 백여 개가 찍히지만
      현업 시트에 적히는 건 열몇 개다. */
   keyPoints?: { point_id: string; x_px: number; y_px: number; value: number; score: number; reason: string }[];
+  /* 현업 파이프라인(lab_pipeline)이 만든 제로라인. 허용범위 밖 영역을
+     윤곽 위 제로포인트 둘로 닫은 선이라 근거가 가장 분명하다. */
+  labZeroLines?: [number, number][][];
+  labZeroRegions?: { label: string; area: number; status: string;
+                     zeroPoints: string[]; attempts: number; coverage: number }[];
   keyPointsRejected?: { id: string; value: number }[];
   source: { name: string; width: number; height: number };
   cleanImage: string | null;
@@ -855,6 +860,20 @@ function LabProfileOverlay({ shapes, width, height }: { shapes: LabShape[]; widt
   </svg>;
 }
 
+/* 현업 파이프라인 결과를 겹침층이 아는 모양으로 바꾼다.
+   그 선은 허용범위 밖 영역을 윤곽 위 제로포인트 둘로 닫은 것이라
+   근거가 가장 분명하다 — 있으면 이걸 먼저 쓴다. */
+function zeroLinesToShow(result: AnalysisResult): SimpleZeroLine[] {
+  const lab = result.labZeroLines ?? [];
+  if (lab.length) {
+    return lab.map((points, index) => ({
+      line_id: index + 1, points,
+      tolerance_coverage: 1, length_px: 0, mean_abs_deviation: 0,
+    } as unknown as SimpleZeroLine));
+  }
+  return result.simpleZeroLines || [];
+}
+
 function SimpleZeroLineOverlay({ lines, width, height }: { lines: SimpleZeroLine[]; width: number; height: number }) {
   // 현업 zero_line_drawing 방식 — 주요 0포인트를 직선으로 잇는다.
   // "정답지처럼 깔끔한 직선" 요구에 맞춰 곡선을 쓰지 않으므로 꼭짓점은
@@ -996,7 +1015,7 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, showZero
                 않아서 눌러도 아무 일이 없었다. 엔진 결과 화면에서 쓰던
                 것과 같은 겹침층을 여기에도 올린다. */}
             {showZero && (scan.result?.simpleZeroLines?.length ?? 0) > 0 &&
-              <SimpleZeroLineOverlay lines={scan.result!.simpleZeroLines}
+              <SimpleZeroLineOverlay lines={zeroLinesToShow(scan.result!)}
                 width={scan.result!.source.width} height={scan.result!.source.height} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
@@ -1217,7 +1236,7 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
         {showDetection && <>
           <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
           <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
-          <SimpleZeroLineOverlay lines={result.simpleZeroLines || []} width={result.source.width} height={result.source.height} />
+          <SimpleZeroLineOverlay lines={zeroLinesToShow(result)} width={result.source.width} height={result.source.height} />
           <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
           <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
         </>}
@@ -2053,7 +2072,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!result.simpleZeroLines?.length}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroLinesToShow(result).length}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
       <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} showZero={showZero} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button><button type="button" className="sheet-print" onClick={saveExcel} disabled={excelState === 'saving'}><Download size={14} /> {excelState === 'saving' ? '엑셀 만드는 중…' : '기업 양식 엑셀 저장'}</button>{excelError && <span className="sheet-excel-error">{excelError}</span>}</div>

@@ -82,6 +82,7 @@ from zero_line_detection.zero_points import (  # noqa: E402
 from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
 from zero_line_detection.key_points import select as select_key_points  # noqa: E402
 from zero_line_detection.file_naming import parse as parse_filename  # noqa: E402
+from zero_line_detection import lab_runner  # noqa: E402
 
 
 DEFAULT_FOLDER_ROOT = Path(
@@ -784,6 +785,19 @@ def analyze_image(image: np.ndarray, filename: str,
         if len(snapped) >= 2:
             zero_anchors = snapped
 
+    # 현업이 준 제로라인 파이프라인(lab_pipeline). 근거가 가장 분명한
+    # 경로다 — "허용범위 밖 영역을 윤곽 위 제로포인트 둘로 닫는다".
+    # 등록된 품번(64XX2·67XX6·71XX2)에서만 돈다.
+    lab_zero: dict = {}
+    if lab_runner.prefix_for(part_key):
+        try:
+            with _timed("현업 제로라인"):
+                lab_zero = lab_runner.run(image, part_key)
+            if lab_zero.get("error"):
+                errors["labZero"] = lab_zero["error"]
+        except Exception as exc:
+            errors["labZero"] = str(exc)
+
     # 보정시트에 실제로 적을 포인트를 고른다. 스캔에는 수십~백여 개가
     # 찍히지만 현업 시트에 적히는 건 열몇 개다(향후 계획 02번).
     key_points: list = []
@@ -806,6 +820,8 @@ def analyze_image(image: np.ndarray, filename: str,
             ),
             # /api/cad-overlay 가 3D 표면 위로 옮길 대상들
             "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
+            # 현업 파이프라인 결과가 있으면 3D 에는 이걸 쓴다
+            "lab_zero_lines": lab_zero.get("lines") or [],
             "deviation_points": points,
             "part_no": part_key,
             # 시트에 등록된 제로 표기. 67XX6 은 선이 아니라 **영역**이라
@@ -817,6 +833,8 @@ def analyze_image(image: np.ndarray, filename: str,
         "analysisId": analysis_id,
         "partNo": part_key,
         "naming": naming.to_dict(),
+        "labZeroLines": lab_zero.get("lines") or [],
+        "labZeroRegions": lab_zero.get("regions") or [],
         "timings": spent,
         "keyPoints": [k.to_dict() for k in key_points],
         "keyPointsRejected": key_rejected,
@@ -1148,8 +1166,10 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
         pts = np.rint(np.asarray(contour, dtype=float)).astype(np.int32)
         if len(pts) >= 3:
             cv2.fillPoly(stencil, [pts], 2)
-    line_sources = []
-    if reference.get("kind") == "line" and reference.get("points"):
+    # 우선순위: 현업 파이프라인 > 시트에 등록된 정답 > 우리 검출.
+    # 앞의 것일수록 근거가 분명하다.
+    line_sources = list(analysis.get("lab_zero_lines") or [])
+    if not line_sources and reference.get("kind") == "line" and reference.get("points"):
         line_sources.append(reference["points"])
     if not line_sources:
         line_sources = [l["points"] for l in analysis.get("simple_zero_lines", [])]
