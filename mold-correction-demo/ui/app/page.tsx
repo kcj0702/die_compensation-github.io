@@ -1232,19 +1232,50 @@ function Results({ scan, onService, hiddenPointIds, onPointToggle, onAllPointsTo
   return <section className="page page--results"><div className="page-heading page-heading--compact"><div><span className="breadcrumb">분석 작업실 <ChevronRight size={14} /> {scan.partNo}</span><h2>엔진별 실제 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <div className="result-tabs" role="tablist">{(Object.keys(engineMeta) as Engine[]).map((key, index) => { const item = engineMeta[key]; const failed = Boolean(result.errors[key]); return <button role="tab" aria-selected={engine === key} className={engine === key ? 'active' : ''} onClick={() => setEngine(key)} key={key}><span style={{ color: failed ? '#bd4650' : item.color }}>0{index + 1}</span><div><b>{item.name}</b><small>{failed ? '실행 오류' : item.short}</small></div>{!failed && <Check size={17} />}</button>; })}</div>
     <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div>{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div><div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}`} imageUrl={image} width={result.source.width} height={result.source.height} lightBackground={engine === 'deviation'}>{engine === 'deviation' && <CorrectionPoints coefficient={-1} points={result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}{engine === 'zero' && <>
-        <LabProfileOverlay shapes={result.labProfile || []} width={result.source.width} height={result.source.height} />
-        {showDetection && <>
-          <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
-          <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
+        {/* 현업 파이프라인 선이 나오면 **그것만** 보여준다.
+            예전 방식들(my_lab 도형·녹색 벨트·제로존·계곡선·앵커)을 같이
+            깔면 화면이 선으로 덮여 무엇이 답인지 알 수 없다. 근거가
+            가장 분명한 하나만 남긴다. 옛 방식은 이 파이프라인이 못 도는
+            품번(SCAN_SCALES 미등록)에서만 나온다. */}
+        {(result.labZeroLines?.length ?? 0) > 0 ? (
           <SimpleZeroLineOverlay lines={zeroLinesToShow(result)} width={result.source.width} height={result.source.height} />
-          <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
-          <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
+        ) : <>
+          <LabProfileOverlay shapes={result.labProfile || []} width={result.source.width} height={result.source.height} />
+          {showDetection && <>
+            <ZeroZoneOverlay clusters={zeroAreaClusters} width={result.source.width} height={result.source.height} />
+            <GreenBeltOverlay belts={result.greenBelts || []} width={result.source.width} height={result.source.height} />
+            <SimpleZeroLineOverlay lines={zeroLinesToShow(result)} width={result.source.width} height={result.source.height} />
+            <ValleyLineOverlay lines={valleyLines} width={result.source.width} height={result.source.height} />
+            <AnchorPicker anchors={zeroAnchors} width={result.source.width} height={result.source.height} selectedIds={selectedAnchors} onToggle={toggleAnchor} />
+          </>}
         </>}
       </>}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
       <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div>
       {engine === 'zero' && <div className="card mini-table anchor-panel">
-        <div className="card-title"><h3>제로라인</h3><span>{(result.labProfile || []).length > 0 ? `my_lab 도형 ${result.labProfile.length}개` : `앵커 ${zeroAnchors.length}개`}</span></div>
-        {(result.labProfile || []).length > 0 ? <>
+        <div className="card-title"><h3>제로라인</h3><span>{
+          (result.labZeroLines?.length ?? 0) > 0 ? `${result.labZeroLines!.length}개`
+          : (result.labProfile || []).length > 0 ? `my_lab 도형 ${result.labProfile.length}개`
+          : `앵커 ${zeroAnchors.length}개`}</span></div>
+        {(result.labZeroRegions?.length ?? 0) > 0 ? <>
+          <p className="anchor-panel__hint">
+            <b>허용범위 ±0.7mm 밖</b>을 보정 영역으로 잡고, 그 영역이 윤곽과
+            맞닿는 자리에서 윤곽을 따라 양쪽으로 걸어가 <b>처음 만나는
+            제로포인트 둘</b>을 이은 선입니다. 보정 영역은 피해서 돌아갑니다.
+          </p>
+          {result.labZeroRegions!.map((region) => (
+            <div className="point-list-row" key={region.label}>
+              <span>{region.label}</span>
+              <b className="positive">{region.zeroPoints.join(' – ')}</b>
+              <small>{Math.round(region.area).toLocaleString()}px</small>
+              <small>{region.attempts}회 시도</small>
+            </div>
+          ))}
+          <p className="anchor-panel__hint">
+            각 선은 <b>목표 영역을 실제로 닫는지</b> 검사를 통과한 것만
+            남습니다(덮음 {Math.round((result.labZeroRegions![0]?.coverage ?? 0) * 100)}%).
+            닫지 못하면 다음 제로포인트로 넘어가 다시 시도합니다.
+          </p>
+        </> : (result.labProfile || []).length > 0 ? <>
           <p className="anchor-panel__hint">
             빨간 점선은 <b>my_lab 파이프라인이 그린 제로라인</b>입니다.
             이 품번은 해당 도형이 있어 그대로 표시합니다.

@@ -1120,10 +1120,37 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
     # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
+    def _densify(points: list, step_px: float = 4.0) -> list:
+        """선 위를 촘촘히 채운다.
+
+        꼭짓점만 표면에 얹으면 그 사이는 공중을 가로지른다. 촘촘히
+        쏴야 곡면을 그대로 따라간다 — 3D 에서 "선을 얹은 느낌" 을
+        없애는 진짜 방법이다(표면을 칠하면 리브와 구멍에서 조각난다).
+        """
+        dense: list = []
+        for (ax, ay), (bx, by) in zip(points[:-1], points[1:]):
+            span = float(np.hypot(bx - ax, by - ay))
+            count = max(int(span / step_px), 1)
+            for k in range(count):
+                t = k / count
+                dense.append([ax + (bx - ax) * t, ay + (by - ay) * t])
+        dense.append(list(points[-1]))
+        return dense
+
+    # 우선순위: 현업 파이프라인 > 시트 등록 정답 > 우리 검출
+    raw_lines = [{"line_id": i + 1, "points": pts}
+                 for i, pts in enumerate(analysis.get("lab_zero_lines") or [])]
+    if not raw_lines:
+        raw_lines = [{"line_id": l.get("line_id"), "points": l["points"]}
+                     for l in analysis.get("simple_zero_lines", [])]
+
     lines = []
     dropped_line_points = 0
-    for line in analysis.get("simple_zero_lines", []):
-        placed = ov.unproject(line["points"], vertices, faces, fit, shifted)
+    for line in raw_lines:
+        pts = line["points"]
+        if len(pts) < 2:
+            continue
+        placed = ov.unproject(_densify(pts), vertices, faces, fit, shifted)
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
         if len(kept) >= 2:
@@ -1162,26 +1189,24 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     display = cad_entry.get("display_vertices")
     stencil = np.zeros(analysis["part_mask"].shape, np.uint8)
     reference = analysis.get("zero_reference") or {}
+    # 영역은 **최소 외접 사각형**으로 그린다.
+    #
+    # 윤곽 그대로 칠했더니 가장자리를 따라 실오라기처럼 갈라져 "물감
+    # 칠한 느낌" 이 났다. 시트도 제로 영역을 빗금 친 **네모**로 표기한다 —
+    # 경계가 반듯해야 어디까지가 그 영역인지 읽힌다.
     for contour in (reference.get("contours") or []):
         pts = np.rint(np.asarray(contour, dtype=float)).astype(np.int32)
-        if len(pts) >= 3:
-            cv2.fillPoly(stencil, [pts], 2)
+        if len(pts) < 3:
+            continue
+        box = cv2.boxPoints(cv2.minAreaRect(pts))
+        cv2.fillPoly(stencil, [np.rint(box).astype(np.int32)], 2)
     # 우선순위: 현업 파이프라인 > 시트에 등록된 정답 > 우리 검출.
     # 앞의 것일수록 근거가 분명하다.
-    line_sources = list(analysis.get("lab_zero_lines") or [])
-    if not line_sources and reference.get("kind") == "line" and reference.get("points"):
-        line_sources.append(reference["points"])
-    if not line_sources:
-        line_sources = [l["points"] for l in analysis.get("simple_zero_lines", [])]
-    # 띠 두께는 부품 크기에 맞춘다 — 고정 픽셀이면 큰 스캔에서 실오라기가 된다
-    # 화면 쪽에서 "삼각형 세 꼭짓점이 모두 도장 안" 일 때만 칠하도록
-    # 조건을 엄하게 했다(경계 가시 제거). 그만큼 띠가 얇아지므로 여기서
-    # 조금 넉넉하게 그린다.
-    band = max(int(round(min(stencil.shape) * 0.020)), 5)
-    for pts in line_sources:
-        arr = np.rint(np.asarray(pts, dtype=float)).astype(np.int32)
-        if len(arr) >= 2:
-            cv2.polylines(stencil, [arr], False, 1, band)
+    # 도장은 **영역**에만 쓴다(67XX6 처럼 시트가 면으로 표기한 경우).
+    #
+    # 선까지 칠했더니 리브와 구멍이 많은 면에서 조각조각 갈라져
+    # "물감 칠한 느낌" 이 났다. 선은 선으로 그리는 게 맞고, 곡면을
+    # 따라가게 하려면 촘촘히 쏴서 표면에 얹으면 된다(_densify).
 
     zero_surface: list = []
     if display is not None and stencil.any():

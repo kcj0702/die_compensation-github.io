@@ -321,7 +321,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
      핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
+  /* 보정량 범위. 아래(이상)만 있었는데 위(이하)도 필요하다 —
+     "0.5 이상" 만으로는 큰 값에 묻혀 작은 자리를 못 본다. */
   const [threshold, setThreshold] = useState(0.5);
+  const [ceiling, setCeiling] = useState(9);
   /* 콜아웃을 눌러 값을 고친다. 화면 좌표를 들고 있어야 입력칸을 그 자리에
      띄울 수 있다. */
   const [editing, setEditing] = useState<
@@ -657,27 +660,39 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const overlayRoot = new THREE.Group();
     const labelPicks: THREE.Sprite[] = [];
     if (overlay?.fit.reliable) {
-      // 제로라인 — **표면 자체를 칠한다.**
+      // 제로라인.
       //
-      // 예전에는 3D 공간에 관(tube)을 띄웠다. 곡면 위를 지나가면 형상에서
-      // 떠서 "선을 얹은 느낌" 이 났고, 부품 뒤로 파고들기도 했다. 표면을
-      // 칠하면 굴곡을 그대로 따라간다 — 칠하는 대상이 곧 그 곡면이다.
-      //
-      // 부품에 따라 시트가 제로를 선으로도, 면으로도 표기한다.
-      // 실측 64XX2 는 선("0" LINE), 67XX6 은 영역("0" 라인 빗금)이다.
+      // 선은 **선으로** 그린다. 표면 삼각형을 칠해 봤더니 리브와 구멍이
+      // 많은 면에서 조각조각 갈라져 "물감 칠한 느낌" 이 났다. 대신
+      // 서버가 선 위를 촘촘히(4px 간격) 쏴서 표면에 얹어 주므로, 그
+      // 점들을 이으면 곡면을 그대로 따라간다.
+      const lift = radius * 0.004;
+      for (const line of overlay.zeroLines || []) {
+        const pts = (line.points || []).map(([x, y, z]) => new THREE.Vector3(x, y, z));
+        if (pts.length < 2) continue;
+        const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
+        // depthTest 를 끄면 형상에 가려야 할 뒷면 부분까지 앞에 그려져
+        // **면 위에 얹은 스티커**처럼 보인다. 깊이 검사는 켜 두고
+        // polygonOffset 으로 살짝만 띄워 z-파이팅만 피한다 — 그래야
+        // 굴곡을 따라 파묻히고 돌아 나오는 게 보인다.
+        const tube = new THREE.Mesh(
+          new THREE.TubeGeometry(curve, Math.max(pts.length, 32), lift, 8, false),
+          new THREE.MeshBasicMaterial({
+            color: ZERO_TINT,
+            polygonOffset: true, polygonOffsetFactor: -4,
+          }));
+        tube.renderOrder = 9;
+        overlayRoot.add(tube);
+      }
+
+      // 영역형(67XX6 처럼 시트가 면으로 표기한 것)만 표면을 칠한다
       const stencil = overlay.zeroSurface;
       const zeroIndex = geometry.getIndex();
-      if (stencil?.length && zeroIndex) {
+      if (overlay.zeroKind === 'areas' && stencil?.length && zeroIndex) {
         const keep: number[] = [];
         for (let i = 0; i < zeroIndex.count; i += 3) {
           const a = zeroIndex.getX(i), b = zeroIndex.getX(i + 1),
                 c = zeroIndex.getX(i + 2);
-          // 세 꼭짓점이 **모두** 도장 안일 때만 칠한다.
-          //
-          // 둘 이상으로 두었더니 경계에서 가시처럼 뾰족한 조각이 튀어
-          // 나왔다. 판금 가장자리에는 화면과 거의 나란한 길쭉한 삼각형이
-          // 많은데, 그중 두 점만 걸려도 통째로 칠해지면서 긴 삼각형이
-          // 그대로 삐져나온다. 셋 다 요구하면 경계가 깔끔해진다.
           if (stencil[a] && stencil[b] && stencil[c]) keep.push(a, b, c);
         }
         if (keep.length) {
@@ -685,20 +700,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           patch.setIndex(keep);
           patch.computeBoundingSphere();
           const skin = new THREE.Mesh(patch, new THREE.MeshBasicMaterial({
-            color: ZERO_TINT, transparent: true, opacity: 0.85,
+            color: ZERO_TINT, transparent: true, opacity: 0.8,
             side: THREE.DoubleSide, depthWrite: false,
             polygonOffset: true, polygonOffsetFactor: -2,
           }));
           skin.renderOrder = 7;
           overlayRoot.add(skin);
-
-          // 무엇인지 적어 준다 — 빨간 면만 있으면 편차 색과 헷갈린다
-          // 이름표는 칠한 자리 **위에 바짝** 붙인다. 예전에는 반지름의
-          // 0.9배만큼 띄워서 형상에서 한참 떨어진 허공에 떴다.
           const seat = patch.boundingSphere?.center ?? new THREE.Vector3();
-          const tag = makeZoneLabel(
-            overlay.zeroKind === 'areas' ? '제로라인 (영역)' : '제로라인',
-            radius * 0.04);
+          const tag = makeZoneLabel('제로라인 (영역)', radius * 0.04);
           tag.position.copy(seat).add(new THREE.Vector3(0, 0, radius * 0.06));
           tag.renderOrder = 15;
           overlayRoot.add(tag);
@@ -713,7 +722,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         .map((p) => ({ point: p, correction: sheetValues?.[p.id] }))
         .filter((entry): entry is { point: typeof entry.point; correction: number } =>
           typeof entry.correction === 'number'
-          && Math.abs(entry.correction) >= threshold);
+          && Math.abs(entry.correction) >= threshold
+          && Math.abs(entry.correction) <= ceiling);
       const maxCorrection = Math.max(
         ...shown.map((e) => Math.abs(e.correction)), 0.5);
       // 화살표는 표면 법선을 따라야 한다. 월드 축으로 세우면 곡면에서
@@ -1236,7 +1246,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       mount.removeChild(renderer.domElement);
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode, sections, exaggeration]);
+      morph, morphMode, sections, exaggeration, ceiling]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -1427,7 +1437,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     ?.filter((p) => typeof sheetValues?.[p.id] === 'number').length ?? 0;
   const overlayPoints = overlay?.points?.filter((p) => {
     const value = sheetValues?.[p.id];
-    return typeof value === 'number' && Math.abs(value) >= threshold;
+    return typeof value === 'number'
+      && Math.abs(value) >= threshold && Math.abs(value) <= ceiling;
   }).length ?? 0;
 
   return <>
@@ -1526,10 +1537,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       </button>}
       {overlay && showOverlay && <span className="cad-viewer__pick-level">
         <label htmlFor="cad-threshold">보정량</label>
-        <input id="cad-threshold" type="range" min={0} max={2} step={0.1}
+        <input id="cad-threshold" type="range" min={0} max={9} step={0.1}
           value={threshold}
-          onChange={(event) => setThreshold(Number(event.target.value))} />
-        <b>{threshold.toFixed(1)}mm 이상</b>
+          onChange={(event) => {
+            const low = Number(event.target.value);
+            setThreshold(low);
+            if (low > ceiling) setCeiling(low);
+          }} />
+        <b>{threshold.toFixed(1)}</b>
+        <label htmlFor="cad-ceiling">~</label>
+        <input id="cad-ceiling" type="range" min={0} max={9} step={0.1}
+          value={ceiling}
+          onChange={(event) => {
+            const high = Number(event.target.value);
+            setCeiling(high);
+            if (high < threshold) setThreshold(high);
+          }} />
+        <b>{ceiling.toFixed(1)}mm</b>
         {sheetCount > overlayPoints && (
           <em>{sheetCount - overlayPoints}개 숨김</em>
         )}
