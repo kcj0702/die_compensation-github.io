@@ -360,6 +360,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      메인 이펙트의 의존성에 들어가므로 반드시 그보다 **앞에서** 선언해야
      한다 — 뒤에 두면 의존성 배열이 평가될 때 아직 초기화 전이다. */
   const [exaggeration, setExaggeration] = useState(30);
+  /* 홀을 지름으로 거른다. 실측 67XX6 은 홀이 152 개라 전부 켜 두면
+     핀이 빽빽해 데이텀으로 쓸 큰 홀을 못 고른다. */
+  const [holeFloor, setHoleFloor] = useState(0);
   const [zoning, setZoning] = useState(false);
   /* 구역을 어떻게 잡을지. 시트처럼 네모를 기본으로 둔다 — 붓질은
      "정확한 구역 표시가 안 된다" 는 지적이 있었다. */
@@ -407,9 +410,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const edgeLines = useRef<THREE.LineSegments | null>(null);
   const solidMesh = useRef<THREE.Mesh | null>(null);
 
-  // 쪼개진 원통면 합치기와 굽힘 R 걸러내기는 백엔드가 이미 했다
-  // (step_reader._merge_cylinder_faces). 여기 오는 건 닫힌 원통뿐이다.
+  // 쪼개진 원통면 합치기, 굽힘 R 걸러내기, 더 큰 홀 안의 턱 빼기는
+  // 백엔드가 이미 했다(step_reader). 여기 오는 건 관통 홀뿐이다.
   const holes = useMemo(() => mesh.holes || [], [mesh.holes]);
+  /* 큰 것부터 몇 종류나 되는지 — 데이텀은 대개 큰 홀이라 고르기 쉽게. */
+  const holeSizes = useMemo(() => [...new Set(
+    holes.map((h) => Math.round(h.diameter * 10) / 10))]
+    .sort((a, b) => b - a), [holes]);
   const holeLabel = useMemo(() => {
     const sizes = [...new Set(holes.map((h) => h.diameter.toFixed(2)))];
     if (!sizes.length) return '홀 없음';
@@ -636,6 +643,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(r, tube, 10, 32), holeMaterial);
+      ring.userData.diameter = hole.diameter;
       ring.position.set(...hole.center);
       const axis = new THREE.Vector3(...hole.axis).normalize();
       ring.quaternion.setFromUnitVectors(axisUp, axis);
@@ -644,6 +652,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const pin = new THREE.Mesh(
         new THREE.CylinderGeometry(tube * 0.75, tube * 0.75, pinLength, 6),
         holeMaterial);
+      pin.userData.diameter = hole.diameter;
       pin.position.set(...hole.center);
       // CylinderGeometry 는 Y 축을 따라 서 있다
       pin.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
@@ -655,6 +664,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         new THREE.MeshBasicMaterial({ visible: false }));
       target.position.set(...hole.center);
       target.userData.hole = hole;
+      target.userData.diameter = hole.diameter;
       holesRoot.add(target);
     }
     holesRoot.visible = showHoles;
@@ -1413,6 +1423,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     if (holeGroup.current) holeGroup.current.visible = showHoles;
   }, [showHoles]);
 
+  /* 씬을 다시 만들면 CAD 를 다시 올리는 셈이라, 문턱은 이미 만들어 둔
+     표시물을 켜고 끄는 것으로 처리한다. */
+  useEffect(() => {
+    const root = holeGroup.current;
+    if (!root) return;
+    for (const child of root.children) {
+      const size = child.userData?.diameter;
+      child.visible = typeof size !== 'number' || size >= holeFloor;
+    }
+  }, [holeFloor, holes]);
+
   useEffect(() => {
     if (planeGroup.current) planeGroup.current.visible = showPlanes;
   }, [showPlanes]);
@@ -1710,6 +1731,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         onClick={() => setShowPlanes((v) => !v)}>
         평면 {mesh.planes?.length ?? 0}
       </button>
+      {showHoles && holes.length > 0 && (
+        <span className="cad-viewer__pick-level">
+          <label htmlFor="cad-hole-floor">홀 Ø</label>
+          <input id="cad-hole-floor" type="range" min={0}
+            max={holeSizes[0] ?? 0} step={0.1} value={holeFloor}
+            onChange={(event) => setHoleFloor(Number(event.target.value))} />
+          <input className="cad-viewer__num" type="number" min={0} step={0.5}
+            aria-label="홀 지름 하한" value={holeFloor}
+            onChange={(event) => {
+              const low = Number(event.target.value);
+              if (Number.isFinite(low)) setHoleFloor(low);
+            }} />
+          <b>mm 이상</b>
+          <em>{holes.filter((h) => h.diameter >= holeFloor).length}
+            {' / '}{holes.length}개 · {holeSizes.length}종</em>
+        </span>
+      )}
       {overlay && <button type="button" className={showOverlay ? 'is-on' : ''}
         onClick={() => setShowOverlay((v) => !v)}>
         제로라인·보정량 {overlayPoints}

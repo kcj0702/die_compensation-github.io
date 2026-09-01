@@ -21,7 +21,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +42,9 @@ MIN_PLANE_AREA_MM2 = 400.0
 class Cylinder:
     """원통면 하나. 홀이면 조립 기준(Datum Hole) 후보가 된다."""
 
-    kind: str              # "hole"(안쪽) | "boss"(바깥쪽) | "fillet"(굽힘 R)
+    # "hole"(관통) | "boss"(바깥쪽) | "fillet"(굽힘 R)
+    # | "step"(더 큰 홀 안의 턱 — 따로 센 홀이 아니다)
+    kind: str
     radius: float
     diameter: float
     center: list           # 원통 축 위 중심점 [x,y,z]
@@ -51,9 +53,17 @@ class Cylinder:
     area: float
     wrap: float = 1.0      # 원통을 몇 바퀴 감았나 (1.0 이면 360도)
     faces: int = 1         # 이 원통을 이루는 면 개수
+    # 아래 둘은 쪼개진 면을 합칠 때만 쓴다. 축선 위의 기준점과, 그
+    # 기준점에서 축 방향으로 이 면이 차지하는 구간이다. 화면에 쓸 값이
+    # 아니라 to_dict 에서 뺀다.
+    origin: list = field(default_factory=list)
+    span: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("origin", None)
+        data.pop("span", None)
+        return data
 
 
 @dataclass
@@ -155,6 +165,42 @@ def _face_area(face) -> float:
     return _face_props(face)[0]
 
 
+def _cylinder_side(surface, face, origin: np.ndarray,
+                   direction: np.ndarray) -> str:
+    """이 원통면이 홀(안쪽)인지 보스(바깥쪽)인지 본다.
+
+    면 위 한 점에서 **실제 바깥 법선**을 구해 축 쪽을 향하는지 본다.
+    축을 향하면 재료가 원통 바깥에 있다는 뜻이니 홀이다.
+
+    예전에는 `face.Orientation() == REVERSED` 하나로 갈랐다. 그건
+    원통면의 파라미터 방향이 늘 바깥을 향한다는 가정인데, 내보낸
+    시스템에 따라 뒤집혀 있을 수 있다. 접선 두 개를 외적해 법선을
+    직접 구하면 그 가정이 필요 없다.
+    """
+    from OCP.TopAbs import TopAbs_Orientation
+    from OCP.gp import gp_Pnt, gp_Vec
+
+    u = (surface.FirstUParameter() + surface.LastUParameter()) / 2.0
+    v = (surface.FirstVParameter() + surface.LastVParameter()) / 2.0
+    point, du, dv = gp_Pnt(), gp_Vec(), gp_Vec()
+    surface.D1(u, v, point, du, dv)
+
+    normal = np.cross([du.X(), du.Y(), du.Z()], [dv.X(), dv.Y(), dv.Z()])
+    size = float(np.linalg.norm(normal))
+    if size < 1e-12:
+        return "boss"
+    normal = normal / size
+    if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+        normal = -normal
+
+    along = np.array([point.X(), point.Y(), point.Z()], dtype=float) - origin
+    radial = along - direction * float(along @ direction)
+    reach = float(np.linalg.norm(radial))
+    if reach < 1e-9:
+        return "boss"
+    return "hole" if float(normal @ (radial / reach)) < 0 else "boss"
+
+
 def find_cylinders(shape, min_radius: float = MIN_HOLE_RADIUS_MM) -> list:
     """원통면을 찾아 홀/보스로 분류한다 — 조립 기준(RPS) 후보.
 
@@ -196,9 +242,9 @@ def find_cylinders(shape, min_radius: float = MIN_HOLE_RADIUS_MM) -> list:
             axis_v = np.array([direction.X(), direction.Y(), direction.Z()], dtype=float)
             centre = centre + axis_v * mid
 
-            # 홀/보스 판정: 면이 REVERSED 면 법선이 안쪽(축 방향)을 향한다
-            reversed_face = face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED
-            kind = "hole" if reversed_face else "boss"
+            base = np.array([location.X(), location.Y(), location.Z()],
+                            dtype=float)
+            kind = _cylinder_side(surface, face, base, axis_v)
 
             found.append(Cylinder(
                 kind=kind,
@@ -208,15 +254,76 @@ def find_cylinders(shape, min_radius: float = MIN_HOLE_RADIUS_MM) -> list:
                 axis=[round(float(v), 4) for v in axis_v],
                 height=round(height, 3),
                 area=round(_face_area(face), 2),
+                origin=[float(v) for v in base],
+                span=[float(v0), float(v1)],
             ))
         except Exception:
             # 한 면이 이상해도 전체가 멈추면 안 된다
             pass
         explorer.Next()
 
-    merged = _merge_cylinder_faces(found)
+    merged = _mark_inner_steps(_merge_cylinder_faces(found))
     merged.sort(key=lambda c: -c.diameter)
     return merged
+
+
+# 안쪽 턱으로 볼 조건 — 축이 나란한 정도와, 축 방향으로 맞닿았다고 볼 여유.
+STEP_AXIS_DOT = 0.99
+STEP_TOUCH_MM = 0.2
+
+
+def _mark_inner_steps(cylinders: list) -> list:
+    """더 큰 홀 안에 들어앉은 원통을 홀에서 뺀다.
+
+    [무엇이 문제였나 — 실측 67XX6-DR050]
+    이 부품에서 홀이 **180개** 나왔다. 그런데 중심이 3mm 안에 겹친 홀
+    쌍만 104 개였고, 높이도 0.4 · 0.8 · 0.9 · 1.1 · 1.3 · … · 15.7mm 로
+    제각각이었다. 판 하나를 뚫은 구멍이라면 높이는 판 두께 하나여야 한다.
+
+    겹친 것들을 들여다보면 Ø12 홀 안에 Ø6.3 · Ø6.4 원통이 1~3mm 비껴
+    앉아 있다. 두 개가 나란히 뚫린 구멍일 수 없다 — 작은 원이 큰 원
+    안에 통째로 들어가기 때문이다. 같은 구멍의 **안쪽 턱**이다.
+
+    그래서 지운다 —
+      · 축이 나란하고
+      · 작은 원이 큰 원 안에 통째로 들어가고 (비낀 거리 + 작은 반지름
+        <= 큰 반지름)
+      · 축 방향으로 서로 맞닿아 있다 (떨어져 있으면 다른 판의 구멍이다)
+
+    세 번째 조건이 중요하다. 이게 없으면 판금에서 위아래 플랜지에 각각
+    뚫린 멀쩡한 볼트홀이 "큰 홀 안에 있다" 는 이유로 지워진다 — 실측
+    64XX1 에서 Ø4.5 · Ø5.2 · Ø6.0 · Ø21 이 통째로 사라졌다(43 -> 23개).
+
+    [실측 결과]
+        64XX1-DR000   43 -> 43 개   (건드리지 않는다)
+        71XX1-DR000   44 -> 44 개   (건드리지 않는다)
+        67XX6-DR050  180 -> 152 개  (Ø6.4 11개 · Ø6.3 17개)
+    """
+    holes = [c for c in cylinders if c.kind == "hole"]
+    inner: set = set()
+    for outer in holes:
+        way = np.asarray(outer.axis, dtype=float)
+        for other in holes:
+            if other is outer or id(other) in inner or id(outer) in inner:
+                continue
+            if other.radius >= outer.radius:
+                continue
+            if abs(float(way @ np.asarray(other.axis, dtype=float))) < STEP_AXIS_DOT:
+                continue
+            gap = (np.asarray(other.center, dtype=float)
+                   - np.asarray(outer.center, dtype=float))
+            deep = abs(float(gap @ way))
+            side = float(np.linalg.norm(gap - way * float(gap @ way)))
+            if side + other.radius > outer.radius:
+                continue
+            if deep > (outer.height + other.height) / 2.0 + STEP_TOUCH_MM:
+                continue      # 축을 따라 떨어져 있다 — 다른 판의 구멍이다
+            inner.add(id(other))
+
+    for cylinder in cylinders:
+        if id(cylinder) in inner:
+            cylinder.kind = "step"
+    return cylinders
 
 
 def _merge_cylinder_faces(faces: list, closed_wrap: float = 0.8) -> list:
@@ -238,41 +345,116 @@ def _merge_cylinder_faces(faces: list, closed_wrap: float = 0.8) -> list:
 
     합치기 전에는 "홀 58개" 라고 내놨는데, 대부분 굽힘 R 이었다.
     """
-    groups: dict = {}
+    groups: list = []
     for face in faces:
-        key = (
-            tuple(round(v, 1) for v in face.center),
-            round(face.diameter, 1),
-            tuple(round(abs(v), 2) for v in face.axis),   # 축 부호는 무시
-        )
-        groups.setdefault(key, []).append(face)
+        for members in groups:
+            if _same_cylinder(members[0], face):
+                members.append(face)
+                break
+        else:
+            groups.append([face])
 
     merged: list = []
-    for members in groups.values():
+    for members in groups:
         head = members[0]
-        height = max(m.height for m in members)
-        area = sum(m.area for m in members)
-        full = math.pi * head.diameter * height
-        wrap = (area / full) if full > 0 else 0.0
+        direction = np.asarray(head.axis, dtype=float)
+        base = np.asarray(head.origin, dtype=float)
 
-        if wrap >= closed_wrap:
-            # 닫힌 원통 — 안쪽을 보면 홀, 바깥쪽을 보면 보스
-            kind = "hole" if any(m.kind == "hole" for m in members) else "boss"
-        else:
-            kind = "fillet"     # 굽힘 R·모서리. 조립 기준이 아니다
+        # 축선 위에서 면마다 차지하는 구간을 구한다.
+        #
+        # 예전에는 `max(height)` 를 통짜 원통 높이로 썼다. 축을 따라
+        # 위아래로 쪼개진 면들은 그러면 높이가 절반만 잡혀 감김이
+        # 어긋난다. 구간을 직접 재서 합친다.
+        spread: list = []
+        for member in members:
+            start = np.asarray(member.origin, dtype=float)
+            way = np.asarray(member.axis, dtype=float)
+            edges = [float((start + way * float(edge) - base) @ direction)
+                     for edge in member.span]
+            spread.append((min(edges), max(edges), member))
+        spread.sort(key=lambda item: item[0])
 
-        merged.append(Cylinder(
-            kind=kind,
-            radius=head.radius,
-            diameter=head.diameter,
-            center=head.center,
-            axis=head.axis,
-            height=round(height, 3),
-            area=round(area, 2),
-            wrap=round(min(wrap, 1.0), 3),
-            faces=len(members),
-        ))
+        # 축은 같은데 **떨어져 있는** 것은 서로 다른 홀이다.
+        #
+        # 판금은 플랜지가 겹치는 자리가 많아 같은 축에 홀이 위아래로
+        # 두 개씩 뚫린다. 그걸 한 덩어리로 보면 사이의 빈 구간까지
+        # 높이에 들어가 감김이 무너지고, 둘 다 굽힘 R 로 밀려난다 —
+        # 실측 71XX1 에서 이걸 안 갈랐더니 홀이 44 -> 28 개로 줄고
+        # Ø8.4 짜리 12 개가 통째로 사라졌다.
+        runs: list = []
+        for low, high, member in spread:
+            if runs and low <= runs[-1][1] + SAME_RUN_GAP_MM:
+                runs[-1][1] = max(runs[-1][1], high)
+                runs[-1][2].append(member)
+            else:
+                runs.append([low, high, [member]])
+
+        for low, high, group in runs:
+            extent = high - low
+            area = sum(m.area for m in group)
+            full = math.pi * head.diameter * extent
+            wrap = (area / full) if full > 0 else 0.0
+
+            if wrap >= closed_wrap:
+                # 닫힌 원통 — 안쪽을 보면 홀, 바깥쪽을 보면 보스
+                kind = "hole" if any(m.kind == "hole" for m in group) else "boss"
+            else:
+                kind = "fillet"     # 굽힘 R·모서리. 조립 기준이 아니다
+
+            centre = base + direction * ((low + high) / 2.0)
+            merged.append(Cylinder(
+                kind=kind,
+                radius=head.radius,
+                diameter=head.diameter,
+                center=[round(float(v), 3) for v in centre],
+                axis=head.axis,
+                height=round(float(extent), 3),
+                area=round(area, 2),
+                wrap=round(min(wrap, 1.0), 3),
+                faces=len(group),
+            ))
     return merged
+
+
+# 같은 원통으로 볼 기준. 자리 맞춤 오차와 내보내기 정밀도를 감안한 값이다.
+SAME_AXIS_DOT = 0.9995        # 축이 나란한 정도 (약 1.8도)
+SAME_AXIS_GAP_MM = 0.05       # 두 축선 사이 거리
+SAME_DIAMETER_MM = 0.02
+# 축을 따라 이만큼 넘게 떨어져 있으면 서로 다른 원통으로 본다.
+SAME_RUN_GAP_MM = 0.05
+
+
+def _same_cylinder(a: "Cylinder", b: "Cylinder") -> bool:
+    """두 원통면이 같은 원통에서 쪼개져 나온 것인가.
+
+    예전에는 중심·지름·축을 소수점 한 자리로 **반올림해 열쇠**를 만들어
+    묶었다. 두 가지가 깨진다 —
+
+      (1) 중심을 v 구간 한가운데로 잡아 놨는데, 축을 따라 위아래로
+          쪼개진 면들은 그 한가운데가 서로 다르다. 같은 홀인데 열쇠가
+          갈린다.
+      (2) 반올림은 경계에서 갈린다. 12.349 와 12.351 은 0.002mm 차이인데
+          12.3 과 12.4 로 나뉜다.
+
+    실측 67XX6-DR050 에서 반올림 열쇠로 묶으면 감김이 모자란 조각이
+    남는다 — 거리로 묶으니 굽힘 R 묶음이 160 -> 146 개로 줄었다(홀
+    개수는 그대로다. 이건 조각을 없앤 것이지 홀을 더 찾은 게 아니다).
+
+    그래서 반올림 대신 **거리로** 잰다. 축이 나란하고, 두 축선이 겹치고,
+    지름이 같으면 같은 원통이다. 축을 따라 떨어져 있어도 상관없다 —
+    구간은 합칠 때 다시 구한다.
+    """
+    if abs(a.diameter - b.diameter) > SAME_DIAMETER_MM:
+        return False
+
+    ua = np.asarray(a.axis, dtype=float)
+    ub = np.asarray(b.axis, dtype=float)
+    if abs(float(ua @ ub)) < SAME_AXIS_DOT:
+        return False
+
+    # 두 축선 사이 거리 — 나란하므로 한 점을 축 방향으로 지운 나머지다
+    gap = np.asarray(b.origin, dtype=float) - np.asarray(a.origin, dtype=float)
+    return float(np.linalg.norm(gap - ua * float(gap @ ua))) <= SAME_AXIS_GAP_MM
 
 
 def find_planes(shape, min_area: float = MIN_PLANE_AREA_MM2) -> list:
@@ -343,7 +525,7 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 2      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 3      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
 
 
 def _cache_key(path: Path, deflection: float) -> str:
