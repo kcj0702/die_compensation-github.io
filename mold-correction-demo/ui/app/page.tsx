@@ -1470,6 +1470,14 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [activeCadId, setActiveCadId] = useState<string>('');
   const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
   const [pending, setPending] = useState<string[]>([]);   // 읽는 중인 파일명
+  /* 몇 초째 읽고 있는지. 실측 113MB STEP 이 **57초** 걸리는데 그동안
+     아무 표시가 없어서 멈춘 것처럼 보였다. 같은 파일을 다시 열면
+     디스크 캐시가 있어 3초다. */
+  const [waited, setWaited] = useState(0);
+  /* 연 파일을 들고 있는다. 서버는 CAD 를 6개까지만 캐시하므로 7번째를
+     열면 첫 파일이 밀려나 "CAD 가 만료됐습니다" 가 뜬다. 그때 조용히
+     다시 올려 주면 사람은 모르고 지나간다(캐시 덕에 3초다). */
+  const fileStore = useRef<Record<string, File>>({});
   const [error, setError] = useState<string | null>(null);
   const mesh = useMemo(
     () => meshes.find((m) => (m.cadId ?? m.summary.name) === activeCadId) ?? null,
@@ -1685,7 +1693,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   }, [activeCadId]);
 
   const requestOverlay = (scanId: string, forCadId?: string,
-                          edits?: ZeroEdit[]) => {
+                          edits?: ZeroEdit[], retried = false) => {
     const cadId = forCadId ?? mesh?.cadId;
     setOverlayScanId(scanId);
     setOverlayError(null);
@@ -1715,8 +1723,15 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         overlayCache.current[cacheKey] = data;
         setOverlay(data); setOverlayStatus('idle');
       })
-      .catch((err) => {
-        setOverlayError(String(err.message || err));
+      .catch(async (err) => {
+        // 서버 캐시에서 밀려났으면 조용히 다시 올리고 한 번만 더 해 본다
+        const said = String(err.message || err);
+        const name = meshes.find((m) => m.cadId === cadId)?.summary.name;
+        if (said.includes('만료') && name && !retried) {
+          const fresh = await reopenCad(name);
+          if (fresh) { requestOverlay(scanId, fresh, applied, true); return; }
+        }
+        setOverlayError(said);
         setOverlayStatus('error');
       });
   };
@@ -1727,6 +1742,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     if (!files.length) return;
     setStatus('loading'); setError(null);
     setPending(files.map((f) => f.name));
+    setWaited(0);
+    const started = Date.now();
+    const ticking = window.setInterval(
+      () => setWaited(Math.round((Date.now() - started) / 1000)), 1000);
     const failed: string[] = [];
     for (const file of files) {
       const body = new FormData();
@@ -1735,6 +1754,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body });
         const data = await response.json() as CadMesh & { error?: string };
         if (!response.ok) throw new Error(data.error || '읽지 못했습니다.');
+        fileStore.current[data.summary.name] = file;
         setMeshes((current) => {
           // 같은 파일을 다시 열면 갈아 끼운다 — 목록이 중복으로 불어나지
           // 않게. 이름이 같으면 같은 파일로 본다.
@@ -1748,8 +1768,25 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         setPending((current) => current.filter((n) => n !== file.name));
       }
     }
+    window.clearInterval(ticking);
+    setWaited(0);
     setError(failed.length ? failed.join(' / ') : null);
     setStatus(failed.length ? 'error' : 'idle');
+  };
+
+  /* 서버에서 밀려난 CAD 를 조용히 다시 올린다. 새 cadId 를 돌려준다. */
+  const reopenCad = async (name: string): Promise<string | null> => {
+    const file = fileStore.current[name];
+    if (!file) return null;
+    const body = new FormData();
+    body.append('file', file);
+    const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body });
+    const data = await response.json() as CadMesh & { error?: string };
+    if (!response.ok) return null;
+    setMeshes((current) => current.map(
+      (m) => (m.summary.name === data.summary.name ? data : m)));
+    if (data.cadId) setActiveCadId(data.cadId);
+    return data.cadId ?? null;
   };
 
   /* 목록에서 뺀다. 서버 캐시는 그대로 두어도 곧 밀려난다. */
@@ -1812,8 +1849,15 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   </span>;
                 })}
                 {pending.map((name) => <span key={name} className="cad-files__tab cad-files__tab--wait">
-                  <button type="button" disabled><Play size={13} /> {name} 읽는 중…</button>
+                  <button type="button" disabled><Play size={13} /> {name} 읽는 중…
+                    {waited > 2 && ` ${waited}초`}</button>
                 </span>)}
+                {pending.length > 0 && waited > 8 && (
+                  <span className="cad-files__note">
+                    처음 읽는 STEP 은 오래 걸립니다 — 실측 113MB 가 57초입니다.
+                    같은 파일을 다시 열면 3초입니다.
+                  </span>
+                )}
               </div>}
               <div className="cad-viewer">
                 <CadViewer active={active} sections={sections} mesh={mesh} showHoles={showHoles} overlay={overlay}

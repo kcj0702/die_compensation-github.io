@@ -1086,6 +1086,13 @@ def scan_part_for_cad(cad_name: str) -> str | None:
     return None
 
 
+# 제로 영역을 네모로 갈음할 기준. 네모 넓이의 이만큼은 실제로 차 있어야
+# 한다 — 그보다 성기면 네모가 빈 데를 덮는다.
+AREA_BOX_FILL = 0.55
+# 네모로 못 쓸 때 윤곽을 얼마나 단순화할지 (둘레 대비).
+AREA_SIMPLIFY = 0.012
+
+
 def cad_overlay_for(cad_id: str, analysis_id: str,
                     zero_edits: list | None = None) -> dict[str, Any]:
     """스캔에서 뽑은 제로라인·포인트를 CAD 표면 위의 3D 좌표로 옮긴다.
@@ -1250,12 +1257,46 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     area_contours = list(analysis.get("lab_zero_areas") or [])
     if not area_contours:
         area_contours = list(reference.get("contours") or [])
+
+    # 제로 영역의 **테두리**를 따로 만들어 준다.
+    #
+    # 지금까지는 네모를 표면에 칠하기만 했다. 칠하기는 정점 단위라
+    # 경계가 삼각망을 따라 들쭉날쭉해진다 — 네모로 만들어 놓고도
+    # 화면에서는 네모로 안 보였다. 네모의 네 변을 제로라인과 똑같이
+    # 촘촘히 쏴서 표면에 얹으면 곡면을 타면서도 경계가 반듯하다.
+    area_outlines: list = []
     for contour in area_contours:
         pts = np.rint(np.asarray(contour, dtype=float)).astype(np.int32)
         if len(pts) < 3:
             continue
-        box = cv2.boxPoints(cv2.minAreaRect(pts))
-        cv2.fillPoly(stencil, [np.rint(box).astype(np.int32)], 2)
+
+        # 네모로 감쌀지, 윤곽을 다듬어 쓸지.
+        #
+        # 시트는 영역을 네모로 표기하므로 네모가 기본이다. 그런데 가지가
+        # ㄱ 자로 꺾인 영역을 네모로 감싸면 빈 데까지 덮는다 — 실측
+        # 67XX6 의 7개 중 하나가 625x274 네모에 **채움 18%** 였다. 그
+        # 네모를 칠하면 제로 영역이 아닌 자리가 10% 나 칠해진다.
+        # 그래서 네모에 실하게 들어찬 것만 네모로 하고, 나머지는 윤곽을
+        # 단순화해 각진 다각형으로 만든다. 어느 쪽이든 픽셀 들쭉날쭉은
+        # 없어진다 — 꼭짓점이 4~23 개다.
+        #
+        # 실측 67XX6 7개 영역이 덮는 넓이: 전부 네모로 하면 그림의
+        # 17.5%, 이 규칙이면 5.5% 다. 3배를 잘못 칠하고 있었다.
+        (_mid, (box_w, box_h), _angle) = cv2.minAreaRect(pts)
+        box_area = float(box_w) * float(box_h)
+        fill = (cv2.contourArea(pts) / box_area) if box_area > 0 else 0.0
+        if fill >= AREA_BOX_FILL:
+            shape = np.rint(cv2.boxPoints(cv2.minAreaRect(pts))).astype(np.int32)
+        else:
+            slack = AREA_SIMPLIFY * cv2.arcLength(pts, True)
+            shape = cv2.approxPolyDP(pts, slack, True).reshape(-1, 2)
+        if len(shape) < 3:
+            continue
+
+        cv2.fillPoly(stencil, [shape], 2)
+        ring = [[float(x), float(y)] for x, y in shape]
+        ring.append(ring[0])          # 닫는다
+        area_outlines.append(ring)
     # 우선순위: 현업 파이프라인 > 시트에 등록된 정답 > 우리 검출.
     # 앞의 것일수록 근거가 분명하다.
     # 도장은 **영역**에만 쓴다(67XX6 처럼 시트가 면으로 표기한 경우).
@@ -1269,6 +1310,27 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         zero_surface = ov.sample_flags(
             np.asarray(display, dtype=float), fit, stencil)
 
+    # 영역 테두리를 표면 위로 옮긴다 — 제로라인과 같은 방식이다.
+    zero_areas: list = []
+    for ring in area_outlines:
+        placed = ov.unproject(_densify(ring), vertices, faces, fit, shifted)
+        runs, current = [], []
+        for spot in placed:
+            if spot is None:
+                if len(current) >= 2:
+                    runs.append(current)
+                current = []
+            else:
+                current.append(spot)
+        if len(current) >= 2:
+            runs.append(current)
+        if runs:
+            zero_areas.append({
+                "runs": runs,
+                "gaps": [[runs[i][-1], runs[i + 1][0]]
+                         for i in range(len(runs) - 1)],
+            })
+
     # 표면에 입힐 편차 — 화면용 정점 하나하나에 스캔 값을 찍는다.
     surface = []
     if display is not None:
@@ -1279,6 +1341,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
             "zeroSurface": zero_surface,
+            "zeroAreas": zero_areas,
             "zeroKind": "areas" if area_contours else (reference.get("kind") or "line"),
             "droppedPoints": dropped_points,
             "droppedLinePoints": dropped_line_points,

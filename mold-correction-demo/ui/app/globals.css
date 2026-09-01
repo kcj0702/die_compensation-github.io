@@ -676,3 +676,6 @@ button { cursor: pointer; }
 .zero-edit__foot button{padding:4px 12px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;font-size:11px;color:#3d4e5f;cursor:pointer}
 .zero-edit__apply{border-color:#2f8f5b !important;background:#2f8f5b !important;color:#fff !important;font-weight:600}
 .zero-edit__foot em{font-size:10.5px;font-style:normal;color:#b4762a}
+
+/* CAD 를 읽는 동안 왜 오래 걸리는지 알려 준다 */
+.cad-files__note{align-self:center;padding:0 8px;color:#8fa3b4;font-size:10.5px}

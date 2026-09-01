@@ -56,6 +56,10 @@ export type CadOverlay = {
   /* 정점마다 0 = 아님 · 1 = 제로라인(띠) · 2 = 제로 영역.
      선을 공간에 띄우는 대신 **표면을 칠한다** — 곡면을 그대로 따라간다. */
   zeroSurface?: number[];
+  /* 제로 영역의 네모 테두리를 표면 위로 옮긴 것. 칠하기만으로는
+     경계가 삼각망을 따라 들쭉날쭉해 네모로 안 보인다. */
+  zeroAreas?: { runs: [number, number, number][][];
+                gaps: [number, number, number][][] }[];
   zeroKind?: string;
   /* 위치만 준다. 보정량은 최종 보정시트가 정하므로 화면이 넣는다. */
   points: { id: string; position: [number, number, number]; value: number }[];
@@ -339,6 +343,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const [clipPct, setClipPct] = useState(100);
   const clip = depth && clipPct < 100
     ? depth.min + (depth.max - depth.min) * (clipPct / 100) : null;
+  /* 씬을 다시 만들 때 지금 값을 알아야 한다. 상태로 읽으면 그 시점의
+     값이 아니라 이펙트가 묶인 시점의 값이 온다. */
+  const clipRefValue = useRef<number | null>(clip);
+  clipRefValue.current = clip;
   /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
@@ -578,8 +586,16 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 환경맵을 세게 주면 판넬이 하얗게 번진다. 형태는 주광이 만든다.
       envMapIntensity: painted ? 0.25 : 0.45,
       side: THREE.DoubleSide, flatShading: false,
-      clippingPlanes: [clipPlane],
+      // 자르지 않을 때는 평면을 **달지 않는다.**
+      //
+      // 예전에는 늘 달아 놓고 [clip] 이펙트가 떼도록 했다. 그런데 그
+      // 이펙트는 clip 값이 바뀔 때만 돈다. 씬을 다시 만들면(오버레이·
+      // 보정량 범위·과장 변경 등) 새 표면이 평면을 단 채로 나오고,
+      // 그때 상수는 0 이라 부품이 z=0 에서 반쪽만 보인다. 단면을 한 번
+      // 건드리기 전까지 그대로다 — "형상이 한번씩 짤린다" 가 이것이다.
+      clippingPlanes: clipRefValue.current === null ? [] : [clipPlane],
     }));
+    clipPlane.constant = clipRefValue.current ?? 0;
     // 겹쳐 볼 때는 원본을 반투명 뼈대로 남긴다
     if (morph && morphMode === 'after') surface.visible = false;
     else if (morph && morphMode === 'both') {
@@ -773,6 +789,41 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           tag.position.copy(seat).add(new THREE.Vector3(0, 0, radius * 0.06));
           tag.renderOrder = 15;
           overlayRoot.add(tag);
+        }
+      }
+
+      // 영역 테두리 — 네모의 네 변을 표면에 얹은 것. 칠한 면은 경계가
+      // 삼각형을 따라 들쭉날쭉하므로, 그 위에 반듯한 테두리를 덧그려야
+      // 어디까지가 그 영역인지 읽힌다. 시트도 영역을 네모로 표기한다.
+      for (const area of overlay.zeroAreas ?? []) {
+        for (const run of area.runs ?? []) {
+          const pts = run.map(([x, y, z]) => new THREE.Vector3(x, y, z));
+          if (pts.length < 2) continue;
+          const edge = new THREE.Mesh(
+            new THREE.TubeGeometry(
+              new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0),
+              Math.max(pts.length, 32), lift * 1.15, 8, false),
+            new THREE.MeshBasicMaterial({
+              color: ZERO_TINT,
+              polygonOffset: true, polygonOffsetFactor: -6,
+            }));
+          edge.renderOrder = 10;
+          overlayRoot.add(edge);
+        }
+        // 테두리가 부품 밖(구멍·개구부)을 지나는 구간은 점선이다 —
+        // 제로라인과 같은 규칙으로 사실대로 보인다.
+        for (const gap of area.gaps ?? []) {
+          if (gap.length < 2) continue;
+          const dashed = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints(
+              gap.map(([x, y, z]) => new THREE.Vector3(x, y, z))),
+            new THREE.LineDashedMaterial({
+              color: ZERO_TINT, dashSize: radius * 0.02,
+              gapSize: radius * 0.014, transparent: true, opacity: 0.75,
+            }));
+          dashed.computeLineDistances();
+          dashed.renderOrder = 10;
+          overlayRoot.add(dashed);
         }
       }
 
