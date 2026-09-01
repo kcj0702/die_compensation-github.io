@@ -822,6 +822,9 @@ def analyze_image(image: np.ndarray, filename: str,
             "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
             # 현업 파이프라인 결과가 있으면 3D 에는 이걸 쓴다
             "lab_zero_lines": lab_zero.get("lines") or [],
+            # 67XX6 처럼 7단계(가지 확장)가 있는 부품은 제로라인이
+            # 선이 아니라 **영역**으로 나온다.
+            "lab_zero_areas": lab_zero.get("areas") or [],
             "deviation_points": points,
             "part_no": part_key,
             # 시트에 등록된 제로 표기. 67XX6 은 선이 아니라 **영역**이라
@@ -834,6 +837,7 @@ def analyze_image(image: np.ndarray, filename: str,
         "partNo": part_key,
         "naming": naming.to_dict(),
         "labZeroLines": lab_zero.get("lines") or [],
+        "labZeroAreas": lab_zero.get("areas") or [],
         "labZeroRegions": lab_zero.get("regions") or [],
         "timings": spent,
         "keyPoints": [k.to_dict() for k in key_points],
@@ -1221,7 +1225,10 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     # 윤곽 그대로 칠했더니 가장자리를 따라 실오라기처럼 갈라져 "물감
     # 칠한 느낌" 이 났다. 시트도 제로 영역을 빗금 친 **네모**로 표기한다 —
     # 경계가 반듯해야 어디까지가 그 영역인지 읽힌다.
-    for contour in (reference.get("contours") or []):
+    area_contours = list(analysis.get("lab_zero_areas") or [])
+    if not area_contours:
+        area_contours = list(reference.get("contours") or [])
+    for contour in area_contours:
         pts = np.rint(np.asarray(contour, dtype=float)).astype(np.int32)
         if len(pts) < 3:
             continue
@@ -1250,7 +1257,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
             "zeroSurface": zero_surface,
-            "zeroKind": reference.get("kind") or "line",
+            "zeroKind": "areas" if area_contours else (reference.get("kind") or "line"),
             "droppedPoints": dropped_points,
             "droppedLinePoints": dropped_line_points,
             "colorbarLimit": round(limit, 2) if limit else None,

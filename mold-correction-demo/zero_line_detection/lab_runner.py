@@ -40,10 +40,10 @@ KNOWN_PREFIXES = {
     "71XX2": "JD_71XX2-DR000",
 }
 
-STAGES = [
-    # 라벨 제거도 **그쪽 것**을 쓴다. 우리 label_removal 은 컬러바 범례의
-    # 눈금 숫자까지 라벨로 오인해 범례를 통째로 지워, 2단계가
-    # "color bar could not be detected" 로 멈춘다(실측 64XX2·67XX6).
+# 라벨 제거도 **그쪽 것**을 쓴다. 우리 label_removal 은 컬러바 범례의
+# 눈금 숫자까지 라벨로 오인해 범례를 통째로 지워, 2단계가
+# "color bar could not be detected" 로 멈춘다(실측 64XX2·67XX6).
+COMMON_STAGES = [
     ("01_label_removal", "remove_labels.py"),
     ("02_contour_graph", "contour_graph.py"),
     ("03_zero_point_selection", "zero_point_selection.py"),
@@ -51,6 +51,24 @@ STAGES = [
     ("05_merged_correction_regions", "merge_correction_regions.py"),
     ("06_nearest_zero_points", "select_nearest_zero_points.py"),
 ]
+
+# 67XX6 은 두 단계가 더 있다.
+#
+# 이 부품은 선루프라 가운데가 통째로 비어 있는데, 6단계까지의 규칙은
+# "inner openings and holes are traversable" 라 그 빈 데를 대각선으로
+# 가로질렀다. 7단계는 **바깥 윤곽·안쪽 윤곽·보정 영역을 뺀 통로 안에서만**
+# 제로라인을 뻗어 그 문제를 없앤다. 결과가 선이 아니라 가지 마스크라,
+# 이 부품의 제로라인은 **영역**으로 다룬다 — 시트 표기와도 맞는다.
+EXTRA_STAGES = {
+    "JD_67XX6-DR000": [
+        ("07_zero_line_branch_expansion", "branch_expand_zero_lines.py"),
+        ("08_zero_region_on_label_removed_scan", "overlay_zero_region.py"),
+    ],
+}
+
+
+def stages_for(prefix: str) -> list:
+    return COMMON_STAGES + EXTRA_STAGES.get(prefix, [])
 
 _cache: "OrderedDict[str, dict]" = OrderedDict()
 _CACHE_MAX = 8
@@ -97,14 +115,22 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
         _cache.move_to_end(key)
         return _cache[key]
 
+    area_contours: list = []
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / f"{prefix} 3D 스캔"
         _write(root / "input" / f"{prefix} 3D 스캔.png", scan_bgr)
 
-        for folder, script in STAGES:
+        for folder, script in stages_for(prefix):
             stage_dir = root / "output" / folder
             stage_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(PIPELINE / script, stage_dir / script)
+            shutil.copy2(PIPELINE / prefix / script, stage_dir / script)
+            # 어떤 단계는 미리 만들어진 자료를 자기 폴더에서 입력으로
+            # 찾는다(67XX6 3단계의 mylab_deviation_graph.json). 2단계
+            # 산출물이 아니라 my_lab 이 따로 만든 것이라 같이 넣어 준다.
+            assets = PIPELINE / prefix / "assets" / folder
+            if assets.is_dir():
+                for item in assets.iterdir():
+                    shutil.copy2(item, stage_dir / item.name)
             # 1단계만 자기 폴더 아래 input/output 을 본다. 나머지는 품번
             # 폴더 기준이라 인자 없이 돈다.
             argv = [sys.executable, script]
@@ -124,20 +150,43 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
                 # 3_labels_points_white · 4_labels_points_inpainted)로 나눠
                 # 하위 폴더에 넣는다. 2단계는 그중 4번 한 장을 자기 위
                 # 폴더에서 찾으므로 올려 준다.
-                made = list((stage_dir / "4_labels_points_inpainted").glob("*.png"))
-                if not made:
-                    return {"error": "라벨 제거 결과(4_labels_points_inpainted)를 "
-                                     "찾지 못했습니다."}
-                shutil.copy2(made[0], stage_dir / made[0].name)
+                # 2단계는 4번 갈래를, 67XX6 의 8단계는 2번 갈래를 각각
+                # 자기 위 폴더에서 찾는다. 둘 다 올려 준다.
+                lifted = 0
+                for branch in ("4_labels_points_inpainted", "2_labels_inpainted"):
+                    for made in (stage_dir / branch).glob("*.png"):
+                        shutil.copy2(made, stage_dir / made.name)
+                        lifted += 1
+                if not lifted:
+                    return {"error": "라벨 제거 결과를 찾지 못했습니다."}
 
         picked = json.loads(
             (root / "output" / "06_nearest_zero_points"
              / "nearest_zero_points.json").read_text(encoding="utf-8"))
+
+        # 7단계가 있으면 그 가지 마스크를 제로 **영역**으로 쓴다.
+        # 6단계 선보다 뒤에 나온 결과이고, 빈 공간을 지나지 않는다.
+        branch = root / "output" / "07_zero_line_branch_expansion"             / "branch_expanded_area_mask.png"
+        if branch.exists():
+            data = np.fromfile(str(branch), dtype=np.uint8)
+            mask = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+            if mask is not None:
+                found, _h = cv2.findContours(
+                    (mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL,
+                    cv2.CHAIN_APPROX_SIMPLE)
+                area_contours = [c.reshape(-1, 2).tolist() for c in found
+                                 if cv2.contourArea(c) >= 200]
+
         if keep_dir is not None:
             shutil.copytree(root, keep_dir, dirs_exist_ok=True)
 
     result = {"prefix": prefix, "raw": picked,
-              "regions": _regions_of(picked), "lines": _lines_of(picked)}
+               "regions": _regions_of(picked), "lines": _lines_of(picked),
+               "areas": area_contours}
+    if area_contours:
+        # 영역이 있으면 그것이 이 부품의 제로라인이다 — 선은 6단계
+        # 중간 결과라 화면에는 쓰지 않는다.
+        result["lines"] = []
     _cache[key] = result
     while len(_cache) > _CACHE_MAX:
         _cache.popitem(last=False)
