@@ -1086,7 +1086,8 @@ def scan_part_for_cad(cad_name: str) -> str | None:
     return None
 
 
-def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
+def cad_overlay_for(cad_id: str, analysis_id: str,
+                    zero_edits: list | None = None) -> dict[str, Any]:
     """스캔에서 뽑은 제로라인·포인트를 CAD 표면 위의 3D 좌표로 옮긴다.
 
     보정량은 여기서 계산하지 않는다. 최종 보정시트는 작업자가 값을
@@ -1147,6 +1148,27 @@ def cad_overlay_for(cad_id: str, analysis_id: str) -> dict[str, Any]:
     if not raw_lines:
         raw_lines = [{"line_id": l.get("line_id"), "points": l["points"]}
                      for l in analysis.get("simple_zero_lines", [])]
+
+    # 보정시트에서 손본 제로라인을 그대로 따른다.
+    #
+    # 3D 의 제로라인은 시트가 정하는 것이라, 시트에서 옮기거나 숨긴 것이
+    # 3D 에 안 비치면 둘이 어긋난다. 옮김은 그림 좌표(px)로 받아 **광선을
+    # 쏘기 전에** 더한다 — 3D 에서 따로 밀면 표면에서 떠 버린다.
+    if zero_edits:
+        moved: list = []
+        for index, line in enumerate(raw_lines):
+            edit = next((e for e in zero_edits
+                         if int(e.get("index", -1)) == index), None)
+            if edit is None:
+                moved.append(line)
+                continue
+            if edit.get("hidden"):
+                continue
+            dx = float(edit.get("dx") or 0.0)
+            dy = float(edit.get("dy") or 0.0)
+            moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
+                                             for p in line["points"]]})
+        raw_lines = moved
 
     lines = []
     dropped_line_points = 0
@@ -1525,6 +1547,7 @@ async def cad_overlay(request: Request) -> JSONResponse:
             cad_overlay_for,
             str(body.get("cadId") or ""),
             str(body.get("analysisId") or ""),
+            body.get("zeroEdits") or None,
         )
         return JSONResponse(result)
     except ValueError as exc:

@@ -538,6 +538,12 @@ button { cursor: pointer; }
 .cad-viewer__pick-level{display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
 .cad-viewer__pick-level label{color:#8fa3b4;font-size:9px;font-weight:600}
 .cad-viewer__pick-level input{width:82px;accent-color:#ffef3a}
+/* 숫자 입력칸 — 슬라이더로는 0.35 같은 값을 정확히 못 맞춘다. */
+.cad-viewer__pick-level input.cad-viewer__num{width:46px;padding:2px 4px;border:1px solid rgba(255,255,255,.2);border-radius:4px;background:rgba(8,14,20,.8);color:#e6eef6;font-size:9.5px;font-variant-numeric:tabular-nums}
+.cad-viewer__zone-tools{display:inline-flex;gap:3px}
+.cad-viewer__zone-tools button{padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;cursor:pointer}
+.cad-viewer__zone-tools button.is-on{border-color:#ff5fa8;background:rgba(255,95,168,.18);color:#ffd6e8}
+.cad-viewer__zones-size em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
 .cad-viewer__pick-level b{color:#c6d4e0;font-size:9px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .cad-viewer__pick-level em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
 
@@ -652,3 +658,21 @@ button { cursor: pointer; }
 .cad-viewer__puff label { color: #ffbfe0; }
 .cad-viewer__puff input { accent-color: #ff5fa8; }
 .cad-viewer__puff em { color: #8fa3b4; font-size: 8px; font-style: normal; max-width: 300px; }
+
+/* 보정시트의 제로라인 손질 — 여기서 고친 것이 3D 로 간다 */
+.zero-edit{margin:0 0 10px;padding:10px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb;display:flex;flex-direction:column;gap:7px}
+.zero-edit__head{display:flex;align-items:baseline;gap:9px}
+.zero-edit__head b{font-size:12px;color:#1d2b3a}
+.zero-edit__head span{font-size:10.5px;color:#6b7c8c}
+.zero-edit__row{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.zero-edit__row.is-off{opacity:.5}
+.zero-edit__row>b{min-width:78px;font-size:11px;color:#2b3b4c}
+.zero-edit__axis{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:#6b7c8c}
+.zero-edit__axis button{width:20px;height:20px;border:1px solid #c8d2dc;border-radius:4px;background:#fff;color:#2b3b4c;font-size:12px;line-height:1;cursor:pointer}
+.zero-edit__axis button:hover{background:#eaf1f7}
+.zero-edit__axis i{min-width:26px;text-align:center;font-style:normal;font-size:10.5px;font-variant-numeric:tabular-nums;color:#1d2b3a}
+.zero-edit__row>button{padding:3px 9px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;font-size:10.5px;color:#3d4e5f;cursor:pointer}
+.zero-edit__foot{display:flex;align-items:center;gap:8px;padding-top:3px;border-top:1px solid #e3e9ef}
+.zero-edit__foot button{padding:4px 12px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;font-size:11px;color:#3d4e5f;cursor:pointer}
+.zero-edit__apply{border-color:#2f8f5b !important;background:#2f8f5b !important;color:#fff !important;font-weight:600}
+.zero-edit__foot em{font-size:10.5px;font-style:normal;color:#b4762a}

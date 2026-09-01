@@ -32,6 +32,10 @@ type LabDistance = { to_lab_pct: number; to_predicted_pct: number; diagonal_px: 
 type GreenBelt = { belt_id: number; contour: [number, number][]; center: [number, number]; length_px: number; area_px: number; mean_abs_deviation: number };
 type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
 type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
+/* 보정시트에서 제로라인을 손본 내역. 3D 는 이걸 그대로 따른다 —
+   시트가 제로라인의 주인이고 3D 는 그 결과를 보여 주는 자리다.
+   옮김은 **그림 좌표(px)** 다. 3D 좌표로 밀면 표면에서 뜬다. */
+export type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type AnalysisResult = {
   analysisId: string | null;
@@ -874,6 +878,21 @@ function zeroLinesToShow(result: AnalysisResult): SimpleZeroLine[] {
   return result.simpleZeroLines || [];
 }
 
+/** 손본 내역을 제로라인에 적용한다. 백엔드가 3D 에 하는 것과 같은 식이라
+ *  시트에서 보는 자리와 3D 의 자리가 어긋나지 않는다. */
+function applyZeroEdits(lines: SimpleZeroLine[], edits: ZeroEdit[]) {
+  if (!edits.length) return lines;
+  const out: SimpleZeroLine[] = [];
+  lines.forEach((line, index) => {
+    const edit = edits.find((e) => e.index === index);
+    if (!edit) { out.push(line); return; }
+    if (edit.hidden) return;
+    out.push({ ...line, points: line.points.map(
+      ([x, y]) => [x + edit.dx, y + edit.dy] as [number, number]) });
+  });
+  return out;
+}
+
 function SimpleZeroLineOverlay({ lines, width, height }: { lines: SimpleZeroLine[]; width: number; height: number }) {
   // 현업 zero_line_drawing 방식 — 주요 0포인트를 직선으로 잇는다.
   // "정답지처럼 깔끔한 직선" 요구에 맞춰 곡선을 쓰지 않으므로 꼭짓점은
@@ -950,7 +969,8 @@ function ValleyLineOverlay({ lines, width, height }: { lines: ValleyLine[]; widt
   </svg>;
 }
 
-function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, showZero, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; showZero: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
+function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, showZero, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroEdits }: { scan: ScanItem; imageUrl: string; points: PointResult[]; coefficient: number; showPoints: boolean; showZero: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void;
+  zeroEdits: ZeroEdit[] }) {
   const sourceAspect = scan.result!.source.width / scan.result!.source.height;
   const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
   const [regions, setRegions] = useState<DetailRegion[]>([]);
@@ -1015,7 +1035,8 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, showZero
                 않아서 눌러도 아무 일이 없었다. 엔진 결과 화면에서 쓰던
                 것과 같은 겹침층을 여기에도 올린다. */}
             {showZero && (scan.result?.simpleZeroLines?.length ?? 0) > 0 &&
-              <SimpleZeroLineOverlay lines={zeroLinesToShow(scan.result!)}
+              <SimpleZeroLineOverlay
+                lines={applyZeroEdits(zeroLinesToShow(scan.result!), zeroEdits)}
                 width={scan.result!.source.width} height={scan.result!.source.height} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
@@ -1425,7 +1446,7 @@ function SheetTitleBlock({ scan }: { scan: ScanItem }) {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad }: {
+function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zeroEditsByScan }: {
   /* 이 화면을 지금 보고 있는가. 안 보고 있어도 컴포넌트는 살아 있다 —
      읽어 둔 CAD 를 지키려는 것이다. 감춰진 동안에는 그리기를 멈춘다. */
   active: boolean;
@@ -1433,6 +1454,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   coefficientByScan: Record<string, number>;
   hiddenPointIdsByScan: Record<string, Set<string>>;
   pointOverridesByScan: Record<string, Record<string, number>>;
+  zeroEditsByScan: Record<string, ZeroEdit[]>;
   onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
   /* 주석과 공정 구역은 App 이 들고 있는다 — 새로고침해도 남으려면 세션
      저장소에 들어가야 하고, 그건 App 에 있다. */
@@ -1633,9 +1655,24 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   }, [scans, overlayScanId, coefficientByScan,
       pointOverridesByScan, hiddenPointIdsByScan]);
 
+  /* 품번이 맞는 스캔이 있으면 **고르지 않아도** 바로 얹는다.
+     예전에는 드롭다운의 값만 바꿔 놓고 요청은 안 해서, 짝이 뻔한데도
+     사람이 한 번 더 골라야 결과가 나왔다. */
   useEffect(() => {
-    if (!overlayScanId && suggested) setOverlayScanId(suggested.id);
-  }, [suggested, overlayScanId]);
+    if (overlayScanId || !suggested || !mesh) return;
+    requestOverlay(suggested.id, mesh.cadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggested, overlayScanId, mesh]);
+
+  /* 시트에서 제로라인을 고쳐 [3D 에 적용] 을 누르면 다시 얹는다.
+     3D 의 제로라인은 시트가 정하는 것이므로 시트를 따라가야 한다. */
+  const appliedEdits = overlayScanId
+    ? JSON.stringify(zeroEditsByScan[overlayScanId] ?? []) : '';
+  useEffect(() => {
+    if (!overlayScanId || !mesh) return;
+    requestOverlay(overlayScanId, mesh.cadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedEdits]);
 
   /* 고른 CAD 가 바뀌면 얹어 둔 스캔 결과도 그 CAD 기준으로 다시 잡는다.
      캐시에 있으면 즉시 돌아온다. */
@@ -1647,21 +1684,27 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCadId]);
 
-  const requestOverlay = (scanId: string, forCadId?: string) => {
+  const requestOverlay = (scanId: string, forCadId?: string,
+                          edits?: ZeroEdit[]) => {
     const cadId = forCadId ?? mesh?.cadId;
     setOverlayScanId(scanId);
     setOverlayError(null);
     const scan = scans.find((s) => s.id === scanId);
     const analysisId = scan?.result?.analysisId;
     if (!cadId || !analysisId) { setOverlay(null); return; }
-    // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다
-    const cached = overlayCache.current[`${cadId}:${analysisId}`];
+    // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다.
+    // 제로라인을 손봤으면 다른 결과이므로 열쇠에 같이 넣는다.
+    const applied = edits ?? zeroEditsByScan[scanId] ?? [];
+    const stamp = applied.length ? `:${JSON.stringify(applied)}` : '';
+    const cacheKey = `${cadId}:${analysisId}${stamp}`;
+    const cached = overlayCache.current[cacheKey];
     if (cached) { setOverlay(cached); setOverlayStatus('idle'); return; }
     setOverlay(null);
     setOverlayStatus('loading');
     fetch(`${API_BASE}/api/cad-overlay`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cadId, analysisId }),
+      body: JSON.stringify({ cadId, analysisId,
+                             zeroEdits: applied.length ? applied : undefined }),
     })
       .then(async (response) => {
         const data = await response.json() as CadOverlay & { error?: string };
@@ -1669,9 +1712,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         return data;
       })
       .then((data) => {
-        const scan = scans.find((item) => item.id === scanId);
-        const analysisId = scan?.result?.analysisId;
-        if (cadId && analysisId) overlayCache.current[`${cadId}:${analysisId}`] = data;
+        overlayCache.current[cacheKey] = data;
         setOverlay(data); setOverlayStatus('idle');
       })
       .catch((err) => {
@@ -1961,10 +2002,21 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeepKeyPointsOnly, onShowAllPoints, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeepKeyPointsOnly: () => void; onShowAllPoints: () => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void }) {
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeepKeyPointsOnly, onShowAllPoints, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient, zeroEdits, onZeroEditsChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeepKeyPointsOnly: () => void; onShowAllPoints: () => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void;
+  zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
+  /* 제로라인 손질 — 시트에서 고치고 [3D 에 적용] 을 눌러야 3D 가 따른다.
+     누를 때마다 서버에 다시 물으면 느려서, 초안을 들고 있다가 한 번에
+     보낸다. */
+  const [draftEdits, setDraftEdits] = useState<ZeroEdit[]>(zeroEdits);
+  const [zeroPanel, setZeroPanel] = useState(false);
+  /* 품번을 바꾸면 그 스캔에 적용해 둔 것에서 다시 시작한다 —
+     앞 부품에서 손본 값이 따라오면 안 된다. */
+  useEffect(() => { setDraftEdits(zeroEdits);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan.id]);
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const [addPointMode, setAddPointMode] = useState(false);
   const [sampling, setSampling] = useState(false);
@@ -2103,9 +2155,58 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroLinesToShow(result).length}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroLinesToShow(result).length}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => setZeroPanel((v) => !v)} disabled={!zeroLinesToShow(result).length} title="제로라인을 옮기거나 숨깁니다">제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} showZero={showZero} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
+      {zeroPanel && <div className="zero-edit">
+        <div className="zero-edit__head">
+          <b>제로라인 수정</b>
+          <span>그림 좌표로 옮깁니다 · 적용하면 3D 시각화도 같이 따라갑니다</span>
+        </div>
+        {zeroLinesToShow(result).map((line, index) => {
+          const edit = draftEdits.find((e) => e.index === index)
+            ?? { index, dx: 0, dy: 0 };
+          const put = (next: ZeroEdit) => setDraftEdits((current) => [
+            ...current.filter((e) => e.index !== index), next]
+            .sort((a, b) => a.index - b.index));
+          const nudge = (dx: number, dy: number) =>
+            put({ ...edit, dx: edit.dx + dx, dy: edit.dy + dy });
+          return <div key={index}
+            className={`zero-edit__row${edit.hidden ? ' is-off' : ''}`}>
+            <b>제로라인 {index + 1}</b>
+            <span className="zero-edit__axis">
+              가로
+              <button type="button" onClick={() => nudge(-5, 0)}>−</button>
+              <i>{edit.dx.toFixed(0)}</i>
+              <button type="button" onClick={() => nudge(5, 0)}>+</button>
+            </span>
+            <span className="zero-edit__axis">
+              세로
+              <button type="button" onClick={() => nudge(0, -5)}>−</button>
+              <i>{edit.dy.toFixed(0)}</i>
+              <button type="button" onClick={() => nudge(0, 5)}>+</button>
+            </span>
+            <button type="button"
+              onClick={() => put({ ...edit, hidden: !edit.hidden })}>
+              {edit.hidden ? '다시 보이기' : '숨기기'}
+            </button>
+            <button type="button"
+              onClick={() => setDraftEdits((c) => c.filter((e) => e.index !== index))}>
+              되돌리기
+            </button>
+          </div>;
+        })}
+        <div className="zero-edit__foot">
+          <button type="button" className="zero-edit__apply"
+            onClick={() => onZeroEditsChange(draftEdits)}>3D 에 적용</button>
+          <button type="button" onClick={() => { setDraftEdits([]); onZeroEditsChange([]); }}>
+            전부 되돌리기
+          </button>
+          {JSON.stringify(draftEdits) !== JSON.stringify(zeroEdits) && (
+            <em>아직 3D 에 적용하지 않았습니다</em>
+          )}
+        </div>
+      </div>}
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} showZero={showZero} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroEdits={draftEdits} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button><button type="button" className="sheet-print" onClick={saveExcel} disabled={excelState === 'saving'}><Download size={14} /> {excelState === 'saving' ? '엑셀 만드는 중…' : '기업 양식 엑셀 저장'}</button>{excelError && <span className="sheet-excel-error">{excelError}</span>}</div>
     </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div>{(result.keyPoints?.length ?? 0) > 0 && <div className="card key-point-card">
       <div className="card-title"><div><h3>핵심 포인트</h3>
@@ -2141,6 +2242,9 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
 
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); /* 보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 스캔별로 위에서 들고 있는다. */ const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); /* 3D 주석과 공정 구역. CAD 파일 이름을 열쇠로 쓴다 — cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다. */ const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({}); const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
+  /* 시트에서 손본 제로라인. 스캔별로 위에서 들고 있어야 시트와 3D 가
+     같은 것을 본다. */
+  const [zeroEditsByScan, setZeroEditsByScan] = useState<Record<string, ZeroEdit[]>>({});
   /* 작업 내용을 이 PC 에 남긴다 — 새로고침으로 날아가면 안 된다.
      스캔 아이디는 파일을 다시 올릴 때마다 바뀌므로 품번으로 묶는다. */
   const [sessionNote, setSessionNote] = useState<string | null>(null);
@@ -2347,9 +2451,13 @@ export default function Home() {
         setPointOverridesByScan({}); setHiddenPointIdsByScan({});
         setCoefficientByScan({});
         setSessionNote('작업 내용을 비웠습니다');
-      }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeepKeyPointsOnly={keepKeyPointsOnly} onShowAllPoints={() => setAllPointsVisible(true)} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient} />}{/* 3D 화면은 조건부로 그리지 않는다. 탭을 옮길 때마다 컴포넌트가
+      }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeepKeyPointsOnly={keepKeyPointsOnly} onShowAllPoints={() => setAllPointsVisible(true)} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient}
+        zeroEdits={completedScan ? zeroEditsByScan[completedScan.id] ?? [] : []}
+        onZeroEditsChange={(edits) => completedScan && setZeroEditsByScan(
+          (current) => ({ ...current, [completedScan.id]: edits }))} />}{/* 3D 화면은 조건부로 그리지 않는다. 탭을 옮길 때마다 컴포넌트가
         통째로 사라져서 **읽어 둔 CAD 가 초기화됐다** — 215MB STEP 을
         다시 읽으라는 얘기다. 감추기만 하고 상태는 살려 둔다.
         카메라 위치와 오버레이까지 그대로 돌아온다. */}
-      <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} /></div></main>;
+      <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad}
+        zeroEditsByScan={zeroEditsByScan} /></div></main>;
 }

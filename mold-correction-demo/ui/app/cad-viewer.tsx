@@ -99,6 +99,17 @@ export type CadRegion = {
      예전에는 at + radius 하나뿐이라 클릭한 자리 둘레의 **동그라미밖에**
      못 만들었다 — "구역이 랜덤으로 잡힌다" 는 게 그 얘기였다. */
   stamps?: { at: [number, number, number]; radius: number }[];
+  /* 네모·동그라미로 한 번에 잡은 구역. ADC 보정시트가 영역을 이렇게
+     표기하므로 붓질보다 이쪽이 시트와 그대로 맞는다.
+     끌기 시작할 때의 화면 가로(u)·세로(v) 방향을 함께 적어 둔다 —
+     돌려봐도 같은 자리를 덮으려면 방향이 부품에 붙어 있어야 한다. */
+  shape?: {
+    kind: 'rect' | 'circle';
+    center: [number, number, number];
+    u: [number, number, number];
+    v: [number, number, number];
+    hu: number; hv: number;
+  };
   die: '상형' | '하형';
   work: '용접' | '가공' | '심고음';
   /* 예전 형식. 저장해 둔 작업을 계속 읽으려고 남겨 둔다. */
@@ -322,8 +333,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      3D 가 할 일이 없다. */
   const [showHeat] = useState(false);   // 편차 색은 화면에서 뺐다
   /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다. */
-  const [clip, setClip] = useState(0);          // 0 이면 끔, 아니면 자르는 위치
-  const [clipRatio, setClipRatio] = useState(0);
+  /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다.
+     자르는 위치는 **부품의 실제 Z 범위** 안에서 고른다. 100% 면 끔. */
+  const [depth, setDepth] = useState<{ min: number; max: number } | null>(null);
+  const [clipPct, setClipPct] = useState(100);
+  const clip = depth && clipPct < 100
+    ? depth.min + (depth.max - depth.min) * (clipPct / 100) : null;
   /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
@@ -346,6 +361,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      한다 — 뒤에 두면 의존성 배열이 평가될 때 아직 초기화 전이다. */
   const [exaggeration, setExaggeration] = useState(30);
   const [zoning, setZoning] = useState(false);
+  /* 구역을 어떻게 잡을지. 시트처럼 네모를 기본으로 둔다 — 붓질은
+     "정확한 구역 표시가 안 된다" 는 지적이 있었다. */
+  const [zoneTool, setZoneTool] = useState<'rect' | 'circle' | 'brush'>('rect');
   const [zoneRadius, setZoneRadius] = useState(0.12);   // 부품 크기 대비
   const [measure, setMeasure] = useState<
     { from: [number, number, number]; to?: [number, number, number] } | null>(null);
@@ -362,6 +380,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   zoningRef.current = zoning;
   const zoneRadiusRef = useRef(zoneRadius);
   zoneRadiusRef.current = zoneRadius;
+  const zoneToolRef = useRef(zoneTool);
+  zoneToolRef.current = zoneTool;
   const notingRef = useRef(noting);
   notingRef.current = noting;
   /* 구역 목록을 ref 로도 들고 있는다. 클릭 핸들러는 WebGL 이펙트 안에
@@ -380,6 +400,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     frame: (direction: THREE.Vector3) => void;
     snapshot: () => string;
     centre: THREE.Vector3; radius: number;
+    /* 단면 슬라이더가 쓸 실제 Z 범위. 구 반지름으로 갈음하면
+       원점이 부품 밖에 있는 CAD 에서 최대로 밀어도 잘린다. */
+    zMin: number; zMax: number;
   } | null>(null);
   const edgeLines = useRef<THREE.LineSegments | null>(null);
   const solidMesh = useRef<THREE.Mesh | null>(null);
@@ -1025,6 +1048,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       camera.position.copy(target).add(
         new THREE.Vector3().setFromSpherical(spherical));
       camera.lookAt(target);
+
+      // 근평면을 **지금 거리에 맞춰** 다시 잡는다.
+      //
+      // 예전에는 radius*0.01 로 못 박아 뒀는데, 확대 하한이 radius*0.05
+      // 라 카메라가 부품 안까지 들어간다. 그러면 근평면이 표면을 베어
+      // 형상이 뭉텅뭉텅 사라진다 — "한번씩 짤려서 보이는" 게 이것이다.
+      // 멀리 있을 때는 근평면을 밀어야 깊이 정밀도도 산다.
+      const away = camera.position.distanceTo(centre);
+      camera.near = Math.max(radius * 0.001, (away - radius) * 0.5);
+      camera.far = away + radius * 4;
+      camera.updateProjectionMatrix();
     };
     applyCamera();
 
@@ -1202,17 +1236,112 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         id, stamps: [{ at, radius: brush }], die: '하형', work: '용접',
       }]);
     };
+    // ── 네모·동그라미 구역 ───────────────────────────────────
+    // 시트가 영역을 네모/동그라미로 표기하므로 같은 방법을 준다.
+    // 끌기 시작점과 끝점을 **그때의 화면 가로·세로 방향**으로 재서
+    // 부품 좌표에 박아 둔다. 그래야 돌려봐도 같은 자리를 덮는다.
+    const preview = new THREE.Line(
+      new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({ color: 0xff5fa8, depthTest: false }));
+    preview.visible = false;
+    preview.renderOrder = 20;
+    scene.add(preview);
+
+    let dragFrom: THREE.Vector3 | null = null;
+    let dragU = new THREE.Vector3();
+    let dragV = new THREE.Vector3();
+
+    const surfaceHit = (event: PointerEvent) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      raycaster.setFromCamera(new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        -((event.clientY - rect.top) / rect.height) * 2 + 1), camera);
+      return raycaster.intersectObject(surface, false)[0]?.point ?? null;
+    };
+
+    /** 두 점으로 만든 네모/동그라미의 테두리 점들. */
+    const outline = (kind: 'rect' | 'circle', middle: THREE.Vector3,
+                     u: THREE.Vector3, v: THREE.Vector3,
+                     hu: number, hv: number) => {
+      const at = (du: number, dv: number) => middle.clone()
+        .add(u.clone().multiplyScalar(du)).add(v.clone().multiplyScalar(dv));
+      if (kind === 'rect') {
+        return [at(-hu, -hv), at(hu, -hv), at(hu, hv), at(-hu, hv), at(-hu, -hv)];
+      }
+      const ring: THREE.Vector3[] = [];
+      for (let i = 0; i <= 48; i += 1) {
+        const t = (i / 48) * Math.PI * 2;
+        ring.push(at(Math.cos(t) * hu, Math.sin(t) * hv));
+      }
+      return ring;
+    };
+
     const onPaintDown = (event: PointerEvent) => {
       if (!zoningRef.current || event.button !== 0) return;
       event.preventDefault();
-      painting = activeZoneRef.current;
-      stampAt(event);
+      if (zoneToolRef.current === 'brush') {
+        painting = activeZoneRef.current;
+        stampAt(event);
+        return;
+      }
+      const spot = surfaceHit(event);
+      if (!spot) return;
+      dragFrom = spot;
+      // 끌기 시작 순간의 화면 가로·세로 축을 그대로 쓴다
+      dragU.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+      dragV.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
     };
+
     const onPaintMove = (event: PointerEvent) => {
-      if (!zoningRef.current || !painting || (event.buttons & 1) === 0) return;
-      stampAt(event);
+      if (!zoningRef.current || (event.buttons & 1) === 0) return;
+      if (zoneToolRef.current === 'brush') {
+        if (painting) stampAt(event);
+        return;
+      }
+      if (!dragFrom) return;
+      const spot = surfaceHit(event);
+      if (!spot) return;
+      const gap = spot.clone().sub(dragFrom);
+      const hu = Math.abs(gap.dot(dragU)) / 2;
+      const hv = Math.abs(gap.dot(dragV)) / 2;
+      const middle = dragFrom.clone()
+        .add(dragU.clone().multiplyScalar(gap.dot(dragU) / 2))
+        .add(dragV.clone().multiplyScalar(gap.dot(dragV) / 2));
+      preview.geometry.dispose();
+      preview.geometry = new THREE.BufferGeometry().setFromPoints(
+        outline(zoneToolRef.current, middle, dragU, dragV, hu, hv));
+      preview.visible = true;
     };
-    const onPaintUp = () => { painting = null; };
+
+    const onPaintUp = (event: PointerEvent) => {
+      painting = null;
+      if (!dragFrom || zoneToolRef.current === 'brush') { dragFrom = null; return; }
+      preview.visible = false;
+      const spot = surfaceHit(event);
+      const start = dragFrom;
+      dragFrom = null;
+      if (!spot) return;
+      const gap = spot.clone().sub(start);
+      const hu = Math.abs(gap.dot(dragU)) / 2;
+      const hv = Math.abs(gap.dot(dragV)) / 2;
+      // 손이 떨려 생기는 점만 한 구역은 버린다
+      if (hu < radius * 0.004 || hv < radius * 0.004) return;
+      const middle = start.clone()
+        .add(dragU.clone().multiplyScalar(gap.dot(dragU) / 2))
+        .add(dragV.clone().multiplyScalar(gap.dot(dragV) / 2));
+      const triple = (v: THREE.Vector3): [number, number, number] =>
+        [v.x, v.y, v.z];
+      const current = regionsRef.current ?? [];
+      const id = `Z-${Date.now().toString(36)}`;
+      setActiveZone(id);
+      onRegionsChange?.([...current, {
+        id, die: '하형', work: '용접',
+        shape: {
+          kind: zoneToolRef.current, center: triple(middle),
+          u: triple(dragU), v: triple(dragV), hu, hv,
+        },
+      }]);
+    };
 
     renderer.domElement.addEventListener('pointerdown', onPaintDown);
     renderer.domElement.addEventListener('pointermove', onPaintMove);
@@ -1232,7 +1361,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.render(scene, camera);
       return renderer.domElement.toDataURL('image/png');
     };
-    viewApi.current = { frame, snapshot, centre: centre.clone(), radius };
+    viewApi.current = { frame, snapshot, centre: centre.clone(), radius,
+                        zMin: box.min.z, zMax: box.max.z };
+    setDepth({ min: box.min.z, max: box.max.z });
 
     // ── 루프 ─────────────────────────────────────────────────
     let loop = 0;
@@ -1299,8 +1430,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const surface = surfaceRef.current;
     if (!plane || !surface) return;
     const material = surface.material as THREE.MeshStandardMaterial;
-    material.clippingPlanes = clip ? [plane] : [];
-    plane.constant = clip;
+    material.clippingPlanes = clip === null ? [] : [plane];
+    plane.constant = clip ?? 0;
     material.needsUpdate = true;
   }, [clip]);
 
@@ -1317,34 +1448,58 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     if (!position || !index) return;
 
     (regions ?? []).forEach((region, order) => {
+      // 구역은 두 가지다 — 시트처럼 네모/동그라미로 한 번에 잡은 것과,
+      // 붓으로 칠한 자국들. 둘 다 "이 점이 구역 안인가" 하나로 줄인다.
       const stamps = stampsOf(region);
-      if (!stamps.length) return;
-      const centres = stamps.map((s) => new THREE.Vector3(...s.at));
-      const limits = stamps.map((s) => s.radius * s.radius);
+      const shape = region.shape;
+      if (!shape && !stamps.length) return;
 
-      // 자국 전체를 감싸는 공. 이 밖의 삼각형은 자국을 하나씩 재볼
-      // 것도 없이 건너뛴다 — 삼각형이 11만 개라 이게 없으면 느리다.
       const hull = new THREE.Vector3();
-      for (const c of centres) hull.add(c);
-      hull.divideScalar(centres.length);
       let reach = 0;
-      for (let k = 0; k < centres.length; k += 1) {
-        reach = Math.max(reach, hull.distanceTo(centres[k]) + stamps[k].radius);
-      }
-      const reachSq = reach * reach;
+      let inside: (p: THREE.Vector3) => boolean;
 
+      if (shape) {
+        const u = new THREE.Vector3(...shape.u);
+        const v = new THREE.Vector3(...shape.v);
+        const middle = new THREE.Vector3(...shape.center);
+        // 판금은 앞뒤 껍질이 겹쳐 있다. 두께 방향으로 막지 않으면
+        // 뒷면까지 같이 칠해진다 — 구역 크기의 1/4 만 본다.
+        const deep = Math.max(shape.hu, shape.hv) * 0.25;
+        const normal = new THREE.Vector3().crossVectors(u, v).normalize();
+        hull.copy(middle);
+        reach = Math.hypot(shape.hu, shape.hv);
+        inside = (p) => {
+          const d = p.clone().sub(middle);
+          if (Math.abs(d.dot(normal)) > deep) return false;
+          const du = d.dot(u), dv = d.dot(v);
+          if (shape.kind === 'rect') {
+            return Math.abs(du) <= shape.hu && Math.abs(dv) <= shape.hv;
+          }
+          const nu = du / (shape.hu || 1), nv = dv / (shape.hv || 1);
+          return nu * nu + nv * nv <= 1;
+        };
+      } else {
+        const centres = stamps.map((s) => new THREE.Vector3(...s.at));
+        const limits = stamps.map((s) => s.radius * s.radius);
+        for (const c of centres) hull.add(c);
+        hull.divideScalar(centres.length);
+        for (let k = 0; k < centres.length; k += 1) {
+          reach = Math.max(reach, hull.distanceTo(centres[k]) + stamps[k].radius);
+        }
+        inside = (p) => centres.some(
+          (c, k) => p.distanceToSquared(c) <= limits[k]);
+      }
+
+      // 구역을 감싸는 공. 이 밖의 삼각형은 하나씩 재볼 것도 없이
+      // 건너뛴다 — 삼각형이 11만 개라 이게 없으면 느리다.
+      const reachSq = reach * reach;
       const keep: number[] = [];
       const a = new THREE.Vector3();
       for (let i = 0; i < index.count; i += 3) {
         const i0 = index.getX(i);
         a.set(position.getX(i0), position.getY(i0), position.getZ(i0));
         if (a.distanceToSquared(hull) > reachSq) continue;
-        for (let k = 0; k < centres.length; k += 1) {
-          if (a.distanceToSquared(centres[k]) <= limits[k]) {
-            keep.push(i0, index.getX(i + 1), index.getX(i + 2));
-            break;
-          }
-        }
+        if (inside(a)) keep.push(i0, index.getX(i + 1), index.getX(i + 2));
       }
       if (keep.length) {
         const patch = geometry.clone();
@@ -1490,15 +1645,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     )}
     <div className="cad-viewer__section">
       <label htmlFor="cad-clip">단면</label>
-      <input id="cad-clip" type="range" min={-1} max={1} step={0.01}
-        value={clipRatio}
-        onChange={(event) => {
-          const ratio = Number(event.target.value);
-          setClipRatio(ratio);
-          const span = viewApi.current?.radius ?? 100;
-          setClip(ratio === 0 ? 0 : ratio * span);
-        }} />
-      <span>{clip ? `${clip.toFixed(0)} mm` : '끔'}</span>
+      <input id="cad-clip" type="range" min={0} max={100} step={0.5}
+        value={clipPct}
+        onChange={(event) => setClipPct(Number(event.target.value))} />
+      <span>{clip === null ? '끔' : `${clip.toFixed(0)} mm`}</span>
+      {clipPct < 100 && (
+        <button type="button" onClick={() => setClipPct(100)}>끄기</button>
+      )}
     </div>
 
     <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
@@ -1570,7 +1723,16 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
             setThreshold(low);
             if (low > ceiling) setCeiling(low);
           }} />
-        <b>{threshold.toFixed(1)}</b>
+        {/* 슬라이더만 있으면 0.35 같은 값을 정확히 못 맞춘다.
+            숫자로도 넣을 수 있게 둘을 같은 값에 묶는다. */}
+        <input className="cad-viewer__num" type="number" min={0} step={0.1}
+          aria-label="보정량 하한" value={threshold}
+          onChange={(event) => {
+            const low = Number(event.target.value);
+            if (!Number.isFinite(low)) return;
+            setThreshold(low);
+            if (low > ceiling) setCeiling(low);
+          }} />
         <label htmlFor="cad-ceiling">~</label>
         <input id="cad-ceiling" type="range" min={0} max={9} step={0.1}
           value={ceiling}
@@ -1579,7 +1741,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
             setCeiling(high);
             if (high < threshold) setThreshold(high);
           }} />
-        <b>{ceiling.toFixed(1)}mm</b>
+        <input className="cad-viewer__num" type="number" min={0} step={0.1}
+          aria-label="보정량 상한" value={ceiling}
+          onChange={(event) => {
+            const high = Number(event.target.value);
+            if (!Number.isFinite(high)) return;
+            setCeiling(high);
+            if (high < threshold) setThreshold(high);
+          }} />
+        <b>mm</b>
         {sheetCount > overlayPoints && (
           <em>{sheetCount - overlayPoints}개 숨김</em>
         )}
@@ -1604,7 +1774,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        {zoning ? '형상 위를 눌러 공정 구역을 칠합니다'
+        {zoning ? (zoneTool === 'brush'
+          ? '형상 위를 눌러 공정 구역을 칠합니다'
+          : '형상 위에서 끌어 공정 구역을 잡습니다')
           : noting ? '형상 위를 눌러 메모를 답니다'
           : measuring ? '형상 위 두 곳을 눌러 거리를 잽니다'
           : '가운데 이동 · 가운데+오른쪽 회전 · Ctrl+가운데 확대 · 왼쪽 선택 · 콜아웃 눌러 수정'}
@@ -1636,10 +1808,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     {zoning && (
       <div className="cad-viewer__zones">
         <div className="cad-viewer__zones-size">
-          <label htmlFor="cad-zone-size">구역 크기</label>
-          <input id="cad-zone-size" type="range" min={0.04} max={0.4} step={0.01}
-            value={zoneRadius}
-            onChange={(event) => setZoneRadius(Number(event.target.value))} />
+          <span className="cad-viewer__zone-tools" role="group" aria-label="구역 도구">
+            {([['rect', '네모'], ['circle', '동그라미'], ['brush', '붓']] as const)
+              .map(([kind, name]) => (
+                <button key={kind} type="button"
+                  className={zoneTool === kind ? 'is-on' : ''}
+                  onClick={() => setZoneTool(kind)}>{name}</button>
+              ))}
+          </span>
+          {zoneTool === 'brush' ? <>
+            <label htmlFor="cad-zone-size">붓 크기</label>
+            <input id="cad-zone-size" type="range" min={0.04} max={0.4} step={0.01}
+              value={zoneRadius}
+              onChange={(event) => setZoneRadius(Number(event.target.value))} />
+          </> : <em>형상 위에서 끌면 그만큼이 구역이 됩니다</em>}
         </div>
         {(regions ?? []).map((region, order) => (
           <div key={region.id}
@@ -1746,9 +1928,19 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     {overlay && !overlay.fit.reliable && (
       <p className="cad-viewer__warn">
         스캔 위의 점 중 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}% 만
-        형상에 얹혔습니다 (기준 60%). 제로라인·보정량·편차색을 그리지
+        형상에 얹혔습니다 (기준 60%). 제로라인·보정량을 그리지
         않았습니다 — 틀린 자리에 그리는 것보다 안 그리는 쪽을 택했습니다.
-        이 부품은 "시트 단면 표기" 로 제로라인을 계산해 주세요.
+        {/* 단면 표기는 스캔 정합을 고치는 방법이 아니다. 스캔을 아예
+            쓰지 않고 CAD 를 시트가 적어 준 숫자로 잘라 제로라인을
+            얻는, **따로 가는 길**이다. 그래서 얹힘 비율과 무관하게
+            정확하다 — 여기서 그 점을 분명히 말해 둔다. */}
+        {sections?.length
+          ? <> 아래 <b>시트 단면 표기</b>로 그린 제로라인
+              {' '}{sections.length}개는 스캔 정합과 무관하게 맞습니다 —
+              시트가 적어 준 값으로 CAD 를 직접 자른 것이라 추정이 없습니다.</>
+          : <> 이 부품은 <b>시트 단면 표기</b>(H·T 값)로 제로라인을 계산하세요.
+              스캔을 쓰지 않고 CAD 를 그 값으로 직접 자르는 별개의 방법이라,
+              얹힘 비율이 낮아도 결과는 정확합니다.</>}
       </p>
     )}
   </>;
