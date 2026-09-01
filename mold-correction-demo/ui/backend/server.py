@@ -47,6 +47,7 @@ from vlm_reader import LabelValueReader  # noqa: E402
 from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
+from zero_line_detection import zero_shapes  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
@@ -798,6 +799,11 @@ def analyze_image(image: np.ndarray, filename: str,
         except Exception as exc:
             errors["labZero"] = str(exc)
 
+    # 받은 제로 영역을 네모 몇 개로 바꾼다(zero_shapes 참고). 여기서 한
+    # 번만 해 두면 시트와 3D 가 같은 도형을 본다 — 서로 다르게 보이던
+    # 것이 이 때문이었다.
+    lab_areas = zero_shapes.clean(lab_zero.get("areas") or [])
+
     # 보정시트에 실제로 적을 포인트를 고른다. 스캔에는 수십~백여 개가
     # 찍히지만 현업 시트에 적히는 건 열몇 개다(향후 계획 02번).
     key_points: list = []
@@ -823,8 +829,10 @@ def analyze_image(image: np.ndarray, filename: str,
             # 현업 파이프라인 결과가 있으면 3D 에는 이걸 쓴다
             "lab_zero_lines": lab_zero.get("lines") or [],
             # 67XX6 처럼 7단계(가지 확장)가 있는 부품은 제로라인이
-            # 선이 아니라 **영역**으로 나온다.
-            "lab_zero_areas": lab_zero.get("areas") or [],
+            # 선이 아니라 **영역**으로 나온다. 받은 그대로는 링을 따라
+            # 구불구불한 띠라서 시트에도 3D 에도 못 쓴다 — 여기서 한 번만
+            # 네모로 바꿔 두고 시트와 3D 가 **같은 것**을 쓴다.
+            "lab_zero_areas": lab_areas,
             "deviation_points": points,
             "part_no": part_key,
             # 시트에 등록된 제로 표기. 67XX6 은 선이 아니라 **영역**이라
@@ -837,7 +845,7 @@ def analyze_image(image: np.ndarray, filename: str,
         "partNo": part_key,
         "naming": naming.to_dict(),
         "labZeroLines": lab_zero.get("lines") or [],
-        "labZeroAreas": lab_zero.get("areas") or [],
+        "labZeroAreas": lab_areas,
         "labZeroRegions": lab_zero.get("regions") or [],
         "timings": spent,
         "keyPoints": [k.to_dict() for k in key_points],
@@ -1086,11 +1094,8 @@ def scan_part_for_cad(cad_name: str) -> str | None:
     return None
 
 
-# 제로 영역을 네모로 갈음할 기준. 네모 넓이의 이만큼은 실제로 차 있어야
-# 한다 — 그보다 성기면 네모가 빈 데를 덮는다.
-AREA_BOX_FILL = 0.55
-# 네모로 못 쓸 때 윤곽을 얼마나 단순화할지 (둘레 대비).
-AREA_SIMPLIFY = 0.012
+# 자세 후보를 몇 개까지 광선으로 검증할지. 하나에 1초 안쪽이다.
+OVERLAY_TRIES = 6
 
 
 def cad_overlay_for(cad_id: str, analysis_id: str,
@@ -1120,14 +1125,38 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     faces = np.asarray(mesh.faces)
 
     import trimesh
-    shifted = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
-    fit = ov.fit_view(vertices, faces, analysis["part_mask"])
-    # 겹침 넓이가 아니라 **점이 형상에 얹히는 비율**로 판정한다.
-    # 껍질 겹침은 후하고(64XX2 96.9%) 실루엣은 박하다(42.2%) — 둘 다
-    # 오버레이가 쓸 만한지를 못 가린다. overlay.MIN_HIT_RATE 참고.
-    fit.hit_rate = round(ov.measure_hit_rate(
-        fit, vertices, faces, analysis["part_mask"], shifted), 4)
+    # LH·RH 가 한 파일에 들어 있으면 갈라서 **각각** 맞춰 보고 잘 맞는
+    # 쪽을 쓴다. 스캔은 한 짝뿐이라 두 짝을 합친 실루엣과는 맞지 않는다
+    # (실측 71XX1: 통째로 30% -> 한 짝만 쓰면 아래 hit_rate 참고).
+    best = None
+    for half in ov.split_sides(vertices, faces):
+        half_vertices, half_faces, cut_axis, cut_mid, cut_side = half
+        piece = trimesh.Trimesh(vertices=half_vertices, faces=half_faces,
+                                process=False)
+        # 겹침 넓이가 아니라 **점이 형상에 얹히는 비율**로 판정한다.
+        # 껍질 겹침은 후하고(64XX2 96.9%) 실루엣은 박하다(42.2%) — 둘 다
+        # 오버레이가 쓸 만한지를 못 가린다. overlay.MIN_HIT_RATE 참고.
+        #
+        # 그래서 자세 후보를 몇 개 받아 **광선을 쏴서** 고른다. 겹침으로
+        # 하나만 받으면 얹힘이 더 좋은 자세를 놓칠 수 있다.
+        seen: set = set()
+        for guess in ov.fit_view(half_vertices, half_faces,
+                                 analysis["part_mask"], top_k=OVERLAY_TRIES):
+            key = (guess.axis, guess.sign, guess.flip_u, guess.flip_v,
+                   round(guess.angle, 3), round(guess.mm_per_px, 4),
+                   round(guess.origin_u, 1), round(guess.origin_v, 1))
+            if key in seen:
+                continue          # 같은 자세가 여러 번 올라온다
+            seen.add(key)
+            guess.hit_rate = round(ov.measure_hit_rate(
+                guess, half_vertices, half_faces,
+                analysis["part_mask"], piece), 4)
+            if best is None or guess.hit_rate > best[0].hit_rate:
+                best = (guess, half_vertices, half_faces, piece,
+                        cut_axis, cut_mid, cut_side)
+
+    fit, vertices, faces, shifted, cut_axis, cut_mid, cut_side = best
     fit.reliable = fit.hit_rate >= ov.MIN_HIT_RATE
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
@@ -1256,7 +1285,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     # 경계가 반듯해야 어디까지가 그 영역인지 읽힌다.
     area_contours = list(analysis.get("lab_zero_areas") or [])
     if not area_contours:
-        area_contours = list(reference.get("contours") or [])
+        # 시트에 등록해 둔 정답 영역도 같은 규칙으로 도형으로 만든다
+        area_contours = zero_shapes.clean(reference.get("contours") or [])
 
     # 제로 영역의 **테두리**를 따로 만들어 준다.
     #
@@ -1270,29 +1300,9 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         if len(pts) < 3:
             continue
 
-        # 네모로 감쌀지, 윤곽을 다듬어 쓸지.
-        #
-        # 시트는 영역을 네모로 표기하므로 네모가 기본이다. 그런데 가지가
-        # ㄱ 자로 꺾인 영역을 네모로 감싸면 빈 데까지 덮는다 — 실측
-        # 67XX6 의 7개 중 하나가 625x274 네모에 **채움 18%** 였다. 그
-        # 네모를 칠하면 제로 영역이 아닌 자리가 10% 나 칠해진다.
-        # 그래서 네모에 실하게 들어찬 것만 네모로 하고, 나머지는 윤곽을
-        # 단순화해 각진 다각형으로 만든다. 어느 쪽이든 픽셀 들쭉날쭉은
-        # 없어진다 — 꼭짓점이 4~23 개다.
-        #
-        # 실측 67XX6 7개 영역이 덮는 넓이: 전부 네모로 하면 그림의
-        # 17.5%, 이 규칙이면 5.5% 다. 3배를 잘못 칠하고 있었다.
-        (_mid, (box_w, box_h), _angle) = cv2.minAreaRect(pts)
-        box_area = float(box_w) * float(box_h)
-        fill = (cv2.contourArea(pts) / box_area) if box_area > 0 else 0.0
-        if fill >= AREA_BOX_FILL:
-            shape = np.rint(cv2.boxPoints(cv2.minAreaRect(pts))).astype(np.int32)
-        else:
-            slack = AREA_SIMPLIFY * cv2.arcLength(pts, True)
-            shape = cv2.approxPolyDP(pts, slack, True).reshape(-1, 2)
-        if len(shape) < 3:
-            continue
-
+        # 분석 때 이미 네모로 바꿔 두었다(zero_shapes). 여기서 또
+        # 손대면 시트에 그린 것과 3D 에 그린 것이 달라진다.
+        shape = pts
         cv2.fillPoly(stencil, [shape], 2)
         ring = [[float(x), float(y)] for x, y in shape]
         ring.append(ring[0])          # 닫는다
@@ -1305,10 +1315,25 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     # "물감 칠한 느낌" 이 났다. 선은 선으로 그리는 게 맞고, 곡면을
     # 따라가게 하려면 촘촘히 쏴서 표면에 얹으면 된다(_densify).
 
+    # 화면용 메시에서 **고른 쪽**만 남기는 가리개.
+    #
+    # LH·RH 가 한 파일이면 한 짝에 맞춘 자세로 색을 칠하게 되는데,
+    # 그대로 두면 반대쪽 살에도 색이 묻는다. 자세를 잡을 때 쓴 것과
+    # 같은 평면으로 가른다.
+    def _own_side(points: np.ndarray) -> np.ndarray:
+        if cut_axis < 0:
+            return np.ones(len(points), dtype=bool)
+        left = points[:, cut_axis] < cut_mid
+        return left if cut_side < 0 else ~left
+
     zero_surface: list = []
     if display is not None and stencil.any():
-        zero_surface = ov.sample_flags(
-            np.asarray(display, dtype=float), fit, stencil)
+        spots = np.asarray(display, dtype=float)
+        zero_surface = ov.sample_flags(spots, fit, stencil)
+        mine = _own_side(spots)
+        if not mine.all():
+            zero_surface = [v if mine[i] else 0
+                            for i, v in enumerate(zero_surface)]
 
     # 영역 테두리를 표면 위로 옮긴다 — 제로라인과 같은 방식이다.
     zero_areas: list = []
@@ -1334,9 +1359,13 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     # 표면에 입힐 편차 — 화면용 정점 하나하나에 스캔 값을 찍는다.
     surface = []
     if display is not None:
+        spots = np.asarray(display, dtype=float)
         surface = ov.sample_deviation(
-            np.asarray(display, dtype=float), fit,
-            analysis["values"], analysis["part_mask"])
+            spots, fit, analysis["values"], analysis["part_mask"])
+        mine = _own_side(spots)
+        if not mine.all():
+            surface = [v if mine[i] else None
+                       for i, v in enumerate(surface)]
 
     return {"fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,

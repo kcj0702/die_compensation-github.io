@@ -53,6 +53,9 @@ type AnalysisResult = {
   /* 현업 파이프라인(lab_pipeline)이 만든 제로라인. 허용범위 밖 영역을
      윤곽 위 제로포인트 둘로 닫은 선이라 근거가 가장 분명하다. */
   labZeroLines?: [number, number][][];
+  /* 제로 **영역**(67XX6). 서버가 이미 네모로 다듬어 보낸다 —
+     시트와 3D 가 같은 도형을 그리려고 한 군데서 만든다. */
+  labZeroAreas?: [number, number][][];
   labZeroRegions?: { label: string; area: number; status: string;
                      zeroPoints: string[]; attempts: number; coverage: number }[];
   keyPointsRejected?: { id: string; value: number }[];
@@ -893,6 +896,25 @@ function applyZeroEdits(lines: SimpleZeroLine[], edits: ZeroEdit[]) {
   return out;
 }
 
+/** 제로 영역을 시트에 그린다 — 3D 가 표면에 얹는 것과 같은 네모다. */
+function ZeroAreaOverlay({ areas, width, height }:
+  { areas: [number, number][][]; width: number; height: number }) {
+  if (!areas.length) return null;
+  const strokeWidth = Math.max(width, height) * 0.0026;
+  return <svg className="simple-zero-line-overlay" viewBox={`0 0 ${width} ${height}`}
+    preserveAspectRatio="none" aria-hidden="true">
+    {areas.map((box, index) => {
+      const points = box.map(([x, y]) => `${x},${y}`).join(' ');
+      return <g key={index}>
+        <polygon points={points} fill="#ff5a1f" fillOpacity={0.16}
+          stroke="#ffffff" strokeWidth={strokeWidth * 2.4} strokeLinejoin="round" />
+        <polygon points={points} fill="none" stroke="#ff5a1f"
+          strokeWidth={strokeWidth} strokeLinejoin="round" />
+      </g>;
+    })}
+  </svg>;
+}
+
 function SimpleZeroLineOverlay({ lines, width, height }: { lines: SimpleZeroLine[]; width: number; height: number }) {
   // 현업 zero_line_drawing 방식 — 주요 0포인트를 직선으로 잇는다.
   // "정답지처럼 깔끔한 직선" 요구에 맞춰 곡선을 쓰지 않으므로 꼭짓점은
@@ -1035,6 +1057,9 @@ function SheetCanvas({ scan, imageUrl, points, coefficient, showPoints, showZero
                 않아서 눌러도 아무 일이 없었다. 엔진 결과 화면에서 쓰던
                 것과 같은 겹침층을 여기에도 올린다. */}
             {showZero && (scan.result?.simpleZeroLines?.length ?? 0) > 0 &&
+              <ZeroAreaOverlay areas={scan.result!.labZeroAreas ?? []}
+                width={scan.result!.source.width} height={scan.result!.source.height} />}
+            {showZero && layout.kind === 'front' &&
               <SimpleZeroLineOverlay
                 lines={applyZeroEdits(zeroLinesToShow(scan.result!), zeroEdits)}
                 width={scan.result!.source.width} height={scan.result!.source.height} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
@@ -1667,10 +1692,17 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
      예전에는 드롭다운의 값만 바꿔 놓고 요청은 안 해서, 짝이 뻔한데도
      사람이 한 번 더 골라야 결과가 나왔다. */
   useEffect(() => {
-    if (overlayScanId || !suggested || !mesh) return;
+    if (!suggested || !mesh) return;
+    // 이미 **쓸 수 있는** 것이 걸려 있으면 그대로 둔다.
+    //
+    // 예전에는 `overlayScanId` 가 비었을 때만 자동으로 걸었다. 그런데
+    // 저장해 둔 작업을 불러오면 그때의 스캔 아이디가 남아 있고, 그
+    // 스캔이 지금 목록에 없으면 아무것도 안 걸린 채로 막힌다 —
+    // 자동 정합도 안 되고 화면에는 아무것도 안 뜬다.
+    if (analysed.some((scan) => scan.id === overlayScanId)) return;
     requestOverlay(suggested.id, mesh.cadId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [suggested, overlayScanId, mesh]);
+  }, [suggested, overlayScanId, mesh, analysed]);
 
   /* 시트에서 제로라인을 고쳐 [3D 에 적용] 을 누르면 다시 얹는다.
      3D 의 제로라인은 시트가 정하는 것이므로 시트를 따라가야 한다. */

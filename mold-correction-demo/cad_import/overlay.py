@@ -186,8 +186,81 @@ def _mask_to_grid(mask: np.ndarray, grid: int) -> tuple:
     return canvas, (x0, y0, x1, y1)
 
 
-def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask) -> ViewFit:
-    """CAD 실루엣을 스캔 마스크에 맞춰 어느 방향에서 본 그림인지 찾는다."""
+# 자세를 찾을 때 쓸 삼각형 수 상한. 격자가 FIT_GRID 라 이보다 촘촘해도
+# 실루엣이 달라지지 않는다.
+FIT_MAX_FACES = 12_000
+
+# 주축으로 잡은 각도 둘레를 이만큼 더 훑는다(도).
+#
+# [왜 필요한가 — 실측 71XX2]
+# 주축 각도만 믿고 한 번에 돌렸더니 CAD 실루엣이 스캔 위에 **15~20도
+# 비스듬히** 얹혔다. 모양은 같은데 각도가 어긋나 겹침이 0.28 에서
+# 막혔고, 그래서 "이 부품은 스캔으로 못 맞춘다" 로 보였다. 주축은
+# 끝이 벌어진 부품에서 쉽게 흔들린다 — 둘레를 훑어야 한다.
+FIT_ANGLE_SPAN = 30.0
+FIT_ANGLE_STEP = 2.5
+# 각도를 훑어 볼 후보 수(1차로 추린 것 중 위에서부터).
+FIT_REFINE_TOP = 4
+
+# 위치·배율 다듬기.
+#
+# [왜 필요한가]
+# 자리와 배율을 **바운딩 상자끼리** 맞춰서 정한다. CAD 에만 있는 살
+# (스캔 각도에서는 안 보이는 플랜지)이 상자를 키우면 전체가 작아지고
+# 밀린다. 실측 71XX2 는 각도를 다 훑어도 겹침 0.59 에서 멈췄는데,
+# 그림을 보면 CAD 가 스캔 위에 대체로 얹혀 있으면서 왼쪽 위로 삐져
+# 나가 있다 — 상자에 끌려간 것이다.
+# 성기게 훑고 이긴 자리 둘레를 다시 촘촘히 훑는다. 한 번에 촘촘히
+# 훑으면(5x5x5 = 125칸) 자세 찾기가 60초가 된다.
+FIT_PLACE_SCALES = (0.88, 1.0, 1.12)
+FIT_PLACE_SHIFTS = (-0.06, 0.0, 0.06)
+FIT_PLACE_FINE = 0.5          # 2차에서 간격을 절반으로 좁힌다
+
+
+def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
+             top_k: int = 1):
+    """CAD 실루엣을 스캔 마스크에 맞춰 어느 방향에서 본 그림인지 찾는다.
+
+    Args:
+        top_k: 1 이면 제일 나은 것 하나(ViewFit). 2 이상이면 그만큼을
+            목록으로 준다.
+
+    [왜 여러 개를 주나]
+    여기서 쓰는 점수는 실루엣 겹침인데, 오버레이가 쓸 만한지를 가르는
+    건 **점이 형상에 얹히는 비율**이다. 둘이 어긋날까 봐 후보를 남겨
+    두고 부르는 쪽이 광선을 쏴서 다시 고를 수 있게 했다.
+
+    다만 재보니 세 부품 모두 **겹침 1등이 곧 얹힘 1등**이었다. 그래서
+    지금은 다시 고를 필요가 없지만, 다른 부품에서 어긋날 수 있으니 길은
+    열어 둔다.
+
+    [자세를 어떻게 좁히나 — 세 단계]
+      1. 축 3 x 부호 2 x 뒤집기 4 = 24 가지를 주축 각도로 한 번씩
+      2. 위 몇 개만 각도 둘레를 훑는다 (FIT_ANGLE_SPAN)
+      3. 이긴 것의 자리와 배율을 다듬는다 (FIT_PLACE_*)
+
+    단계마다 얹힘이 얼마나 오르는지 (실측) —
+
+        부품     1단계만   +각도 훑기   +자리 다듬기   +LH/RH 가르기
+        64XX2     99.7%      99.7%        99.7%          99.7%
+        67XX6     73.3%      73.3%        91.7%          91.7%
+        71XX2     31.3%      55.0%        61.0%          67.7%
+
+    71XX2 가 오래 30% 대에 묶여 있었는데, 그게 "이 부품은 스캔으로 못
+    맞춘다" 로 보였던 이유다. 실제로는 각도 · 자리 · 좌우 세 가지가
+    한꺼번에 어긋나 있었다.
+    """
+    # 자세를 찾는 데는 **실루엣**만 있으면 된다. 격자가 FIT_GRID 라
+    # 삼각형을 다 그릴 필요가 없다.
+    #
+    # 실측: 64XX1 은 삼각형이 369,082 개라 후보마다 두 번씩 그리면
+    # 자세 찾기에만 150초가 걸렸다(71XX2 41초 · 67XX6 60초). 이게
+    # "3D 에 보정시트 얹는 게 느리다" 의 대부분이다.
+    faces = np.asarray(faces)
+    if len(faces) > FIT_MAX_FACES:
+        step = int(np.ceil(len(faces) / FIT_MAX_FACES))
+        faces = faces[::step]
+
     mask_grid, (mx0, my0, mx1, my1) = _mask_to_grid(part_mask, FIT_GRID)
     mask_bool = mask_grid > 0
     mask_solid = _hull(mask_grid) > 0
@@ -203,75 +276,161 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask) -> ViewFit:
     mys, mxs = np.nonzero(mask_solid)
     mask_angle = _principal_angle(mxs.astype(float), mys.astype(float))
 
-    best: ViewFit | None = None
-    best_key = (-1.0, -1.0)
+    mask_width = max(mx1 - mx0, my1 - my0) + 1
 
-    # swap = 화면에서 90도 돌려 보기.
-    #
-    # 이게 없어서 71XX2(센터 필러)가 25% 밖에 안 맞았다. 스캔은 필러를
-    # **눕혀서** 찍었는데(983 x 568) CAD 의 Y 투영은 **서 있다**(545 x 1230).
-    # 축 3개 x 부호 2 x 뒤집기 2 x 2 = 24가지를 다 봐도 가로세로를 맞바꾸는
-    # 경우가 없어서, 어떤 조합으로도 맞출 수가 없었다. 뒤집기는 거울일 뿐
-    # 회전이 아니다.
+    def evaluate(flat, turn, axis, sign, flip_u, flip_v):
+        """이 자세로 그려 보고 점수와 ViewFit 을 준다."""
+        projected = _rotate(flat, turn)
+        canvas, lo, _scale = _rasterize(projected, faces, FIT_GRID)
+        shape_solid = _hull(canvas) > 0
+        union = int((shape_solid | mask_solid).sum())
+        if union == 0:
+            return None
+        # 자리는 껍질로, 방향은 원본 겹침으로 가른다.
+        hull_iou = float((shape_solid & mask_solid).sum()) / union
+        shape_bool = canvas > 0
+        detail_union = int((shape_bool | mask_bool).sum())
+        detail_iou = (float((shape_bool & mask_bool).sum())
+                      / detail_union) if detail_union else 0.0
+        # 화면 픽셀 -> 부품 좌표. 마스크 바운딩 박스를 실루엣 바운딩
+        # 박스에 맞춘 것이므로 배율은 두 폭의 비다.
+        span = float(np.maximum(
+            projected.max(axis=0) - projected.min(axis=0), 1e-9).max())
+        return ((round(hull_iou, 3), detail_iou), ViewFit(
+            axis=axis, sign=sign, flip_u=flip_u, flip_v=flip_v,
+            swap=False, angle=float(turn),
+            mm_per_px=span / mask_width,
+            origin_u=float(lo[0] - mx0 * span / mask_width),
+            origin_v=float(lo[1] - my0 * span / mask_width),
+            iou=round(hull_iou, 4), detail_iou=round(detail_iou, 4),
+        ))
+
+    def place(projected, base_lo, base_scale, factor, dx, dy):
+        """배율과 자리를 조금 바꿔 그려 보고 (점수, 배율, 원점)을 준다."""
+        scale = base_scale * factor
+        shift = np.array([dx, dy], dtype=float) * FIT_GRID
+        pixels = (projected - base_lo) * scale + shift
+        canvas = np.zeros((FIT_GRID, FIT_GRID), np.uint8)
+        cv2.fillPoly(canvas, pixels[faces].astype(np.int32), 255)
+
+        shape_bool = canvas > 0
+        union = int((shape_bool | mask_bool).sum())
+        detail = (float((shape_bool & mask_bool).sum()) / union) if union else 0.0
+        # 자리를 고르는 점수는 **껍질 먼저, 세부 나중**이다. 1차와 같은
+        # 기준이어야 한다.
+        #
+        # 세부 겹침만으로 골라 봤더니 얇은 형상에서 무너졌다 — 합성
+        # 시험(막대 하나)에서 세부가 0.058 밖에 안 나오는데 그 0.058 을
+        # 좇느라 껍질이 0.85 -> 0.79 로 떨어졌다. 세부는 리브와 구멍이
+        # 많은 실제 부품에서나 의미가 있다.
+        solid = _hull(canvas) > 0
+        hull_union = int((solid | mask_solid).sum())
+        hull = ((float((solid & mask_solid).sum()) / hull_union)
+                if hull_union else 0.0)
+
+        # 격자 좌표 g = scale*(mm - base_lo) + shift 를 ViewFit 의
+        # mm_per_px·원점으로 되돌린다.
+        step = (FIT_GRID - 1)
+        mm_per_px = step / (scale * mask_width)
+        offset = shift - scale * base_lo
+        origin_u = -mm_per_px * mx0 - offset[0] / scale
+        origin_v = -mm_per_px * my0 - offset[1] / scale
+        return detail, hull, mm_per_px, origin_u, origin_v
+
+    # ── 1차: 24가지 조합을 주축 각도 하나로 훑는다 ───────────
+    combos: list = []
     for axis in (0, 1, 2):
-        # 가로세로 맞바꾸기(swap)를 따로 훑을 필요가 없다 — 주축 정렬이
-        # 90도 회전을 이미 포함한다. 필드는 예전 결과를 읽으려고 남겨 둔다.
         u_axis, v_axis = _plane_axes(axis)
-        if True:
-            swap = False
-            for sign in (1, -1):
-                for flip_u in (False, True):
-                    for flip_v in (False, True):
-                        u = vertices[:, u_axis] * (sign if not flip_u else -sign)
-                        v = vertices[:, v_axis] * (-1 if flip_v else 1)
-                        flat = np.stack([u, v], axis=1)
-                        # 각도는 **채워진 실루엣**에서 잰다. 정점 구름으로
-                        # 재면 작은 피처가 몰린 쪽으로 주축이 끌려가
-                        # 스캔 마스크(픽셀은 고르게 채워진다)와 기준이
-                        # 달라진다 — 그렇게 했다가 71XX2 가 30% 에
-                        # 머물렀다. 그래서 한 번 그려 각도를 얻고,
-                        # 돌린 뒤 다시 그린다.
-                        rough, _lo0, _s0 = _rasterize(flat, faces, FIT_GRID)
-                        rys, rxs = np.nonzero(_hull(rough) > 0)
-                        angle = 0.0
-                        if len(rxs):
-                            angle = mask_angle - _principal_angle(
-                                rxs.astype(float), rys.astype(float))
-                        projected = _rotate(flat, angle)
-                        canvas, lo, scale = _rasterize(projected, faces, FIT_GRID)
-                        shape_solid = _hull(canvas) > 0
-                        union = int((shape_solid | mask_solid).sum())
-                        if union == 0:
-                            continue
-                        # 자리는 껍질로, 방향은 원본 겹침으로 가른다.
-                        hull_iou = float((shape_solid & mask_solid).sum()) / union
-                        shape_bool = canvas > 0
-                        detail_union = int((shape_bool | mask_bool).sum())
-                        detail_iou = (float((shape_bool & mask_bool).sum())
-                                      / detail_union) if detail_union else 0.0
-                        key = (round(hull_iou, 3), detail_iou)
-                        if key <= best_key:
-                            continue
-                        best_key = key
+        for sign in (1, -1):
+            for flip_u in (False, True):
+                for flip_v in (False, True):
+                    u = vertices[:, u_axis] * (sign if not flip_u else -sign)
+                    v = vertices[:, v_axis] * (-1 if flip_v else 1)
+                    flat = np.stack([u, v], axis=1)
+                    # 각도는 **채워진 실루엣**에서 잰다. 정점 구름으로
+                    # 재면 작은 피처가 몰린 쪽으로 주축이 끌려가 스캔
+                    # 마스크(픽셀이 고르게 찬다)와 기준이 달라진다.
+                    rough, _lo, _s = _rasterize(flat, faces, FIT_GRID)
+                    rys, rxs = np.nonzero(_hull(rough) > 0)
+                    base = 0.0
+                    if len(rxs):
+                        base = mask_angle - _principal_angle(
+                            rxs.astype(float), rys.astype(float))
+                    got = evaluate(flat, base, axis, sign, flip_u, flip_v)
+                    if got is not None:
+                        combos.append((got[0], flat, base, axis, sign,
+                                       flip_u, flip_v, got[1]))
 
-                        # 화면 픽셀 -> 부품 좌표. 마스크 바운딩 박스를 실루엣
-                        # 바운딩 박스에 맞춘 것이므로 배율은 두 폭의 비다.
-                        mask_width = max(mx1 - mx0, my1 - my0) + 1
-                        span = float(np.maximum(
-                            projected.max(axis=0) - projected.min(axis=0), 1e-9).max())
-                        best = ViewFit(
-                            axis=axis, sign=sign, flip_u=flip_u, flip_v=flip_v,
-                            swap=swap, angle=float(angle),
-                            mm_per_px=span / mask_width,
-                            origin_u=float(lo[0] - mx0 * span / mask_width),
-                            origin_v=float(lo[1] - my0 * span / mask_width),
-                            iou=round(hull_iou, 4),
-                            detail_iou=round(detail_iou, 4),
-                        )
-    if best is None:
+    if not combos:
         raise ValueError("CAD 실루엣을 스캔에 맞추지 못했습니다.")
-    best.reliable = best.iou >= MIN_IOU
-    return best
+    combos.sort(key=lambda item: item[0], reverse=True)
+
+    # ── 2차: 위 몇 개만 각도 둘레를 훑는다 ───────────────────
+    found: list = [(item[0], item[7]) for item in combos]
+    steps = int(FIT_ANGLE_SPAN / FIT_ANGLE_STEP)
+    for _key, flat, base, axis, sign, flip_u, flip_v, _fit in             combos[:FIT_REFINE_TOP]:
+        for k in range(-steps, steps + 1):
+            if k == 0:
+                continue
+            got = evaluate(flat, base + np.deg2rad(FIT_ANGLE_STEP * k),
+                           axis, sign, flip_u, flip_v)
+            if got is not None:
+                found.append(got)
+
+    found.sort(key=lambda item: item[0], reverse=True)
+
+    # ── 3차: 위에서 몇 개의 자리와 배율을 다듬는다 ───────────
+    # 상자 맞춤이 만든 치우침을 여기서 걷어낸다. 점수는 **세부 겹침**으로
+    # 본다 — 껍질 겹침은 CAD 에만 있는 살에 끌려간다.
+    refined: list = []
+    for key, fit in found[:max(1, min(top_k, FIT_REFINE_TOP))]:
+        u_axis, v_axis = _plane_axes(fit.axis)
+        u = vertices[:, u_axis] * (fit.sign if not fit.flip_u else -fit.sign)
+        v = vertices[:, v_axis] * (-1 if fit.flip_v else 1)
+        projected = _rotate(np.stack([u, v], axis=1), fit.angle)
+        base_lo = projected.min(axis=0)
+        base_scale = (FIT_GRID - 1) / np.maximum(
+            projected.max(axis=0) - base_lo, 1e-9).max()
+        def scan_around(scales, shifts_x, shifts_y):
+            here = []
+            for factor in scales:
+                for dx in shifts_x:
+                    for dy in shifts_y:
+                        detail, hull, mm_per_px, origin_u, origin_v = place(
+                            projected, base_lo, base_scale, factor, dx, dy)
+                        moved = ViewFit(
+                            axis=fit.axis, sign=fit.sign, flip_u=fit.flip_u,
+                            flip_v=fit.flip_v, swap=False, angle=fit.angle,
+                            mm_per_px=float(mm_per_px),
+                            origin_u=float(origin_u), origin_v=float(origin_v),
+                            iou=round(hull, 4), detail_iou=round(detail, 4))
+                        # 1차와 같은 기준 — 껍질 먼저, 세부 나중.
+                        # 세부만으로 골라 봤더니 얇은 형상에서 무너졌다.
+                        here.append(((round(hull, 3), detail), moved,
+                                     factor, dx, dy))
+            here.sort(key=lambda item: item[0], reverse=True)
+            return here
+
+        coarse_best = scan_around(
+            FIT_PLACE_SCALES, FIT_PLACE_SHIFTS, FIT_PLACE_SHIFTS)
+
+        # 2차 — 이긴 자리 둘레를 절반 간격으로 다시 본다
+        _key, _moved, factor, dx, dy = coarse_best[0]
+        gap_s = (FIT_PLACE_SCALES[-1] - FIT_PLACE_SCALES[0]) / 2 * FIT_PLACE_FINE
+        gap_d = (FIT_PLACE_SHIFTS[-1] - FIT_PLACE_SHIFTS[0]) / 2 * FIT_PLACE_FINE
+        fine_best = scan_around(
+            (factor - gap_s, factor, factor + gap_s),
+            (dx - gap_d, dx, dx + gap_d),
+            (dy - gap_d, dy, dy + gap_d))
+
+        refined.extend((key, moved)
+                       for key, moved, *_rest in fine_best + coarse_best)
+
+    refined.sort(key=lambda item: item[0], reverse=True)
+    picked = [fit for _key, fit in (refined or found)[:max(1, top_k)]]
+    for fit in picked:
+        fit.reliable = fit.iou >= MIN_IOU
+    return picked[0] if top_k <= 1 else picked
 
 
 def measure_hit_rate(fit: ViewFit, vertices: np.ndarray, faces: np.ndarray,
@@ -410,6 +569,67 @@ def sample_deviation(vertices: np.ndarray, fit: ViewFit,
     return out
 
 
+
+# 한 파일에 두 짝이 들어 있는지 볼 때, 가운데 이만큼의 띠가 비어 있으면
+# 갈라진 것으로 본다(전체 폭 대비).
+SPLIT_BAND = 0.03
+# 두 짝의 크기가 이보다 많이 차이 나면 대칭 한 쌍이 아니다.
+SPLIT_BALANCE = 0.35
+
+
+def split_sides(vertices, faces):
+    """LH·RH 가 한 파일에 들어 있으면 갈라 준다.
+
+    [왜 필요한가 — 실측 71XX1-DR000_HDCT0458]
+    스캔은 LH **한 짝**인데 CAD 에는 LH 와 RH 가 같이 들어 있다. 두 짝을
+    합친 실루엣을 한 짝짜리 스캔에 맞출 수는 없다 — 얹힘이 30% 에서
+    막혔고, 그래서 제로라인·보정량을 아예 안 그렸다.
+
+    갈라진 것을 어떻게 아나. 이 파일은 Y 한가운데 3% 띠에 정점이
+    **0 개** 이고 좌우가 91,895 대 91,926 이다. 붙어 있는 부품이라면
+    가운데에 살이 있어야 한다. 실측 64XX1 은 그 띠에 6,240 개(2.1%),
+    67XX6 은 18,934 개(6.3%) 라 갈라지지 않는다 — 이 셋을 한 규칙으로
+    가릴 수 있다.
+
+    Returns:
+        [(정점, 면, 자르는 축, 가운데, 어느 쪽), ...].
+        갈라지지 않으면 원본 하나에 축이 -1 이다. 축·가운데·쪽을 같이
+        주는 이유는, 화면용으로 따로 솎아 낸 메시에도 **같은 기준**을
+        적용해야 하기 때문이다 — 안 그러면 고른 쪽에 맞춘 자세로 반대쪽
+        살까지 색을 칠한다.
+    """
+    points = np.asarray(vertices, dtype=float)
+    cells = np.asarray(faces)
+    if not len(points) or not len(cells):
+        return [(points, cells, -1, 0.0, 0)]
+
+    low, high = points.min(axis=0), points.max(axis=0)
+    for axis in (0, 1, 2):
+        span = float(high[axis] - low[axis])
+        if span <= 0:
+            continue
+        middle = (low[axis] + high[axis]) / 2.0
+        if np.any(np.abs(points[:, axis] - middle) < span * SPLIT_BAND):
+            continue      # 가운데에 살이 있다 — 한 덩어리다
+        left = points[:, axis] < middle
+        share = float(left.sum()) / len(points)
+        if not (SPLIT_BALANCE <= share <= 1.0 - SPLIT_BALANCE):
+            continue      # 한쪽이 부스러기다 — 두 짝이 아니다
+
+        halves = []
+        for side, keep in ((-1, left), (1, ~left)):
+            # 면은 세 꼭짓점이 모두 그 쪽일 때만 가져간다
+            wanted = keep[cells].all(axis=1)
+            if not wanted.any():
+                continue
+            index = np.full(len(points), -1, dtype=np.int64)
+            index[keep] = np.arange(int(keep.sum()))
+            halves.append((points[keep], index[cells[wanted]],
+                           axis, middle, side))
+        if len(halves) == 2:
+            return halves
+    return [(points, cells, -1, 0.0, 0)]
+
 __all__ = ["ViewFit", "MIN_IOU", "MIN_HIT_RATE",
-           "fit_view", "measure_hit_rate", "unproject",
+           "fit_view", "measure_hit_rate", "split_sides", "unproject",
            "sample_deviation", "sample_flags", "to_pixels"]
