@@ -116,8 +116,20 @@ export type CadRegion = {
     v: [number, number, number];
     hu: number; hv: number;
   };
+  /* **부품 좌표(mm)로 미리 등록해 둔 구역.**
+     
+     보정시트는 "① 하형 용접 · ② 상형 심고음" 처럼 구역을 고정된 자리에
+     표기한다. 같은 부품이면 그 자리가 매번 같으므로, 손으로 다시 그릴
+     것이 아니라 좌표로 한 번 등록해 두면 그 부품을 열 때마다 저절로
+     뜬다. 좌표는 CAD 원래 좌표계다(화면은 원점을 옮겨 놓으므로 그릴 때
+     되돌린다). */
+  box?: { min: [number, number, number]; max: [number, number, number] };
   die: '상형' | '하형';
   work: '용접' | '가공' | '심고음';
+  /* 시트의 "상형 인서트 스틸 이음매(도면 확인)" 같은 메모. */
+  note?: string;
+  /* 좌표로 등록해 둔 표준 구역에서 왔는가 — 손으로 그린 것과 구분한다. */
+  standard?: boolean;
   /* 예전 형식. 저장해 둔 작업을 계속 읽으려고 남겨 둔다. */
   at?: [number, number, number];
   radius?: number;
@@ -281,22 +293,33 @@ function makeZoneLabel(text: string, height: number): THREE.Sprite {
   const pad = 16;
   const measure = document.createElement('canvas').getContext('2d');
   if (!measure) return new THREE.Sprite();
-  const font = '700 44px ui-sans-serif, system-ui, sans-serif';
-  measure.font = font;
+  // 시트의 "상형 인서트 스틸 이음매(도면 확인)" 같은 메모를 아랫줄에
+  // 붙일 수 있어야 한다. 한 줄만 그리면 그 말이 통째로 사라진다.
+  const rows = text.split(String.fromCharCode(10));
+  const big = '700 44px ui-sans-serif, system-ui, sans-serif';
+  const small = '500 34px ui-sans-serif, system-ui, sans-serif';
+  const line = 58;
+  let width = 0;
+  rows.forEach((row, i) => {
+    measure.font = i ? small : big;
+    width = Math.max(width, Math.ceil(measure.measureText(row).width));
+  });
   const canvas = document.createElement('canvas');
-  canvas.width = Math.ceil(measure.measureText(text).width) + pad * 2;
-  canvas.height = 66;
+  canvas.width = width + pad * 2;
+  canvas.height = 12 + line * rows.length;
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = 'rgba(255,246,250,.96)';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.lineWidth = 4;
   ctx.strokeStyle = '#d61f77';
   ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
-  ctx.font = font;
-  ctx.fillStyle = '#b31563';
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'center';
-  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 1);
+  rows.forEach((row, i) => {
+    ctx.font = i ? small : big;
+    ctx.fillStyle = i ? '#8a3a68' : '#b31563';
+    ctx.fillText(row, canvas.width / 2, 6 + line * (i + 0.5));
+  });
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.minFilter = THREE.LinearFilter;
@@ -1658,13 +1681,29 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 붓으로 칠한 자국들. 둘 다 "이 점이 구역 안인가" 하나로 줄인다.
       const stamps = stampsOf(region);
       const shape = region.shape;
-      if (!shape && !stamps.length) return;
+      const box = region.box;
+      if (!shape && !box && !stamps.length) return;
 
       const hull = new THREE.Vector3();
       let reach = 0;
       let inside: (p: THREE.Vector3) => boolean;
 
-      if (shape) {
+      if (box) {
+        // 부품 좌표 -> 화면 좌표. 화면은 원점을 옮겨 놓았다.
+        const back = mesh.recentered
+          ? new THREE.Vector3(...mesh.summary.bounds.center)
+          : new THREE.Vector3();
+        const low = new THREE.Vector3(...box.min).sub(back);
+        const high = new THREE.Vector3(...box.max).sub(back);
+        const span = new THREE.Box3(
+          new THREE.Vector3(Math.min(low.x, high.x), Math.min(low.y, high.y),
+                            Math.min(low.z, high.z)),
+          new THREE.Vector3(Math.max(low.x, high.x), Math.max(low.y, high.y),
+                            Math.max(low.z, high.z)));
+        span.getCenter(hull);
+        reach = span.getSize(new THREE.Vector3()).length() / 2;
+        inside = (p) => span.containsPoint(p);
+      } else if (shape) {
         const u = new THREE.Vector3(...shape.u);
         const v = new THREE.Vector3(...shape.v);
         const middle = new THREE.Vector3(...shape.center);
@@ -1718,9 +1757,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         root.add(skin);
       }
 
+      // 시트 표기와 같은 말로 적는다 — "① 하형 용접".
+      // 메모가 있으면 아랫줄에 붙인다("상형 인서트 스틸 이음매" 같은 것).
+      const title = `${CIRCLED[order] ?? order + 1} ${region.die} ${region.work}`;
       const tag = makeZoneLabel(
-        `${CIRCLED[order] ?? order + 1} ${region.die} ${region.work}`,
-        scale * 0.042);
+        region.note ? [title, region.note].join(String.fromCharCode(10))
+                    : title, scale * 0.042);
       // 이름표는 칠한 자리 한가운데 위에 띄운다
       tag.position.copy(hull).add(new THREE.Vector3(0, 0, reach * 1.1));
       tag.renderOrder = 14;

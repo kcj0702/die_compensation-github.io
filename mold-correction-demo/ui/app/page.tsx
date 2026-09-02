@@ -7,7 +7,7 @@ import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Box, Check, C
 import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from 'react';
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
-import { CIRCLED, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
+import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -882,6 +882,15 @@ function LabProfileOverlay({ shapes, width, height }: { shapes: LabShape[]; widt
    근거가 가장 분명하다 — 있으면 이걸 먼저 쓴다. */
 /** 이 스캔이 이 CAD 의 짝인가. CAD 파일과 스캔의 품번 규칙이 다르다 —
  *  64XX1 도면이 64XX2 스캔의 짝이다. */
+/** CAD 파일 이름에서 품번을 뽑는다 — 표준 공정 구역을 붙일 열쇠. */
+export function partOfCad(mesh: CadMesh | null | undefined): string {
+  const name = (mesh?.summary.name || '').toUpperCase().replace(/[-_]/g, '');
+  const pairs: [string, string][] = [
+    ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
+  ];
+  return pairs.find(([cad]) => name.includes(cad))?.[1] ?? '';
+}
+
 export function scanFitsCad(scan: ScanItem, mesh: CadMesh) {
   // 보정 후 형상은 **원본에서 만든 것**이라 스캔을 다시 맞추지 않는다.
   //
@@ -1531,7 +1540,8 @@ function SheetTitleBlock({ scan, head, onHeadChange }: {
 // (RPS 정렬, 수축 중심선, 단면 분석)는 3D 데이터가 있어야 한다. 지금까지
 // 우리가 가진 건 2D 히트맵뿐이라 컬러맵 제로존 하나만 쓸 수 있었다.
 // 여기서 STEP 을 읽으면 조립 홀 좌표가 나오므로 RPS 정렬의 입구가 열린다.
-function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zeroEditsByScan }: {
+function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zeroEditsByScan,
+  zonesByPart, setZonesByPart }: {
   /* 이 화면을 지금 보고 있는가. 안 보고 있어도 컴포넌트는 살아 있다 —
      읽어 둔 CAD 를 지키려는 것이다. 감춰진 동안에는 그리기를 멈춘다. */
   active: boolean;
@@ -1540,6 +1550,8 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   hiddenPointIdsByScan: Record<string, Set<string>>;
   pointOverridesByScan: Record<string, Record<string, number>>;
   zeroEditsByScan: Record<string, ZeroEdit[]>;
+  zonesByPart: Record<string, CadRegion[]>;
+  setZonesByPart: (updater: (current: Record<string, CadRegion[]>) => Record<string, CadRegion[]>) => void;
   onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
   /* 주석과 공정 구역은 App 이 들고 있는다 — 새로고침해도 남으려면 세션
      저장소에 들어가야 하고, 그건 App 에 있다. */
@@ -1583,6 +1595,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
      파일을 열 때마다 새로 만드는 uuid 라 새로고침하면 짝을 잃는다.
      스캔을 품번으로 묶는 것과 같은 이유다. */
   const notesKey = mesh?.summary.name ?? '';
+  /* 지금 CAD 에 보여 줄 구역 = 등록해 둔 표준 구역 + 손으로 그린 것.
+     표준 구역은 좌표로 박혀 있으므로 파일을 다시 열어도 그 자리다. */
+  const zoneKey = partOfCad(mesh);
+  const standardZones = zonesByPart[zoneKey] ?? [];
   /* 보정 후 형상 — 원본과 견줘 본다. B-Rep 이 아니라 메시를 민 것이라
      가공용이 아니고 비교용이다. */
   const [morph, setMorph] = useState<CadMorph | null>(null);
@@ -2065,9 +2081,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
                   onCapture={(url) => setShots((current) => [...current, url])}
                   morph={morph} morphMode={morphMode}
-                  regions={regionsByCad[notesKey] ?? []}
+                  regions={[...standardZones, ...(regionsByCad[notesKey] ?? [])]}
                   onRegionsChange={(next) => notesKey && setRegionsByCad(
-                    (current) => ({ ...current, [notesKey]: next }))}
+                    // 표준 구역은 품번에 묶여 있다. 손 그림 저장소에
+                    // 같이 넣으면 파일마다 사본이 생긴다.
+                    (current) => ({ ...current,
+                      [notesKey]: next.filter((r) => !r.standard) }))}
                   notes={notesByCad[notesKey] ?? []}
                   onNotesChange={(next) => notesKey && setNotesByCad(
                     (current) => ({ ...current, [notesKey]: next }))} />
@@ -2128,6 +2147,76 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   <em>{failed}</em>
                 </p>;
               })()}
+              {/* 부품 좌표로 등록해 두는 표준 공정 구역.
+                  보정시트는 "① 하형 용접 · ② 상형 심고음" 처럼 구역을
+                  고정된 자리에 표기한다. 같은 부품이면 매번 같은 자리이므로
+                  좌표로 한 번 등록해 두면 그 부품을 열 때마다 저절로 뜬다. */}
+              {mesh && zoneKey && <div className="zone-book">
+                <div className="zone-book__head">
+                  <b>표준 공정 구역 · {zoneKey}</b>
+                  <span>부품 좌표로 등록해 두면 이 부품의 CAD 를 열 때마다
+                    저절로 표시되고 주석이 붙습니다 — 시트의 "① 하형 용접"
+                    표기와 같은 방식입니다.</span>
+                  <button type="button" onClick={() => setZonesByPart((c) => ({
+                    ...c,
+                    [zoneKey]: [...(c[zoneKey] ?? []), {
+                      id: `S-${Date.now().toString(36)}`,
+                      standard: true, die: '하형', work: '용접', note: '',
+                      box: { min: [0, 0, 0], max: [100, 100, 100] },
+                    }],
+                  }))}>구역 추가</button>
+                </div>
+                {standardZones.length === 0
+                  ? <p className="zone-book__empty">
+                      아직 등록된 구역이 없습니다. [구역 추가] 를 누르고
+                      부품 좌표(mm) 범위를 적으세요. 좌표는 홀 목록이나
+                      측정 도구에서 읽을 수 있습니다.
+                    </p>
+                  : <table className="zone-book__table">
+                      <thead><tr>
+                        <th>번호</th><th>금형</th><th>작업</th>
+                        <th colSpan={3}>시작 X · Y · Z (mm)</th>
+                        <th colSpan={3}>끝 X · Y · Z (mm)</th>
+                        <th>메모</th><th /></tr></thead>
+                      <tbody>
+                        {standardZones.map((zone, order) => {
+                          const put = (patch: Partial<CadRegion>) =>
+                            setZonesByPart((c) => ({ ...c,
+                              [zoneKey]: (c[zoneKey] ?? []).map((z) =>
+                                z.id === zone.id ? { ...z, ...patch } : z) }));
+                          const corner = (which: 'min' | 'max', axis: number) =>
+                            <td key={`${which}${axis}`}><input type="number" step="1"
+                              value={zone.box?.[which][axis] ?? 0}
+                              onChange={(e) => {
+                                const box = zone.box ?? { min: [0, 0, 0], max: [0, 0, 0] };
+                                const next = [...box[which]] as [number, number, number];
+                                next[axis] = Number(e.target.value);
+                                put({ box: { ...box, [which]: next } });
+                              }} /></td>;
+                          return <tr key={zone.id}>
+                            <td>{CIRCLED[order] ?? order + 1}</td>
+                            <td><select value={zone.die} onChange={(e) =>
+                              put({ die: e.target.value as CadRegion['die'] })}>
+                              {DIE_CHOICES.map((n) => <option key={n}>{n}</option>)}
+                            </select></td>
+                            <td><select value={zone.work} onChange={(e) =>
+                              put({ work: e.target.value as CadRegion['work'] })}>
+                              {WORK_CHOICES.map((n) => <option key={n}>{n}</option>)}
+                            </select></td>
+                            {[0, 1, 2].map((a) => corner('min', a))}
+                            {[0, 1, 2].map((a) => corner('max', a))}
+                            <td><input type="text" value={zone.note ?? ''}
+                              placeholder="예: 상형 인서트 스틸 이음매(도면 확인)"
+                              onChange={(e) => put({ note: e.target.value })} /></td>
+                            <td><button type="button" onClick={() =>
+                              setZonesByPart((c) => ({ ...c,
+                                [zoneKey]: (c[zoneKey] ?? [])
+                                  .filter((z) => z.id !== zone.id) }))}>지움</button></td>
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>}
+              </div>}
               {/* 공정별 물량 — 보정량의 부호가 곧 공정이다.
                   + 살을 붙인다(용접) · - 살을 깎는다(CNC 가공).
                   두 일은 작업자도 견적도 다르므로 따로 적는다. */}
@@ -2605,6 +2694,11 @@ export default function Home() {
      파일명에 없는 항목이라 작업자가 채운다. 스캔별로 들고 저장한다. */
   const [sheetHeadByScan, setSheetHeadByScan] =
     useState<Record<string, Record<string, string>>>({});
+  /* 부품 좌표로 등록해 둔 표준 공정 구역 — **품번**에 묶는다.
+     손으로 그린 구역(regionsByCad)은 파일 이름에 묶여 파일이 바뀌면
+     다시 그려야 하지만, 이것은 부품이 같으면 그대로 따라온다. */
+  const [zonesByPart, setZonesByPart] =
+    useState<Record<string, CadRegion[]>>({});
   /* 작업 내용을 이 PC 에 남긴다 — 새로고침으로 날아가면 안 된다.
      스캔 아이디는 파일을 다시 올릴 때마다 바뀌므로 품번으로 묶는다. */
   const [sessionNote, setSessionNote] = useState<string | null>(null);
@@ -2739,6 +2833,11 @@ export default function Home() {
         setSheetHeadByScan((c) => ({ ...c, [scan.id]: entry.head! }));
         touched = true;
       }
+      if (entry.zones && !zonesByPart[scan.partNo]) {
+        setZonesByPart((c) => ({
+          ...c, [scan.partNo]: entry.zones as CadRegion[] }));
+        touched = true;
+      }
       if (entry.overrides && !pointOverridesByScan[scan.id]) {
         setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
         touched = true;
@@ -2762,12 +2861,15 @@ export default function Home() {
       const coefficient = coefficientByScan[scan.id];
       const head = sheetHeadByScan[scan.id];
       const hasHead = head && Object.values(head).some((v) => v);
-      if (!overrides && !hidden && coefficient === undefined && !hasHead) continue;
+      const zones = zonesByPart[partOf(scan.id)];
+      if (!overrides && !hidden && coefficient === undefined
+          && !hasHead && !zones?.length) continue;
       snapshot.byPart[partOf(scan.id)] = {
         coefficient,
         overrides: overrides ? { ...overrides } : undefined,
         hidden: hidden ? [...hidden] : undefined,
         head: hasHead ? { ...head } : undefined,
+        zones: zones?.length ? zones : undefined,
       };
     }
     /* 3D 주석·공정 구역. 빈 것은 담지 않는다 — 지운 뒤에도 되살아나면
@@ -2810,6 +2912,8 @@ export default function Home() {
           if (entry.overrides) setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
           if (entry.hidden) setHiddenPointIdsByScan((c) => ({ ...c, [scan.id]: new Set(entry.hidden!) }));
           if (entry.head) setSheetHeadByScan((c) => ({ ...c, [scan.id]: entry.head! }));
+          if (entry.zones) setZonesByPart((c) => ({
+            ...c, [scan.partNo]: entry.zones as CadRegion[] }));
         }
         setSessionNote(`${Object.keys(parsed.byPart).length}개 품번을 불러왔습니다`);
       }}
@@ -2817,7 +2921,7 @@ export default function Home() {
         clearSession();
         sessionRef.current = emptySession();
         setPointOverridesByScan({}); setHiddenPointIdsByScan({});
-        setSheetHeadByScan({});
+        setSheetHeadByScan({}); setZonesByPart(() => ({}));
         setCoefficientByScan({});
         setSessionNote('작업 내용을 비웠습니다');
       }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeepKeyPointsOnly={keepKeyPointsOnly} onShowAllPoints={() => setAllPointsVisible(true)} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient}
@@ -2833,5 +2937,6 @@ export default function Home() {
         다시 읽으라는 얘기다. 감추기만 하고 상태는 살려 둔다.
         카메라 위치와 오버레이까지 그대로 돌아온다. */}
       <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad}
-        zeroEditsByScan={zeroEditsByScan} /></div></main>;
+        zeroEditsByScan={zeroEditsByScan}
+        zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} /></div></main>;
 }
