@@ -1,7 +1,7 @@
 # Mold Correction Demo
 
-편차 맵에 표시된 숫자 라벨과 지시 좌표를 구조화된 포인트 데이터로 변환하는 실험 코드다.
-현재 실행 가능한 범위는 `deviation_extraction`이며, 나머지 디렉터리는 후속 단계를 위한 골격이다.
+3D 스캔 편차 맵 한 장을 받아 **제로라인을 찾고, 보정치 시트를 만들고, CAD 형상 위에
+얹어 확인**하는 로컬 도구다. 모든 처리는 이 PC 안에서 이뤄지며 외부로 나가는 통신은 없다.
 
 ## 현재 구현 범위
 
@@ -10,10 +10,15 @@
 | `deviation_extraction/` | 구현 | 라벨 검출, 좌표 산정, 편차값 판독, CSV 저장 |
 | `product_alignment/` | 구현 | 제품데이터 등록·정렬, 측정점을 제품데이터 좌표로 전사 |
 | `depth_measurement/` | 골격 | 깊이 측정 단계 예정 |
-| `zero_line_detection/` | 골격 | 제로 라인 검출 단계 예정 |
-| `label_removal/` | 골격 | 라벨 제거 단계 예정 |
-| `pipeline/`, `ui/`, `shared/` | 골격 | 통합 실행, UI, 공통 코드 예정 |
+| `pipeline/` | 골격 | `run_demo.py` 는 아직 빈 파일이다 |
 | `docs/` | 부분 구현 | 편차 추출 단계의 입출력 계약 |
+
+세부 내용은 각 폴더의 README 를 본다 —
+[`deviation_extraction`](deviation_extraction/README.md) ·
+[`zero_line_detection`](zero_line_detection/README.md) ·
+[`zero_line_advance`](zero_line_advance/README.md) ·
+[`cad_import`](cad_import/README.md) ·
+[`ui`](ui/README.md)
 
 ## 처리 흐름
 
@@ -53,34 +58,121 @@ python -m venv .venv
 
 ## 실행
 
-입력 이미지를 직접 지정하는 방식이 가장 명확하다.
+### 화면과 엔진 함께 띄우기
 
 ```powershell
-.venv\Scripts\python.exe deviation_extraction/run.py `
-  --image path/to/deviation_map.png `
-  --out data/intermediate/deviation_points.csv `
-  --debug `
-  --debug-out data/intermediate/deviation_points_debug.png
+ui\run-ui.cmd
 ```
 
-`--image`를 생략하면 `data/intermediate/deviation_map.png`를 사용한다. 저장소에는 예제 이미지와
-모델 가중치가 포함되어 있지 않다.
+`ui\stop-ui.cmd` 로 함께 내린다. 단, 이 스크립트는 `.venv` 가
+**`mold-correction-demo` 폴더 옆**에 있다고 보고 찾는다. 그 자리에 없으면 아래처럼
+직접 띄운다.
 
-기본 출력은 다음과 같다.
+### 따로 띄우기
 
-| 파일 | 내용 |
-|---|---|
-| `data/intermediate/deviation_points.csv` | 좌표, 편차값, 검출 상태 |
-| `data/intermediate/deviation_points_debug.png` | 검출 좌표와 값을 겹쳐 그린 확인용 이미지 |
-
-세부 알고리즘, 컬러바 보정, 출력 스키마는
-[`deviation_extraction/README.md`](deviation_extraction/README.md)에 정리되어 있다.
-실행 전 확인 사항은 [`docs/first-demo-checklist.md`](docs/first-demo-checklist.md)를 따른다.
-
-합성 이미지 회귀 테스트는 회사 원본이나 모델을 사용하지 않는다.
+엔진(백엔드) — `127.0.0.1:8000`
 
 ```powershell
-.venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_*.py" -v
+<venv>\Scripts\python.exe ui\backend\server.py
+```
+
+이 PC 에서는 CUDA PyTorch 와 `bitsandbytes` 를 둘 다 가진 환경이 하나뿐이다.
+
+```
+C:\Users\KDT033\Downloads\die_compensation-github.io-main\die_compensation-github.io-main\.venv
+```
+
+**엔진은 자동 재적재를 하지 않는다.** 파이썬 코드를 고쳤으면 반드시 다시 띄운다.
+
+무거운 두 가지는 디스크에 남으므로 다시 띄워도 잃지 않는다 —
+
+| 무엇 | 어디에 | 실측 |
+|---|---|---|
+| Qwen 라벨 판독 | `ui/backend/.label_cache.json` | 64XX2 한 장 71초 -> 0초 |
+| 현업 제로라인 파이프라인 | `zero_line_detection/.lab_cache/` | 64XX2 117초 -> 0.05초 |
+| STEP 파싱 | `cad_import/_parsed/` | 113MB 57초 -> 3초 |
+
+분석 한 장이 **195초 -> 3.1초**가 된다. 열쇠는 내용 해시라 그림이나
+스크립트가 바뀌면 저절로 다시 돈다. 자리를 옮기려면 `ADC_LABEL_CACHE`
+`ADC_LAB_CACHE` 환경변수를 쓴다(시험이 이걸로 실제 캐시를 지킨다).
+`GET /api/health` 의 `qwenLoaded` 가 분석을 돌린 뒤에도 `false` 면 라벨 판독이
+안 되고 있다는 뜻이다.
+
+화면(프론트) — `127.0.0.1:3000`
+
+```powershell
+cd ui
+npm run dev
+```
+
+### 명령줄만 쓰기
+
+편차 포인트만 뽑을 때:
+
+```powershell
+<venv>\Scripts\python.exe deviation_extraction/run.py `
+  --image path/to/deviation_map.png `
+  --out data/intermediate/deviation_points.csv `
+  --debug
+```
+
+제로라인만 볼 때는 `zero_line_detection/run.py` 를 쓴다.
+
+## 화면 네 개
+
+왼쪽 메뉴 순서가 곧 작업 순서다.
+
+| # | 화면 | 하는 일 |
+|---|---|---|
+| 01 | 분석 작업실 | 스캔 등록, **품번 지정**, 분석 실행 |
+| 02 | 엔진 결과 | 엔진 세 개가 각각 낸 결과를 단계별로 확인 |
+| 03 | ADC 보정 시트 | 보정 계수, 값 수정, 핵심 포인트, 주석, 엑셀 내보내기 |
+| 04 | 3D 데이터 | CAD 위에 제로라인·보정량 얹기, 단면·측정·주석, 보정 후 형상 |
+
+### 품번은 반드시 맞춰야 한다
+
+품번이 **컬러바 범위와 제로라인 파라미터를 고르는 열쇠**다.
+
+| 품번 | 컬러바 범위 |
+|---|---|
+| `64XX2` | −1.6 ~ +2.0 mm |
+| `67XX6` | −3.0 ~ +3.0 mm |
+| `71XX2` | −2.0 ~ +2.0 mm |
+
+파일명에 품번이 있으면 자동으로 잡고, 없으면 분석 작업실의 파일 행에서 직접 고른다.
+지정하지 않으면 제로라인 단계가 통째로 빈다 — 같은 그림을 파일명만 바꿔 확인했다.
+
+```
+_boundary_anchors.png                    제로라인 0개
+JD_67XX6-DR000 3D 스캔.png (같은 그림)     제로라인 3개
+```
+
+### 3D 뷰어 마우스 (CATIA 와 같다)
+
+| 조작 | 동작 |
+|---|---|
+| 가운데 끌기 | 이동 |
+| 가운데 + 오른쪽 끌기 | 회전 (누른 도중에 더해도 바뀐다) |
+| Ctrl + 가운데 끌기 | 확대 · 축소 |
+| 휠 | 확대 · 축소 |
+| 왼쪽 | 선택. 콜아웃을 누르면 값을 고친다 |
+
+CATIA 네이티브(`.CATPart`)는 독자 포맷이라 읽지 못한다. STEP(AP214)으로 내보낸다.
+
+## 테스트
+
+```powershell
+<venv>\Scripts\python.exe -m pytest -q
+```
+
+회귀 테스트는 합성 이미지를 쓰며 회사 원본이나 모델 가중치를 쓰지 않는다.
+
+화면 쪽은 타입 검사와 빌드로 확인한다.
+
+```powershell
+cd ui
+npx tsc --noEmit
+npm run build
 ```
 
 ## 현재 제약

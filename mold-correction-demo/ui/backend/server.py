@@ -103,6 +103,7 @@ from sheet_export import (  # noqa: E402
 )
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
+from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
@@ -867,6 +868,12 @@ def analyze_image(
                 zero_output.centerline,
                 zero_crossing=zero_output.zero_crossing,
             )
+        # UI 응답은 합의한 하이브리드 엔진 결과를 우선한다. 위의 기존
+        # 결과는 후보/앵커 호환 필드를 유지하기 위한 보조 계산이다.
+        hybrid_zero = detect_hybrid_zero_line(image, filename)
+        zero_datum_mask = hybrid_zero.mask
+        zero_overlay = hybrid_zero.overlay_rgb
+        zero_lines = hybrid_zero.lines
     except Exception as exc:
         errors["zero"] = str(exc)
 
@@ -990,9 +997,10 @@ def analyze_image(
                 "전사하지 않았습니다."
             )
 
-    zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
-    zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
-    zero_warnings = list(zero_output.warnings) if zero_output is not None else []
+    hybrid_zero = locals().get("hybrid_zero")
+    zero_regions = hybrid_zero.regions if hybrid_zero is not None else (len(zero_output.result.regions) if zero_output is not None else 0)
+    zero_ratio = hybrid_zero.ratio if hybrid_zero is not None else (zero_output.result.zero_ratio if zero_output is not None else 0.0)
+    zero_warnings = hybrid_zero.warnings if hybrid_zero is not None else (list(zero_output.warnings) if zero_output is not None else [])
     warnings = zero_warnings + deviation_warnings + product_warnings
 
     if qwen_reads:
@@ -1022,7 +1030,7 @@ def analyze_image(
             else (_png_data_url(zero_output.mask) if zero_output is not None else None)
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
-        "zeroLines": [l.to_dict() for l in zero_lines],
+        "zeroLines": zero_lines if hybrid_zero is not None else [l.to_dict() for l in zero_lines],
         "zeroAnchors": [a.to_dict() for a in zero_anchors],
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
         "points": points,
@@ -1033,11 +1041,7 @@ def analyze_image(
             "validCandidates": valid_candidates_count,
             "zeroRegions": zero_regions,
             "zeroRatio": round(zero_ratio, 4),
-            "zeroTolerance": (
-                round(float(zero_output.result.tolerance), 4)
-                if zero_output is not None
-                else None
-            ),
+            "zeroTolerance": 0.6,
             "qwenReads": qwen_reads,
             "qwenUnread": unread_labels,
             "pointsTransferred": transferred,
