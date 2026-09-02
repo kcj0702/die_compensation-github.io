@@ -1923,14 +1923,14 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      Excel 에서 값 수정이 불가능했다. */
   const saveSheetExcel = async () => {
     if (excelSaving) return;
-    if (!result.productImage) {
-      setExcelError('제품데이터 이미지가 없어 시트를 만들 수 없습니다.');
-      return;
-    }
     setExcelSaving(true);
     setExcelError(null);
     try {
-      const productBlob = await (await fetch(result.productImage)).blob();
+      // 제품데이터가 없으면 현재 스캔(라벨 제거본 우선)을 시트 정면도로 쓴다.
+      // 이 경우 포인트도 스캔 좌표계로 이미 계산되어 있어 별도 변환이 필요 없다.
+      const sheetImageUrl = onProduct ? result.productImage : result.cleanImage || scan.url;
+      if (!sheetImageUrl) throw new Error('시트에 넣을 이미지를 찾을 수 없습니다.');
+      const productBlob = await (await fetch(sheetImageUrl)).blob();
 
       const visiblePointsList = sheetPoints.filter((point) => visiblePointIds.has(point.id));
       const payloadPoints = visiblePointsList.map((point) => ({
