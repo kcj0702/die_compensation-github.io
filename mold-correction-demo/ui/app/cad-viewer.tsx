@@ -391,6 +391,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const overlayGroup = useRef<THREE.Group | null>(null);
   const clipRef = useRef<THREE.Plane | null>(null);
   const noteRef = useRef<THREE.Group | null>(null);
+  /* 단면에서 보정 전후 윤곽을 견주는 층. */
+  const sliceRef = useRef<THREE.Group | null>(null);
+  const [sliceGap, setSliceGap] = useState<number | null>(null);
   const regionRef = useRef<THREE.Group | null>(null);
   const geometryRef = useRef<THREE.BufferGeometry | null>(null);
   const zoningRef = useRef(zoning);
@@ -622,6 +625,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const noteRoot = new THREE.Group();
     scene.add(noteRoot);
     noteRef.current = noteRoot;
+
+    const sliceRoot = new THREE.Group();
+    sliceRoot.renderOrder = 18;
+    scene.add(sliceRoot);
+    sliceRef.current = sliceRoot;
 
     const regionRoot = new THREE.Group();
     scene.add(regionRoot);
@@ -1550,6 +1558,83 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     material.needsUpdate = true;
   }, [clip]);
 
+  /* 단면에서 보정 **전후 윤곽**을 견준다.
+   *
+   * 금형 기술자가 실제로 보는 그림이다. 겉모양만 겹쳐 놓으면 보정량이
+   * 부품 크기의 0.13~0.16% 라 1픽셀 안팎이고(위 과장 주석 참고), 색만
+   * 달라 보인다. 자른 자리의 **선 두 개**를 나란히 놓으면 어디가 얼마나
+   * 밀렸는지 바로 읽힌다.
+   *
+   * 자를 때마다 삼각형을 한 번 훑는다(40만 개 기준 수십 ms). 매 프레임이
+   * 아니라 자르는 자리가 바뀔 때만 도므로 화면이 끊기지 않는다. */
+  useEffect(() => {
+    const root = sliceRef.current;
+    if (!root) return;
+    root.clear();
+    setSliceGap(null);
+    if (clip === null || !morph || morphMode === 'off'
+        || morph.positions.length !== mesh.positions.length) return;
+
+    const cut = (points: ArrayLike<number>) => {
+      const found: number[] = [];
+      const index = mesh.indices;
+      for (let i = 0; i < index.length; i += 3) {
+        const a = index[i] * 3, b = index[i + 1] * 3, c = index[i + 2] * 3;
+        const zs = [points[a + 2], points[b + 2], points[c + 2]];
+        const above = zs.map((z) => z > clip);
+        if (above[0] === above[1] && above[1] === above[2]) continue;
+        // 평면을 걸친 삼각형 — 두 변이 잘린다
+        const corners = [a, b, c];
+        const hit: number[] = [];
+        for (let k = 0; k < 3; k += 1) {
+          const m = (k + 1) % 3;
+          if (above[k] === above[m]) continue;
+          const t = (clip - zs[k]) / (zs[m] - zs[k]);
+          hit.push(
+            points[corners[k]] + (points[corners[m]] - points[corners[k]]) * t,
+            points[corners[k] + 1]
+              + (points[corners[m] + 1] - points[corners[k] + 1]) * t,
+            clip);
+        }
+        if (hit.length === 6) found.push(...hit);
+      }
+      return found;
+    };
+
+    const puffed = new Float32Array(morph.positions.length);
+    for (let i = 0; i < morph.positions.length; i += 1) {
+      puffed[i] = mesh.positions[i]
+        + (morph.positions[i] - mesh.positions[i]) * exaggeration;
+    }
+
+    const before = cut(mesh.positions);
+    const after = cut(puffed);
+    if (!before.length && !after.length) return;
+
+    const draw = (points: number[], colour: number, width: number) => {
+      if (!points.length) return;
+      const line = new THREE.LineSegments(
+        new THREE.BufferGeometry().setAttribute(
+          'position', new THREE.Float32BufferAttribute(points, 3)),
+        new THREE.LineBasicMaterial({
+          color: colour, depthTest: false, linewidth: width,
+        }));
+      line.renderOrder = 19;
+      root.add(line);
+    };
+    draw(before, 0xdfe8f0, 1);        // 보정 전 — 옅은 회색
+    draw(after, 0xff8a2b, 2);         // 보정 후 — 주황
+
+    // 이 단면에서 가장 많이 밀린 양(실제 값 — 과장 전)
+    let worst = 0;
+    for (let i = 0; i < mesh.indices.length; i += 1) {
+      const v = mesh.indices[i] * 3;
+      if (Math.abs(mesh.positions[v + 2] - clip) > (viewApi.current?.radius ?? 1) * 0.004) continue;
+      worst = Math.max(worst, Math.abs(morph.shift[mesh.indices[i]] ?? 0));
+    }
+    setSliceGap(worst);
+  }, [clip, morph, morphMode, exaggeration, mesh]);
+
   // 공정 구역 — 찍은 자리 둘레의 면만 뽑아 분홍으로 덮는다.
   // 시트가 영역을 분홍으로 칠하고 번호를 붙이는 것과 같은 표기다.
   useEffect(() => {
@@ -1747,6 +1832,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         bottom:52px 로 못 박아 뒀는데, 아래 버튼 줄이 두 줄로 접히면
         그 위로 겹쳐 올라와 둘 다 누르기 어려웠다. */}
     <div className="cad-viewer__controls">
+    {morph && morphMode !== 'off' && (
+      <div className="cad-viewer__morph-key">
+        <span><i style={{ background: '#ff6fa8' }} />살 붙임 (+)</span>
+        <span><i style={{ background: '#5fb4e8' }} />깎음 (−)</span>
+        <b>최대 {morph.stats.max_shift.toFixed(2)}mm</b>
+        {clip === null
+          ? <em>단면을 자르면 보정 전후 윤곽을 나란히 볼 수 있습니다</em>
+          : <>
+              <span><i style={{ background: '#dfe8f0' }} />보정 전</span>
+              <span><i style={{ background: '#ff8a2b' }} />보정 후</span>
+              {sliceGap !== null && <b>이 단면 최대 {sliceGap.toFixed(2)}mm</b>}
+            </>}
+      </div>
+    )}
     {morph && morphMode !== 'off' && (
       <div className="cad-viewer__section cad-viewer__puff">
         <label htmlFor="cad-puff">변형 과장</label>

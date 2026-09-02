@@ -709,3 +709,10 @@ button { cursor: pointer; }
 .sheet-title-block__input:focus{outline:2px solid #2f6f9f;outline-offset:1px;border-radius:3px;background:#fff}
 @media print{.sheet-title-block__input{background:transparent !important}
   .sheet-title-block__input::placeholder{color:transparent}}
+
+/* 보정 후 형상 범례 — 색이 무슨 뜻인지 알 수 있어야 한다 */
+.cad-viewer__morph-key{display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px);font-size:9.5px;color:#b6c6d4}
+.cad-viewer__morph-key span{display:inline-flex;align-items:center;gap:5px}
+.cad-viewer__morph-key i{width:11px;height:11px;border-radius:3px;display:inline-block}
+.cad-viewer__morph-key b{color:#ffd9a3;font-variant-numeric:tabular-nums}
+.cad-viewer__morph-key em{color:#8fa3b4;font-style:normal}
