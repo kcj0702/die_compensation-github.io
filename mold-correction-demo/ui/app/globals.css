@@ -117,8 +117,73 @@ button { cursor: pointer; }
 .restored-stamp { position:absolute; z-index:8; left:20px; bottom:18px; display:flex; align-items:center; gap:7px; padding:8px 11px; border:1px solid rgba(255,255,255,.45); border-radius:7px; color:white; background:rgba(19,42,59,.72); backdrop-filter:blur(8px); font-size:9px; font-weight:700; }
 .viewer-legend { min-height:42px; display:flex; align-items:center; justify-content:space-between; gap:15px; padding:0 15px; color:#89939f; font-size:9px; }.viewer-legend span:first-child { display:flex; align-items:center; gap:6px; color:#536174; font-weight:700; }.legend-dot { width:7px; height:7px; border-radius:50%; }
 .point-layer { position:absolute; inset:0; z-index:7; }.measure-point { position:absolute; width:0; height:0; padding:0; border:0; background:none; }.measure-point--interactive,.measure-point--interactive .measure-point__label{cursor:pointer}.measure-point__dot { position:absolute; left:-5px; top:-5px; width:10px; height:10px; border:2px solid white; border-radius:50%; background:#eb6b3d; box-shadow:0 0 0 3px rgba(235,107,61,.28),0 2px 5px rgba(0,0,0,.3); transition:transform .15s ease,box-shadow .15s ease; }.measure-point--interactive:hover .measure-point__dot,.measure-point--interactive:focus-visible .measure-point__dot{transform:scale(1.35);box-shadow:0 0 0 5px rgba(255,255,255,.3),0 3px 7px rgba(0,0,0,.38)}.measure-point--plus .measure-point__dot{background:#168f79;box-shadow:0 0 0 3px rgba(22,143,121,.25),0 2px 5px rgba(0,0,0,.3)}.measure-point__label { position:absolute; left:8px; top:-13px; width:max-content; display:flex; align-items:center; gap:5px; padding:5px 7px; border:1px solid rgba(255,255,255,.7); border-radius:5px; color:white; background:rgba(24,34,48,.88); box-shadow:0 3px 8px rgba(0,0,0,.2); font-size:9px; font-weight:750; transition:background .15s ease,transform .15s ease; }.measure-point--interactive:hover .measure-point__label{background:rgba(190,70,45,.94);transform:translateY(-1px)}.measure-point__label b { color:#aab7c5; font-size:7px; }
+.valley-line-overlay{position:absolute;inset:0;width:100%;height:100%;z-index:6;pointer-events:none}
+.zero-zone-overlay{position:absolute;inset:0;width:100%;height:100%;z-index:5;pointer-events:none}
+.green-belt-overlay{position:absolute;inset:0;width:100%;height:100%;z-index:6;pointer-events:none}
+/* 3D 데이터 화면 */
+.cad-layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:18px;align-items:start}
+.cad-stage{overflow:hidden;min-height:560px;display:flex;flex-direction:column}
+.cad-viewer{flex:1;min-height:470px;position:relative;background:#16202a}
+.cad-viewer__canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+.cad-viewer__stage{position:absolute;inset:0;cursor:grab}
+.cad-viewer__stage:active{cursor:grabbing}
+.cad-viewer__stage canvas{display:block;width:100%;height:100%;touch-action:none}
+.cad-viewer__hud{display:flex;flex-wrap:wrap;gap:8px;align-items:center;z-index:2}
+.cad-viewer__hud button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;letter-spacing:.02em;cursor:pointer;backdrop-filter:blur(6px)}
+.cad-viewer__hud button:hover{border-color:rgba(255,255,255,.4);color:#eaf2f8}
+.cad-viewer__hud button:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-viewer__hud button.is-on{border-color:#6fb4e8;background:rgba(45,110,160,.82);color:#fff}
+.cad-viewer__seg{display:flex;gap:0}
+.cad-viewer__seg button{border-radius:0}
+.cad-viewer__seg button:first-child{border-radius:6px 0 0 6px}
+.cad-viewer__seg button:last-child{border-radius:0 6px 6px 0}
+.cad-viewer__seg button+button{border-left:0}
+.cad-viewer__stat{padding:5px 10px;border-radius:6px;background:rgba(14,22,30,.6);color:#8fa3b4;font-size:9px;letter-spacing:.02em;backdrop-filter:blur(6px)}
+.cad-viewer__hint{color:#6f8395}
+.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;gap:0;z-index:2}
+.cad-viewer__views button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
+.cad-viewer__views button:first-child{border-radius:6px 0 0 6px}
+.cad-viewer__views button:last-child{border-radius:0 6px 6px 0}
+.cad-viewer__views button+button{border-left:0}
+.cad-viewer__views button:hover{border-color:rgba(255,255,255,.4);color:#eaf2f8}
+.cad-viewer__views button:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-viewer__warn{position:absolute;left:12px;right:12px;top:12px;margin:0;padding:8px 12px;border:1px solid rgba(255,168,80,.45);border-radius:6px;background:rgba(60,34,10,.86);color:#ffcb92;font-size:9px;line-height:1.5;z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__legend{position:absolute;right:12px;bottom:12px;display:flex;flex-direction:column;gap:5px;padding:9px 12px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__legend span{display:flex;align-items:center;gap:7px;color:#c6d4e0;font-size:9px;letter-spacing:.02em}
+.cad-viewer__legend i{width:13px;height:3px;border-radius:2px;flex:none}
+.cad-viewer__legend small{margin-top:2px;color:#7d90a2;font-size:8px}
+.cad-viewer__canvas:active{cursor:grabbing}
+.cad-viewer__error{display:grid;place-items:center;height:100%;padding:20px;color:#bd4650;font-size:10px;text-align:center}
+.cad-drop{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-height:470px;margin:16px;border:1.5px dashed #d3dae1;border-radius:12px;color:#8b95a2;background:#fafbfc;text-align:center}
+.cad-drop svg{color:#b6c0ca}
+.cad-drop b{color:#3d4c60;font-size:12px}
+.cad-drop span{font-size:9px}
+.cad-drop small{max-width:330px;margin-top:5px;color:#a4adb8;font-size:8px;line-height:1.5}
+.cad-error{padding:14px;border-color:#f0c9c9;background:#fdf5f5}
+.cad-error b{color:#bd4650;font-size:10px}
+.cad-overlay-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #e6ebf0;background:#fafbfc}
+.cad-overlay-bar label{color:#5d6c80;font-size:9px;font-weight:600;letter-spacing:.02em}
+.cad-overlay-bar select{padding:5px 9px;border:1px solid #d3dae1;border-radius:6px;background:#fff;color:#3d4c60;font-size:9px;font-family:inherit;cursor:pointer}
+.cad-overlay-bar select:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
+.cad-overlay-bar__note{color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
+.cad-overlay-bar__err{color:#bd4650;font-size:8.5px}
+.cad-error p{margin:5px 0 0;color:#95626a;font-size:9px;line-height:1.5}
+@media(max-width:900px){.cad-layout{grid-template-columns:1fr}}
+.anchor-layer{z-index:8}
+.anchor-point{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;padding:0;border:0;background:none;cursor:pointer}
+.anchor-point__ring{position:absolute;inset:3px;border-radius:50%;border:2px solid rgba(255,255,255,.85);box-shadow:0 0 0 2px rgba(21,146,123,.55);transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
+.anchor-point:hover .anchor-point__ring{transform:scale(1.15);box-shadow:0 0 0 3px rgba(21,146,123,.75)}
+.anchor-point--selected .anchor-point__ring{background:rgba(224,48,63,.22);border-color:#e0303f;box-shadow:0 0 0 3px rgba(224,48,63,.35)}
+.anchor-point__order{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:white;font-size:9px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.anchor-panel__hint{margin:0 0 10px;color:#7d8896;font-size:9px;line-height:1.5}
+.anchor-panel__status{margin:0 0 8px;padding:6px 8px;border-radius:5px;background:#f2f6f4;color:#28384d;font-size:9px}
+.anchor-panel__status--error{background:#fdf0f0;color:#bd4650}
+.anchor-panel__reset{margin-top:8px;padding:0;border:0;color:#d85b2e;background:none;font-size:8px;cursor:pointer}
+.anchor-panel__compare{display:block;margin:10px 0;padding:9px;border:1px solid var(--line);border-radius:7px;background:#f7f8fa;line-height:1.5}.anchor-panel__compare .anchor-panel__hint{margin-bottom:6px}.anchor-panel__compare button{width:100%;justify-content:center;padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:white;font-size:8px}
 .zero-trace { position:absolute; inset:0; z-index:6; pointer-events:none; }.zero-segment { position:absolute; width:11%; height:3px; border-radius:3px; background:#34f0ce; box-shadow:0 0 0 1px rgba(6,44,42,.55),0 0 8px rgba(52,240,206,.75); transform-origin:left center; }.zero-segment--1{left:18%;top:55%;transform:rotate(-19deg)}.zero-segment--2{left:27.5%;top:51.5%;transform:rotate(-7deg)}.zero-segment--3{left:38%;top:50.2%;transform:rotate(11deg)}.zero-segment--4{left:48%;top:52.4%;transform:rotate(19deg)}.zero-segment--5{left:58%;top:56%;transform:rotate(5deg)}.zero-segment--6{left:68%;top:56.9%;transform:rotate(-15deg)}.zero-segment--7{left:77.5%;top:54%;transform:rotate(-27deg)}.zero-segment--8{left:85%;top:49.2%;width:6%;transform:rotate(-12deg)}.zero-badge { position:absolute; left:47%; top:46%; padding:4px 6px; border-radius:3px; color:#062f2b; background:#49f0d2; font-size:7px; font-weight:900; letter-spacing:.08em; box-shadow:0 3px 9px rgba(0,0,0,.25); }
-.inspection-panel { display:flex; flex-direction:column; gap:14px; }.score-card { display:grid; grid-template-columns:42px 1fr; grid-template-rows:auto auto auto; padding:18px; }.score-card__icon { grid-row:1/4; width:38px; height:38px; display:grid; place-items:center; border-radius:9px; }.score-card__icon svg{width:19px}.score-card>span:not(.score-card__icon){color:#8b95a2;font-size:9px}.score-card strong{font-size:27px;line-height:1.15}.score-card p{margin:3px 0 0;color:#596678;font-size:9px}.plain-summary,.mini-table{padding:17px}.plain-summary h3,.mini-table h3,.correction-summary h3{margin:0 0 14px;color:#28384d;font-size:12px}.summary-line{display:flex;gap:9px;margin-top:12px;padding-top:12px;border-top:1px solid #edf0f2}.summary-line>svg{flex:0 0 auto;margin-top:1px;color:#15927b}.summary-line div{display:flex;flex-direction:column;gap:3px}.summary-line b{font-size:9px}.summary-line span{color:#7d8896;font-size:9px;line-height:1.45}.mini-table{max-height:420px;overflow:auto}.mini-table .card-title{position:sticky;top:-17px;z-index:2;margin-bottom:7px;padding-top:17px;background:white}.mini-table .card-title button{border:0;color:#d85b2e;background:none;font-size:8px}.mini-table>div:not(.card-title){display:grid;grid-template-columns:.7fr 1.15fr .8fr 26px;align-items:center;height:36px;border-top:1px solid #edf0f3;font-size:9px}.mini-table small{color:#8d97a3;text-align:right}.mini-table b{text-align:center}.label-visibility{width:24px;height:24px;display:grid;place-items:center;padding:0;border:1px solid #dfe4e9;border-radius:5px;color:#9ca5af;background:#f7f8f9}.label-visibility.active{color:#d65e32;border-color:#f0c5b5;background:#fff7f3}.positive{color:#dd5c2e}.negative{color:#2476ab}
+.inspection-panel { display:flex; flex-direction:column; gap:14px; }.score-card { display:grid; grid-template-columns:42px 1fr; grid-template-rows:auto auto auto; padding:18px; }.score-card__icon { grid-row:1/4; width:38px; height:38px; display:grid; place-items:center; border-radius:9px; }.score-card__icon svg{width:19px}.score-card>span:not(.score-card__icon){color:#8b95a2;font-size:9px}.score-card strong{font-size:27px;line-height:1.15}.score-card p{margin:3px 0 0;color:#596678;font-size:9px}.plain-summary,.mini-table{padding:17px}.plain-summary h3,.mini-table h3,.correction-summary h3{margin:0 0 14px;color:#28384d;font-size:12px}.summary-line{display:flex;gap:9px;margin-top:12px;padding-top:12px;border-top:1px solid #edf0f2}.summary-line>svg{flex:0 0 auto;margin-top:1px;color:#15927b}.summary-line div{display:flex;flex-direction:column;gap:3px}.summary-line b{font-size:9px}.summary-line span{color:#7d8896;font-size:9px;line-height:1.45}.mini-table{max-height:420px;overflow:auto}.mini-table .card-title{position:sticky;top:-17px;z-index:2;margin-bottom:7px;padding-top:17px;background:white}.mini-table .card-title button{border:0;color:#d85b2e;background:none;font-size:8px}/* 표 한 줄(.point-list-row)만 고정 높이 그리드로 만든다. 설명 블록까지
+   여기 걸리면 36px 안으로 짓눌려 글자가 겹친다(실제로 그랬다). */
+.mini-table>div:not(.card-title):not(.anchor-panel__compare):not(.candidate-list){display:grid;grid-template-columns:.7fr 1.15fr .8fr 26px;align-items:center;height:36px;border-top:1px solid #edf0f3;font-size:9px}.mini-table small{color:#8d97a3;text-align:right}.mini-table b{text-align:center}.label-visibility{width:24px;height:24px;display:grid;place-items:center;padding:0;border:1px solid #dfe4e9;border-radius:5px;color:#9ca5af;background:#f7f8f9}.label-visibility.active{color:#d65e32;border-color:#f0c5b5;background:#fff7f3}.positive{color:#dd5c2e}.negative{color:#2476ab}
 
 .save-group,.service-switch,.layer-toggles{display:flex;align-items:center;gap:8px}.service-switch{width:max-content;margin:-8px 0 18px;padding:4px;border:1px solid var(--line);border-radius:9px;background:white}.service-switch button{height:32px;display:flex;align-items:center;gap:6px;padding:0 11px;border:0;border-radius:6px;color:#778392;background:transparent;font-size:9px;font-weight:700}.service-switch button.active{color:var(--navy);background:#eef2f6;box-shadow:0 1px 3px rgba(20,37,61,.08)}
 .service-grid{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:18px;align-items:start}.correction-card{overflow:hidden}.sheet-stage{padding:16px}.sheet-stage .heatmap{min-height:510px}.sheet-stage:after{content:"";position:absolute;inset:16px;border:1px solid rgba(255,255,255,.28);pointer-events:none}.sheet-note{min-height:43px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:9px 15px;color:#687588;background:#f9fafb;font-size:9px}.sheet-note svg{flex:0 0 auto;color:#d85d31}.sheet-note b{color:#435267}.sheet-note>span{flex:1 1 220px}.sheet-note__error{color:#c1392b}

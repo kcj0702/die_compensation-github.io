@@ -11,6 +11,9 @@ import {
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
+import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
+
 const API_BASE = 'http://127.0.0.1:8000';
 
 type View = 'workspace' | 'results' | 'service';
@@ -27,6 +30,27 @@ type KeySelection = { ids: string[]; total: number; selected: number; peaks: num
    대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
 type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; score: number }[]; warnings: string[] };
 type AnalysisResult = {
+  analysisId: string | null;
+  partNo?: string;
+  knownParts?: string[];
+  /* 현업 파일명 규칙에서 읽어낸 것들 — 차종_품번_품명_공정_날짜.
+     보정시트 머리말을 이걸로 채운다. 못 읽은 칸은 null 이다. */
+  naming?: {
+    part_no: string | null; maker: string | null; part_name: string | null;
+    process: string | null; applied_at: string | null; control_no: string | null;
+  };
+  /* 보정시트에 적을 만한 포인트만 골라낸 것. 스캔에는 백여 개가 찍히지만
+     현업 시트에 적히는 건 열몇 개다. */
+  keyPoints?: { point_id: string; x_px: number; y_px: number; value: number; score: number; reason: string }[];
+  /* 현업 파이프라인(lab_pipeline)이 만든 제로라인. 허용범위 밖 영역을
+     윤곽 위 제로포인트 둘로 닫은 선이라 근거가 가장 분명하다. */
+  labZeroLines?: [number, number][][];
+  /* 제로 **영역**(67XX6). 서버가 이미 네모로 다듬어 보낸다 —
+     시트와 3D 가 같은 도형을 그리려고 한 군데서 만든다. */
+  labZeroAreas?: [number, number][][];
+  labZeroRegions?: { label: string; area: number; status: string;
+                     zeroPoints: string[]; attempts: number; coverage: number }[];
+  keyPointsRejected?: { id: string; value: number }[];
   source: { name: string; width: number; height: number };
   partNumber: string | null;
   cleanImage: string | null;
@@ -37,6 +61,16 @@ type AnalysisResult = {
   keySelection?: KeySelection;
   zeroOverlay: string | null;
   zeroMask: string | null;
+  zeroAnchors: ZeroAnchor[];
+  advanceLine: AdvanceLine | null;
+  zeroLineCandidates: ZeroLineCandidate[];
+  zeroPointClusters: ZeroPointCluster[];
+  greenBelts: GreenBelt[];
+  simpleZeroLines: SimpleZeroLine[];
+  labProfile: LabShape[];
+  labDistance: LabDistance | null;
+  labelZeroLine: LabelZeroLine | null;
+  referenceLine: ReferenceLine | null;
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -253,7 +287,7 @@ function Heatmap({ imageUrl, width, height, children, lightBackground = false }:
     className={`heatmap heatmap--actual ${lightBackground ? 'heatmap--light' : ''} ${children ? 'heatmap--annotated' : ''} ${scale > 1 ? 'heatmap--zoomed' : ''} ${dragging ? 'heatmap--dragging' : ''}`}
     onDoubleClick={(event) => { if ((event.target as Element).closest('.measure-point, .zoom-controls, .annotation-layer--armed, .annotation-shape, .annotation-handle, .annotation-delete, .annotation-fontsize, .annotation-arrow__hit')) return; resetView(); }}
     onPointerDown={(event) => {
-      if (scale <= 1 || (event.target as Element).closest('.measure-point, .zoom-controls, .annotation-layer--armed, .annotation-shape, .annotation-handle, .annotation-delete, .annotation-fontsize, .annotation-arrow__hit')) return;
+      if (scale <= 1 || (event.target as Element).closest('.measure-point, .anchor-point, .zoom-controls, .annotation-layer--armed, .annotation-shape, .annotation-handle, .annotation-delete, .annotation-fontsize, .annotation-arrow__hit')) return;
       event.currentTarget.setPointerCapture(event.pointerId);
       dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
       setDragging(true);
@@ -1034,12 +1068,51 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
   </aside>;
 }
 
-function Header({ scans, activeId, setActiveId }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void }) {
+function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
+  const fileRef = useRef<HTMLInputElement>(null);
   return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span><h1>ADC <small>Ajin Die Compensation</small></h1></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
+    {/* 작업 내용은 자동으로 이 PC 에 남는다. 파일로 빼두면 보관하거나
+        다른 사람에게 넘길 수 있다. */}
+    <div className="topbar__session">
+      {note && <span className="topbar__session-note">{note}</span>}
+      <button type="button" className="tool-button" onClick={onSaveFile}
+        title="고친 보정값과 설정을 파일로 내려받습니다">작업 저장</button>
+      <button type="button" className="tool-button"
+        onClick={() => fileRef.current?.click()}
+        title="저장해 둔 작업 파일을 불러옵니다">작업 불러오기</button>
+      <button type="button" className="tool-button" onClick={onReset}
+        title="이 PC 에 남은 작업 내용을 지웁니다">작업 비우기</button>
+      <input ref={fileRef} type="file" hidden accept="application/json,.json"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) onLoadFile(file);
+          event.target.value = '';
+        }} />
+    </div>
     <button className="icon-button" aria-label="설정"><Settings2 size={19} /></button><div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
   </div></header>;
 }
+
+/* 파일명에서 품번을 뽑는다. 백엔드 file_naming.py 와 같은 규칙이며
+   짧은 형태(64XX2)를 준다 — 컬러바 표와 제로라인 라이브러리의 열쇠다.
+
+   순수 숫자 여섯 자리는 **날짜**라 품번으로 보지 않는다. NC 데이터가
+   `260825_JDZ_DASH LWR_OP10_...ZIP` 처럼 날짜를 앞에 달고 오는데,
+   예전 규칙은 이걸 품번이라고 집어냈다. */
+function partNoFromName(name: string): string | null {
+  for (const token of name.toUpperCase().split(/[_\s]+/)) {
+    const head = token.split(/[-/]/)[0];
+    if (!/^[0-9]{2}[A-Z0-9]{2,4}$/.test(head)) continue;
+    if (/^[0-9]+$/.test(head) && !/[-/]/.test(token)) continue;   // 날짜
+    return head;
+  }
+  return null;
+}
+
+/* 컬러바 범위가 등록된 품번. 백엔드 PRODUCT_COLORBAR_MM 과 같은 표이며
+   분석 응답의 knownParts 로도 확인할 수 있다. */
+const KNOWN_PARTS = ['64XX2', '67XX6', '71XX2'];
 
 function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: ScanItem[]; setScans: React.Dispatch<React.SetStateAction<ScanItem[]>>; onOpenResults: (id: string) => void; backendOnline: boolean | null }) {
   const [dragging, setDragging] = useState(false);
@@ -1049,7 +1122,7 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
     const next = accepted.map((file, index): ScanItem => ({
       id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`,
       name: file.name,
-      partNo: file.name.match(/[0-9]{2}[A-Z0-9]{2,4}/)?.[0] || `NEW-${String(scans.length + index + 1).padStart(2, '0')}`,
+      partNo: partNoFromName(file.name) || `NEW-${String(scans.length + index + 1).padStart(2, '0')}`,
       size: `${(file.size / 1024 / 1024).toFixed(1)} MB`, url: URL.createObjectURL(file), file,
       status: 'ready', tone: (scans.length + index) % 3,
     }));
@@ -1296,6 +1369,16 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      있는 layouts 상태를 콜백으로 위로 끌어올린다. */
   const [sheetLayouts, setSheetLayouts] = useState<SheetLayout[]>([]);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
+  /* 제로라인 손질 — 시트에서 고치고 [3D 에 적용] 을 눌러야 3D 가 따른다.
+     누를 때마다 서버에 다시 물으면 느려서, 초안을 들고 있다가 한 번에
+     보낸다. */
+  const [draftEdits, setDraftEdits] = useState<ZeroEdit[]>(zeroEdits);
+  const [zeroPanel, setZeroPanel] = useState(false);
+  /* 품번을 바꾸면 그 스캔에 적용해 둔 것에서 다시 시작한다 —
+     앞 부품에서 손본 값이 따라오면 안 된다. */
+  useEffect(() => { setDraftEdits(zeroEdits);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scan.id]);
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const addedPointSequenceRef = useRef(0);
   const [addPointMode, setAddPointMode] = useState(false);
@@ -1337,7 +1420,17 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       form.append('x', String(sampleX));
       form.append('y', String(sampleY));
       const response = await fetch(`${API_BASE}/api/sample`, { method: 'POST', body: form });
-      const data = await response.json() as { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
+      // 엔진 서버가 옛 코드로 떠 있으면 /api/sample 이 없어 HTML 404 가 온다.
+      // 그대로 json() 하면 파싱 예외라 원인이 안 보여서, 상태코드로 알려준다.
+      const body = await response.text();
+      let data: { error?: string; xPx: number; yPx: number; x: number; y: number; value: number };
+      try {
+        data = JSON.parse(body) as typeof data;
+      } catch {
+        data = { error: response.status === 404
+          ? '보정 포인트 API를 찾을 수 없습니다. 로컬 엔진 서버를 최신 코드로 다시 시작하세요.'
+          : `엔진 서버 응답을 읽을 수 없습니다. (HTTP ${response.status})` } as typeof data;
+      }
       if (!response.ok) { setSampleError(data?.error || '편차값을 추정하지 못했습니다.'); return; }
       /* 응답은 스캔 좌표다. 엔진 포인트와 같은 규칙으로 제품 좌표도 함께 담아 둔다. */
       let productCoords: { xProduct?: number; yProduct?: number } = {};
@@ -1432,6 +1525,55 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const clearAnnotations = () => { setAnnotations(() => []); setSelectedAnnotationId(null); setTool('select'); };
   /* 브라우저 인쇄를 그대로 쓴다. 캔버스로 굽지 않아 글자가 벡터로 남고 추가 의존성도 없다.
      인쇄 대화상자에서 '대상: PDF로 저장'을 고르면 된다. */
+  /* 현업 엑셀 양식으로 내보낸다. 보정량은 화면이 들고 있는 최종값을
+     그대로 보내야 시트와 엑셀이 어긋나지 않는다. */
+  const [excelState, setExcelState] = useState<'idle' | 'saving' | 'error'>('idle');
+  const [excelError, setExcelError] = useState<string | null>(null);
+  const saveExcel = async () => {
+    const analysisId = result.analysisId;
+    if (!analysisId) { setExcelError('분석 결과가 없습니다.'); return; }
+    setExcelState('saving'); setExcelError(null);
+    const corrections: Record<string, number> = {};
+    for (const point of sheetPoints) {
+      if (!visiblePointIds.has(point.id)) continue;
+      corrections[point.id] = displayFor(point);
+    }
+    try {
+      const response = await fetch(`${API_BASE}/api/sheet-excel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          analysisId, corrections,
+          filename: `${scan.partNo || 'ADC'}_보정시트`,
+          /* 머리말은 파일명 규칙에서 읽은 값을 그대로 보낸다.
+             화면에 보이는 것과 엑셀이 달라지면 안 된다. */
+          meta: {
+            partNo: result.naming?.part_no || scan.partNo,
+            partName: result.naming?.part_name || '',
+            process: result.naming?.process || '',
+            controlNo: result.naming?.control_no || '',
+            appliedAt: result.naming?.applied_at || '',
+            coefficient,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error || '엑셀을 만들지 못했습니다.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${scan.partNo || 'ADC'}_보정시트.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setExcelState('idle');
+    } catch (err) {
+      setExcelError(String((err as Error).message || err));
+      setExcelState('error');
+    }
+  };
+
   const sheetRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const savePdf = () => {
