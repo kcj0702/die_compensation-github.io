@@ -14,6 +14,16 @@ __pycache__/
 AJ_ENV/
 .pytest_cache/
 
+# Local backups created while separating review work from commit-ready code
+.local_archive/
+
+# Keep the zero-line review source visible while excluding generated previews
+experiments/*
+!experiments/zero_line_area_edge_preview/
+experiments/zero_line_area_edge_preview/results*/
+experiments/zero_line_area_edge_preview/__pycache__/
+experiments/zero_line_area_edge_preview/*.zip
+
 # Company scan inputs and generated label-removal results
 label_removal/input/*
 label_removal/output/*

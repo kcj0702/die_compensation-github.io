@@ -63,7 +63,12 @@ from label_detector import (  # noqa: E402
 from colormap_reader import build_lut  # noqa: E402
 from point_extractor import _sample_deviation_color  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
-from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
+from label_removal.remove_labels import (  # noqa: E402
+    build_scan_mask as build_label_removal_scan_mask,
+    create_versions,
+    detect_exact_hsv_leader_lines,
+    detect_label_boxes,
+)
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
@@ -531,15 +536,138 @@ def _decode_image(payload: bytes) -> np.ndarray:
     return image
 
 
+def _marker_centers_from_version_difference(
+    labels_inpainted: np.ndarray,
+    labels_points_inpainted: np.ndarray,
+) -> list[tuple[float, float]]:
+    """Return marker centers isolated by the version-2/version-4 difference."""
+    if labels_inpainted.shape != labels_points_inpainted.shape:
+        raise ValueError("Label-removal result sizes do not match.")
+    difference = np.max(
+        cv2.absdiff(labels_inpainted, labels_points_inpainted), axis=2
+    )
+    difference_mask = np.where(difference >= 8, 255, 0).astype(np.uint8)
+    count, _, stats, centroids = cv2.connectedComponentsWithStats(
+        difference_mask, connectivity=8
+    )
+    centers: list[tuple[float, float]] = []
+    maximum_area = max(500, int(difference_mask.size * 0.001))
+    for component in range(1, count):
+        area = int(stats[component, cv2.CC_STAT_AREA])
+        if 3 <= area <= maximum_area:
+            centers.append(
+                (float(centroids[component, 0]), float(centroids[component, 1]))
+            )
+    return centers
+
+
+def _refine_candidates_from_removed_markers(
+    image: np.ndarray,
+    candidates: list,
+    labels_inpainted: np.ndarray,
+    labels_points_inpainted: np.ndarray,
+) -> int:
+    """Replace heuristic endpoints with centers measured from removed markers."""
+    marker_centers = _marker_centers_from_version_difference(
+        labels_inpainted, labels_points_inpainted
+    )
+    if not marker_centers or not candidates:
+        return 0
+
+    label_boxes = detect_label_boxes(image)
+    removal_scan_mask = build_label_removal_scan_mask(image)
+    _, point_specs, point_boxes = detect_exact_hsv_leader_lines(
+        image,
+        label_boxes,
+        removal_scan_mask,
+        return_point_boxes=True,
+    )
+
+    unused_centers = set(range(len(marker_centers)))
+    center_records: list[
+        tuple[tuple[int, int, int, int], tuple[int, int]]
+    ] = []
+    for spec, point_box in zip(point_specs, point_boxes):
+        spec_x, spec_y, radius, _ = spec
+        nearest: tuple[float, int] | None = None
+        for center_index in unused_centers:
+            center_x, center_y = marker_centers[center_index]
+            distance = math.hypot(center_x - spec_x, center_y - spec_y)
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, center_index)
+        maximum_gap = max(8.0, float(radius * 3))
+        if nearest is None or nearest[0] > maximum_gap:
+            continue
+        _, center_index = nearest
+        center_records.append(
+            (point_box, (int(spec_x), int(spec_y)))
+        )
+        unused_centers.remove(center_index)
+
+    refined = 0
+    used_records: set[int] = set()
+    for candidate in candidates:
+        x, y, box_width, box_height = candidate.box
+        candidate_box = (x, y, x + box_width, y + box_height)
+        best_record: tuple[float, int] | None = None
+        candidate_area = max(1, box_width * box_height)
+        for record_index, (point_box, _) in enumerate(center_records):
+            if record_index in used_records:
+                continue
+            ix0 = max(candidate_box[0], point_box[0])
+            iy0 = max(candidate_box[1], point_box[1])
+            ix1 = min(candidate_box[2], point_box[2])
+            iy1 = min(candidate_box[3], point_box[3])
+            intersection = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            point_area = max(
+                1, (point_box[2] - point_box[0]) * (point_box[3] - point_box[1])
+            )
+            overlap = intersection / float(candidate_area + point_area - intersection)
+            if best_record is None or overlap > best_record[0]:
+                best_record = (overlap, record_index)
+        if best_record is not None and best_record[0] >= 0.75:
+            _, record_index = best_record
+            point = center_records[record_index][1]
+            used_records.add(record_index)
+        else:
+            # Direct-contact markers have no normal leader component/box
+            # record. Match their newly added difference component to the
+            # already reliable compact-marker fallback coordinate.
+            if candidate.point_xy is None:
+                continue
+            nearest_center: tuple[float, int] | None = None
+            for center_index in unused_centers:
+                center_x, center_y = marker_centers[center_index]
+                distance = math.hypot(
+                    center_x - candidate.point_xy[0],
+                    center_y - candidate.point_xy[1],
+                )
+                if nearest_center is None or distance < nearest_center[0]:
+                    nearest_center = (distance, center_index)
+            if nearest_center is None or nearest_center[0] > 12.0:
+                continue
+            _, center_index = nearest_center
+            center_x, center_y = marker_centers[center_index]
+            point = (int(round(center_x)), int(round(center_y)))
+            unused_centers.remove(center_index)
+        candidate.point_xy = point
+        candidate.traced = True
+        refined += 1
+    return refined
+
+
 def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     height, width = image.shape[:2]
     errors: dict[str, str] = {}
 
     clean_image: np.ndarray | None = None
+    points_removed_image: np.ndarray | None = None
     label_count = 0
     try:
         label_count = len(detect_label_boxes(image))
-        clean_image = create_versions(image)["2_labels_inpainted"]
+        label_versions = create_versions(image)
+        clean_image = label_versions["2_labels_inpainted"]
+        points_removed_image = label_versions["4_labels_points_inpainted"]
     except Exception as exc:  # engine errors must be shown per engine
         errors["label"] = str(exc)
 
@@ -608,6 +736,13 @@ def analyze_image(image: np.ndarray, filename: str) -> dict[str, Any]:
     deviation_warnings: list[str] = []
     try:
         candidates = detect_labels(image)
+        if clean_image is not None and points_removed_image is not None:
+            _refine_candidates_from_removed_markers(
+                image,
+                candidates,
+                clean_image,
+                points_removed_image,
+            )
         detected_candidates = len(candidates)
         deviation_scan_mask = build_scan_mask(image)
         scan_present = bool(np.any(deviation_scan_mask))

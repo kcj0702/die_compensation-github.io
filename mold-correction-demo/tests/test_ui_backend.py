@@ -118,6 +118,22 @@ class _FocusedReader(_ScriptedReader):
         return response
 
 
+class UiBackendMarkerDifferenceTest(unittest.TestCase):
+    def test_marker_centers_are_measured_from_version_difference(self) -> None:
+        labels_inpainted = np.full((40, 60, 3), 120, dtype=np.uint8)
+        labels_points_inpainted = labels_inpainted.copy()
+        labels_points_inpainted[8:13, 17:22] = 180
+        labels_points_inpainted[25:30, 43:48] = 60
+
+        centers = backend_server._marker_centers_from_version_difference(
+            labels_inpainted, labels_points_inpainted
+        )
+
+        self.assertEqual(len(centers), 2)
+        self.assertTrue(any(np.hypot(x - 19, y - 10) < 0.1 for x, y in centers))
+        self.assertTrue(any(np.hypot(x - 45, y - 27) < 0.1 for x, y in centers))
+
+
 class UiBackendModelDiscoveryTest(unittest.TestCase):
     def test_find_qwen_model_discovers_complete_workspace_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
