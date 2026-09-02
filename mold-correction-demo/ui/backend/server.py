@@ -2180,6 +2180,15 @@ app = Starlette(
         Route("/api/sheet", sheet, methods=["POST"]),
         Route("/api/products", products, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
+        Route("/api/file-organizer/status", file_organizer_status, methods=["GET"]),
+        Route("/api/file-organizer/scan", file_organizer_scan, methods=["POST"]),
+        Route("/api/file-organizer/upload", file_organizer_upload, methods=["POST"]),
+        Route("/api/file-organizer/discard", file_organizer_discard, methods=["POST"]),
+        Route("/api/file-organizer/execute", file_organizer_execute, methods=["POST"]),
+        Route("/api/file-organizer/database", file_organizer_database, methods=["POST"]),
+        Route("/api/file-organizer/folder-order", file_organizer_folder_order, methods=["GET", "POST"]),
+        Route("/api/file-organizer/paths", file_organizer_paths, methods=["GET", "POST"]),
+        Route("/api/file-organizer/reveal", file_organizer_reveal, methods=["POST"]),
     ]
 )
 app.add_middleware(
