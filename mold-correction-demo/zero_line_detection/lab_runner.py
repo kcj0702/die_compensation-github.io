@@ -280,6 +280,56 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
     return turned
 
 
+
+# 라벨 제거본 캐시. 1단계만 돌리는 것이라 가볍다(실측 1.1초).
+_cleaned: "OrderedDict[str, np.ndarray]" = OrderedDict()
+_CLEANED_MAX = 4
+
+
+def cleaned_scan(scan_bgr: np.ndarray, part_no: str | None):
+    """라벨만 지운 그림(1단계 2번 갈래)을 돌려준다.
+
+    적응형 제로라인 묶음(adaptive_runner)이 이걸 입력으로 받는다. 전체
+    파이프라인을 돌릴 필요가 없어 1단계만 따로 부른다.
+    """
+    prefix = prefix_for(part_no)
+    if prefix is None:
+        return None
+    key = hashlib.blake2b(
+        np.ascontiguousarray(scan_bgr).tobytes() + prefix.encode(),
+        digest_size=16).hexdigest()
+    if key in _cleaned:
+        _cleaned.move_to_end(key)
+        return _cleaned[key]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        room = Path(tmp)
+        feed, out = room / "input", room / "out"
+        feed.mkdir(); out.mkdir()
+        _write(feed / f"{prefix} 3D 스캔.png", scan_bgr)
+        shutil.copy2(PIPELINE / prefix / "remove_labels.py",
+                     out / "remove_labels.py")
+        done = subprocess.run(
+            [sys.executable, "remove_labels.py",
+             "--input-dir", str(feed), "--output-dir", str(out)],
+            cwd=str(out), capture_output=True, text=True,
+            encoding="utf-8", errors="replace")
+        if done.returncode != 0:
+            return None
+        branch = out / "2_labels_inpainted"
+        made = sorted(branch.glob("*.png")) if branch.is_dir() else []
+        if not made:
+            return None
+        data = np.fromfile(str(made[0]), dtype=np.uint8)
+        image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+
+    if image is not None:
+        _cleaned[key] = image
+        while len(_cleaned) > _CLEANED_MAX:
+            _cleaned.popitem(last=False)
+    return image
+
+
 def _regions_of(picked: dict) -> list:
     """보정 영역 요약 — 화면에 무엇을 왜 골랐는지 보여주려고."""
     out = []
@@ -313,4 +363,5 @@ def _lines_of(picked: dict) -> list:
     return lines
 
 
-__all__ = ["KNOWN_PREFIXES", "PIPELINE", "prefix_for", "run"]
+__all__ = ["KNOWN_PREFIXES", "PIPELINE", "cleaned_scan",
+           "prefix_for", "run"]

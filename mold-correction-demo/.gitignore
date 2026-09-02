@@ -25,5 +25,7 @@ label_removal/output/*
 cad_import/_parsed/
 # 현업 제로라인 파이프라인 결과 (실측 64XX2 117초 -> 다시 안 돈다)
 zero_line_detection/.lab_cache/
+# 적응형 제로라인 결과 (실측 67XX6 12초 -> 다시 안 돈다)
+zero_line_detection/.adaptive_cache/
 # Qwen 라벨 판독 결과 (실측 64XX2 57초 -> 다시 안 읽는다)
 ui/backend/.label_cache.json

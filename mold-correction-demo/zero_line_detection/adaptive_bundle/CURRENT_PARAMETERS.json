@@ -1,0 +1,19 @@
+{
+  "correction_threshold_mm": 0.6,
+  "correction_minimum_area_ratio": 0.02,
+  "correction_merge_gap_px": 24,
+  "correction_opening_kernel": "17x17 ellipse",
+  "zero_component_minimum_ratio_before_neck": 0.01,
+  "neck_maximum_width_px": 23.0,
+  "neck_minimum_width_prominence_ratio": 0.55,
+  "neck_absolute_width_override_px": 18.0,
+  "neck_cut_margin_each_side_px": 8,
+  "post_neck_small_thin_maximum_area_ratio": 0.01,
+  "post_neck_small_thin_maximum_internal_width_px": 30.0,
+  "offset_count": 4,
+  "total_nested_contour_count": 6,
+  "minimum_final_polygon_area_ratio": 0.005,
+  "maximum_correction_intrusion_ratio": 0.1,
+  "acute_corner_maximum_angle_deg": 70.0,
+  "acute_corner_bevel_distance_px": 12.0
+}

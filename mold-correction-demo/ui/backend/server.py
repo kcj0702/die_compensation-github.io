@@ -48,6 +48,7 @@ from label_removal.remove_labels import create_versions, detect_label_boxes  # n
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection import zero_shapes  # noqa: E402
+from zero_line_detection import adaptive_runner  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
@@ -853,6 +854,31 @@ def analyze_image(image: np.ndarray, filename: str,
     # 것이 이 때문이었다.
     lab_areas = zero_shapes.clean(lab_zero.get("areas") or [])
 
+    # 67XX6 은 **적응형 제로라인**(zero_line (2) 묶음)이 더 낫다.
+    #
+    # 앞서 쓰던 7·8단계는 링을 따라 구불구불한 띠 하나를 냈다. 네모로
+    # 다듬어도 굽은 띠를 싸는 이상 헛덮음이 40% 아래로 안 내려갔다.
+    # 새 묶음은 부품 윤곽을 안쪽으로 여섯 겹 뜬 뒤 보정 경계와의 교점을
+    # **직선으로 이어** 다각형을 만든다 — 실측 Z1~Z8 여덟 구역, 꼭짓점
+    # 7~14 개다. 실패하면 기존 결과를 그대로 쓴다.
+    #
+    # 지금은 67XX6 에만 쓴다. 나머지 둘은 이 묶음에서 Case 2(보로노이
+    # 분리선)로 가는데 그 결과는 **선**이라 영역으로 바꾸면 실오라기가
+    # 된다 — 그 둘은 지금 선으로 잘 나온다(얹힘 99.7% · 90.0%).
+    if adaptive_runner.key_for(part_key) in ADAPTIVE_PARTS:
+        try:
+            with _timed("적응형 제로라인"):
+                cleaned = lab_runner.cleaned_scan(image, part_key)
+                if cleaned is not None:
+                    fresh = adaptive_runner.run(image, cleaned, part_key)
+                    if fresh.get("error"):
+                        errors["adaptiveZero"] = fresh["error"]
+                    elif fresh.get("areas"):
+                        # 이미 직선 다각형이라 네모로 다시 싸지 않는다
+                        lab_areas = fresh["areas"]
+        except Exception as exc:
+            errors["adaptiveZero"] = str(exc)
+
     # 보정시트에 실제로 적을 포인트를 고른다. 스캔에는 수십~백여 개가
     # 찍히지만 현업 시트에 적히는 건 열몇 개다(향후 계획 02번).
     key_points: list = []
@@ -1170,6 +1196,10 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
                                          for p in line["points"]]})
     return moved
 
+
+# 적응형 제로라인(zero_line (2) 묶음)을 쓸 부품.
+# 이 묶음의 Case 1(윤곽 교점 다각형)로 가는 부품만 넣는다.
+ADAPTIVE_PARTS = {"JD_67XX6-DR000"}
 
 # 자세 후보를 몇 개까지 광선으로 검증할지. 하나에 1초 안쪽이다.
 OVERLAY_TRIES = 6
