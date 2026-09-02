@@ -11,3 +11,4 @@ starlette>=0.38
 uvicorn>=0.30
 python-multipart>=0.0.9    # /api/analyze 의 파일 업로드(form) 파싱에 필요
 mysql-connector-python>=9.0,<10.0  # 중앙 보정 이력 MySQL 연결
+openpyxl>=3.1              # /api/sheet 보정시트 엑셀 생성

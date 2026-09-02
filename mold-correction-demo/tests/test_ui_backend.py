@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from unittest.mock import patch
 
+import cv2
 import numpy as np
 
 
@@ -708,6 +709,235 @@ class UiBackendStrictReadingTest(unittest.TestCase):
         self.assertEqual(result["points"], [])
         self.assertEqual(result["stats"]["qwenReads"], 0)
         self.assertIn("3D 스캔 본체", result["warningsByEngine"]["deviation"][0])
+
+
+def _panel(width: int, height: int) -> np.ndarray:
+    """비대칭 노치와 구멍 두 개를 가진 합성 판넬."""
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    cv2.rectangle(image, (10, 10), (width - 11, height - 11), (60, 200, 60), -1)
+    cv2.rectangle(image, (10, 10), (10 + width // 5, 10 + height // 4), (255, 255, 255), -1)
+    cv2.circle(image, (width // 3, height // 2), max(4, height // 10), (255, 255, 255), -1)
+    cv2.circle(image, (2 * width // 3, height // 2), max(3, height // 16), (255, 255, 255), -1)
+    return image
+
+
+class UiBackendProductAlignmentTest(unittest.TestCase):
+    """스캔 좌표가 제품데이터 좌표로 옮겨져 나오는지 검증한다."""
+
+    def setUp(self) -> None:
+        backend_server._reader = None
+        self.product = _panel(200, 120)
+        # 제품데이터를 180도 뒤집고 2배로 키운 가짜 스캔이라 정답 좌표를 알 수 있다.
+        self.scan = cv2.resize(
+            cv2.flip(self.product, -1), (400, 240), interpolation=cv2.INTER_NEAREST
+        )
+        self.candidates = [_candidate((5, 5, 30, 16), (100, 60))]
+        # 이 클래스가 만드는 "64XX2-DR000" 은 실제 개발 PC에서 흔히 쓰는 진짜 품번
+        # 이름과 겹친다. analyze_image 가 이제 저장된 확정 방향을 먼저 찾아보므로,
+        # 그 자리를 매번 빈 임시 폴더로 갈아 끼우지 않으면 실제 로컬에 남아 있는
+        # 확정 정렬 파일을 조용히 읽어와 이 스몰 픽스처와 맞지 않는 값으로 테스트를
+        # 오염시킨다. 특정 테스트가 스토어를 직접 지정하면 그 with 블록 동안만
+        # 이 기본값을 덮어쓴다.
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store_patcher = patch.object(
+            backend_server,
+            "ALIGNMENT_STORE",
+            backend_server.AlignmentStore(Path(temp_dir.name) / "alignment"),
+        )
+        store_patcher.start()
+        self.addCleanup(store_patcher.stop)
+        library_patcher = patch.object(
+            backend_server,
+            "PRODUCT_LIBRARY",
+            backend_server.ProductLibrary(Path(temp_dir.name) / "product"),
+        )
+        library_patcher.start()
+        self.addCleanup(library_patcher.stop)
+
+    def tearDown(self) -> None:
+        backend_server._reader = None
+
+    def _analyze(self, filename: str, product_upload: np.ndarray | None) -> dict:
+        with (
+            patch.object(backend_server, "detect_label_boxes", return_value=[]),
+            patch.object(
+                backend_server,
+                "create_versions",
+                return_value={"2_labels_inpainted": self.scan.copy()},
+            ),
+            patch.object(
+                backend_server,
+                "detect_zero_line",
+                side_effect=RuntimeError("zero test disabled"),
+            ),
+            patch.object(backend_server, "detect_labels", return_value=self.candidates),
+            patch.object(
+                backend_server,
+                "build_scan_mask",
+                return_value=np.full(self.scan.shape[:2], 255, dtype=np.uint8),
+            ),
+            patch.object(
+                backend_server, "_get_qwen_reader", return_value=_Reader([-0.7])
+            ),
+        ):
+            return backend_server.analyze_image(
+                self.scan, filename, product_upload
+            )
+
+    def test_uploaded_product_image_moves_points_onto_it(self) -> None:
+        result = self._analyze("JD_64XX2-DR000 3D 스캔.png", self.product)
+
+        self.assertEqual(result["partNumber"], "64XX2-DR000")
+        self.assertIsNotNone(result["productImage"])
+        self.assertIsNotNone(result["alignmentOverlay"])
+        self.assertEqual(result["productSource"], "업로드한 이미지")
+        # self.scan 은 product 를 180도 뒤집고 2배로 키운 자료다. 방향 추정이
+        # 확실하면(여기선 확실하다) 좌표만 옮기지 않고 라벨을 읽기 전에 원본
+        # 픽셀 자체를 바로 세운다 -- 그래야 인쇄된 숫자도 똑바로 보여 OCR이
+        # 위아래가 뒤집힌 텍스트를 오독하지 않는다. 그래서 이미 바로 세운 뒤에
+        # 남는 정렬은 배율·평행이동만 필요하고 flip 은 더 이상 필요 없다.
+        self.assertFalse(result["alignment"]["flipX"])
+        self.assertFalse(result["alignment"]["flipY"])
+        self.assertTrue(result["alignment"]["confident"])
+
+        self.assertEqual(len(result["points"]), 1)
+        point = result["points"][0]
+        # detect_labels 는 이미 바로 세운 이미지에서 (100, 60) 을 찾았다고
+        # 가정하는 픽스처다. 바로 세운 스캔(400x240)을 제품(200x120)으로
+        # 절반 축소하면 (50, 30) -> 25%, 25%.
+        self.assertAlmostEqual(point["xProduct"], 25.0, delta=2.0)
+        self.assertAlmostEqual(point["yProduct"], 25.0, delta=2.0)
+        self.assertEqual(result["stats"]["pointsTransferred"], 1)
+
+    def test_upside_down_scan_is_righted_before_ocr_reads_it(self) -> None:
+        """product_alignment 는 좌표 행렬만 만든다 -- 라벨의 인쇄된 숫자는
+
+        건드리지 않는다. 그래서 스캔이 제품데이터 대비 뒤집혀 있으면(이 픽스처는
+        180도), 좌표만 나중에 옮기는 예전 방식으로는 Qwen 이 뒤집힌 채로 인쇄된
+        숫자를 그대로 읽어 오독한다("0.8" 이 "80.0" 으로 읽히는 식). 라벨을 찾고
+        읽기 전에 원본 픽셀 자체를 먼저 바로 세워야 한다.
+        """
+        captured: list[np.ndarray] = []
+
+        def _capture_boxes(image: np.ndarray) -> list:
+            captured.append(image.copy())
+            return []
+
+        with (
+            patch.object(backend_server, "detect_label_boxes", side_effect=_capture_boxes),
+            patch.object(
+                backend_server,
+                "create_versions",
+                return_value={"2_labels_inpainted": self.scan.copy()},
+            ),
+            patch.object(
+                backend_server,
+                "detect_zero_line",
+                side_effect=RuntimeError("zero test disabled"),
+            ),
+            patch.object(backend_server, "detect_labels", return_value=[]),
+            patch.object(
+                backend_server,
+                "build_scan_mask",
+                return_value=np.full(self.scan.shape[:2], 255, dtype=np.uint8),
+            ),
+        ):
+            backend_server.analyze_image(self.scan, "JD_64XX2-DR000 3D 스캔.png", self.product)
+
+        self.assertEqual(len(captured), 1)
+        righted = cv2.flip(self.scan, -1)  # self.scan 은 product 를 180도 뒤집은 것이니, 되돌리면 이거다.
+        np.testing.assert_array_equal(
+            captured[0],
+            righted,
+            "라벨을 찾기 전에 스캔을 바로 세워야 OCR 이 뒤집힌 숫자를 오독하지 않는다.",
+        )
+
+    def test_registered_product_is_used_without_a_second_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            library = backend_server.ProductLibrary(Path(temp_dir))
+            library.register("64XX2-DR000", self.product)
+            with patch.object(backend_server, "PRODUCT_LIBRARY", library):
+                result = self._analyze("JD_64XX2-DR000 3D 스캔.png", None)
+
+        self.assertIsNotNone(result["productImage"])
+        self.assertEqual(result["productSource"], "등록됨 · 64XX2-DR000")
+        self.assertEqual(result["stats"]["pointsTransferred"], 1)
+
+    def test_confirmed_orientation_is_reused_for_a_later_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            library = backend_server.ProductLibrary(root / "product")
+            library.register("64XX2-DR000", self.product)
+            store = backend_server.AlignmentStore(root / "alignment")
+
+            with (
+                patch.object(backend_server, "PRODUCT_LIBRARY", library),
+                patch.object(backend_server, "ALIGNMENT_STORE", store),
+            ):
+                first = self._analyze("JD_64XX2-DR000 3D 스캔.png", None)
+                saved = backend_server.Alignment.from_dict(first["alignment"])
+                # 사람이 좌우만 반대로 확정했다고 가정한다.
+                store.save(
+                    "64XX2-DR000",
+                    backend_server.estimate_alignment(
+                        backend_server.build_part_silhouette(self.scan),
+                        backend_server.build_product_mask(self.product),
+                        flip_x=not saved.flip_x,
+                        flip_y=saved.flip_y,
+                    ),
+                )
+                second = self._analyze("JD_64XX2-DR000 3D 스캔.png", None)
+
+        # first 는 자동 판정이 확실해서 이미 픽셀 자체를 바로 세웠으므로 flip 이
+        # 남지 않는다 (test_uploaded_product_image_moves_points_onto_it 참고).
+        self.assertFalse(first["alignment"]["flipX"])
+        # 사람이 확정 저장한 방향은 실제로는 틀렸다(좌우만 반전, 원래는 상하까지
+        # 필요) -- 그래도 저장된 값이니 그대로 믿고 픽셀을 그 방향으로 바로
+        # 세운다. 여전히 어긋난 상태로 남아 outline IoU 가 낮게 나오고, 그
+        # 사실을 경고로 알려야 한다.
+        self.assertFalse(second["alignment"]["flipX"])
+        self.assertTrue(second["alignment"]["overridden"])
+        self.assertFalse(second["alignment"]["confident"])
+        self.assertTrue(
+            any("확정 저장된 방향" in item for item in second["warningsByEngine"]["product"])
+        )
+        self.assertTrue(
+            any("일치도가 낮습니다" in item for item in second["warningsByEngine"]["product"])
+        )
+
+    def test_missing_product_leaves_the_existing_result_intact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(
+                backend_server,
+                "PRODUCT_LIBRARY",
+                backend_server.ProductLibrary(Path(temp_dir)),
+            ):
+                result = self._analyze("JD_64XX2-DR000 3D 스캔.png", None)
+
+        self.assertIsNone(result["productImage"])
+        self.assertIsNone(result["alignment"])
+        self.assertEqual(result["stats"]["pointsTransferred"], 0)
+        self.assertEqual(len(result["points"]), 1)
+        self.assertNotIn("xProduct", result["points"][0])
+        self.assertTrue(
+            any("등록되어 있지" in item for item in result["warningsByEngine"]["product"])
+        )
+
+    def test_scan_without_a_part_number_is_not_treated_as_an_error(self) -> None:
+        result = self._analyze("synthetic.png", None)
+
+        self.assertIsNone(result["partNumber"])
+        self.assertIsNone(result["productImage"])
+        self.assertEqual(result["warningsByEngine"]["product"], [])
+        self.assertNotIn("product", result["errors"])
+
+    def test_flip_flag_is_tri_state(self) -> None:
+        self.assertIsNone(backend_server._optional_flag({}, "flipX"))
+        self.assertIsNone(backend_server._optional_flag({"flipX": ""}, "flipX"))
+        self.assertTrue(backend_server._optional_flag({"flipX": "true"}, "flipX"))
+        self.assertTrue(backend_server._optional_flag({"flipX": "1"}, "flipX"))
+        self.assertFalse(backend_server._optional_flag({"flipX": "false"}, "flipX"))
 
 
 if __name__ == "__main__":
