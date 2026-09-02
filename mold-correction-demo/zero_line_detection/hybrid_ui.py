@@ -51,23 +51,41 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
     """
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
-    part_px = max(1, int(base.part_mask.sum()))
-    count, _labels = cv2.connectedComponents(base.mask.astype(np.uint8))
-    component_count = max(0, count - 1)
-    ratio = float(base.mask.astype(bool).sum()) / part_px
-    is_case1 = ratio < 0.40 and component_count > 1
-
-    if is_case1:
-        overlay = make_overlay(rgb, base.mask, base.centerline, zero_crossing=base.zero_crossing)
-        return HybridZeroLineOutput(
-            mask=base.mask.astype(bool), overlay_rgb=overlay, case=1,
-            regions=len(base.result.regions), ratio=ratio, lines=[],
-            warnings=list(base.warnings) + ["하이브리드 Case 1: 영역 기반 후보를 표시했습니다."],
-        )
-
+    fallback_part_px = max(1, int(base.part_mask.sum()))
+    fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
         import park_junhyeok_adapter as park  # loaded from EXPERIMENT_DIR
         import generate_final_hybrid_zero_line as hybrid
+        import generate_adaptive_zero_line_preview as kdt
+
+        # UI에서도 검토 엔진과 같은 ±0.6 mm 보정영역 기준을 사용한다.
+        # 기존 zero_line의 자동 tolerance(컬러바 범위의 10%)는 여기서 쓰지 않는다.
+        part = base.part_mask.astype(bool)
+        part_px = max(1, int(part.sum()))
+        positive = part & (base.values > 0.6)
+        negative = part & (base.values < -0.6)
+        raw_zero = part & ~(positive | negative)
+        zero, _labels, rows, _raw_rows = kdt.filter_components_by_ratio(
+            raw_zero, part_px, kdt.ZERO_COMPONENT_MIN_RATIO
+        )
+        ratio = float(zero.sum()) / part_px
+        is_case1 = ratio < 0.40 and len(rows) > 1
+
+        if is_case1:
+            final_mask, _details = hybrid.run_case1({
+                "zero": zero, "positive": positive, "negative": negative,
+                "part": part, "part_px": part_px,
+            })
+            overlay = rgb.copy()
+            tint = np.zeros_like(overlay)
+            tint[final_mask] = (0, 235, 255)
+            overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
+            return HybridZeroLineOutput(
+                mask=final_mask.astype(bool), overlay_rgb=overlay, case=1,
+                regions=int(cv2.connectedComponents(final_mask.astype(np.uint8))[0] - 1),
+                ratio=float(final_mask.sum()) / part_px, lines=[],
+                warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
+            )
 
         routed = park.run_original_case2_pipeline(
             original_bgr=image_bgr, scale_max_mm=_scale_for(filename)
@@ -92,6 +110,6 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
         overlay = make_overlay(rgb, base.mask, base.centerline, zero_crossing=base.zero_crossing)
         return HybridZeroLineOutput(
             mask=base.mask.astype(bool), overlay_rgb=overlay, case=1,
-            regions=len(base.result.regions), ratio=ratio, lines=[],
+            regions=len(base.result.regions), ratio=fallback_ratio, lines=[],
             warnings=list(base.warnings) + [f"Case 2 경로 계산 실패로 Case 1 후보를 표시했습니다: {exc}"],
         )
