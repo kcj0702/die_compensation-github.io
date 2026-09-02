@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
@@ -32,6 +33,7 @@ UI_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = UI_DIR.parent
 WORKSPACE_DIR = PROJECT_DIR.parent
 DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
+FILE_ORGANIZER_DIR = WORKSPACE_DIR / "file_organizer"
 
 
 def _load_local_environment(env_path: Path) -> None:
@@ -57,6 +59,7 @@ _load_local_environment(UI_DIR / ".env")
 # its own folder must precede the project root on sys.path.
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
+sys.path.insert(0, str(FILE_ORGANIZER_DIR))
 
 from label_detector import (  # noqa: E402
     build_blue_annotation_mask, build_scan_mask, detect_labels,
@@ -110,12 +113,55 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
 from zero_line_detection.zero_boundary import (  # noqa: E402
     draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
-
-
-DEFAULT_FOLDER_ROOT = Path(
-    r"C:\Users\KDT013\Desktop\금형보정치\경북대KDT(14기) 자료\품번별 폴더 정리 자료_예시"
+from core import (  # noqa: E402
+    AXES, AXIS_LABELS, FilenameClassifier, classify_batch, execute_batch,
+    is_valid_folder_order, load_folder_order, load_rules, migrate_folder_structure,
+    save_folder_order, write_history,
 )
-FOLDER_ROOT = Path(os.environ.get("AJIN_FOLDER_ROOT", DEFAULT_FOLDER_ROOT)).resolve()
+from storage import (  # noqa: E402
+    DatabaseError as FileDatabaseError,
+    MariaDBRepository,
+    load_database_url,
+    safe_database_label,
+    save_database_url,
+)
+
+
+FILE_ORGANIZER_RULES = load_rules(FILE_ORGANIZER_DIR / "rules.json")
+DEFAULT_FOLDER_ROOT = Path(FILE_ORGANIZER_RULES["destination_root"])
+_ORGANIZER_PATHS_FILE = FILE_ORGANIZER_DIR / ".organizer_paths.json"
+
+
+def _load_organizer_paths_override() -> dict[str, str]:
+    """웹에서 저장한 원본/정리 대상 경로 오버라이드. .env 의 AJIN_* 값이 항상 우선한다."""
+    if not _ORGANIZER_PATHS_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(_ORGANIZER_PATHS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _initial_organizer_root(env_name: str, override_key: str, rules_value: str) -> Path:
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        return Path(env_value).resolve()
+    override_value = _load_organizer_paths_override().get(override_key, "").strip()
+    if override_value:
+        return Path(override_value).resolve()
+    return Path(rules_value).resolve()
+
+
+FOLDER_ROOT = _initial_organizer_root(
+    "AJIN_FOLDER_ROOT", "destinationRoot", str(DEFAULT_FOLDER_ROOT)
+)
+FILE_SOURCE_ROOT = _initial_organizer_root(
+    "AJIN_FILE_SOURCE_ROOT", "sourceRoot", FILE_ORGANIZER_RULES["source_root"]
+)
+FILE_STAGING_ROOT = UI_DIR / "backend" / "file_staging"
+FILE_LOG_ROOT = UI_DIR / "backend" / "file_operation_logs"
+MAX_FILE_ORGANIZER_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024
 QWEN_CACHE_DIR = (
     Path.home()
@@ -354,7 +400,14 @@ def _init_correction_db() -> None:
             conn.execute("PRAGMA user_version = 1")
 
 
-_init_correction_db()
+try:
+    _init_correction_db()
+except CorrectionDatabaseError as exc:
+    # 서버 시작 시점에 보정 이력 DB(사내망 MySQL)가 잠깐 안 닿아도, 그것과
+    # 무관한 나머지 기능(품번 파일 정리 등)까지 통째로 못 뜨게 하지는 않는다.
+    # 보정 이력 쪽 API는 요청 시점에 다시 연결을 시도하고, 여전히 안 되면
+    # 이미 503으로 안내한다.
+    print(f"[경고] 보정 이력 DB 초기화 실패, 나머지 기능은 계속 시작합니다: {exc}")
 
 
 def _correction_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -1625,6 +1678,435 @@ async def folders(request: Request) -> JSONResponse:
         )
     except (OSError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _active_file_database_url() -> str:
+    return os.environ.get("AJIN_FILE_DB_URL", "").strip() or load_database_url(
+        FILE_ORGANIZER_DIR
+    )
+
+
+def _active_folder_order() -> list[str]:
+    return load_folder_order(FILE_ORGANIZER_DIR, FILE_ORGANIZER_RULES.get("folder_order"))
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _safe_organizer_source(value: str) -> Path:
+    candidate = Path(value).resolve()
+    allowed_roots = (FILE_SOURCE_ROOT, FILE_STAGING_ROOT.resolve())
+    if not any(_path_is_within(candidate, root) for root in allowed_roots):
+        raise ValueError("허용된 원본 또는 업로드 폴더 밖의 파일은 처리할 수 없습니다.")
+    if not candidate.is_file():
+        raise ValueError("원본 파일을 찾을 수 없습니다.")
+    return candidate
+
+
+def _safe_organizer_target(relative_path: str) -> Path:
+    candidate = (FOLDER_ROOT / relative_path).resolve()
+    if not _path_is_within(candidate, FOLDER_ROOT):
+        raise ValueError("허용된 정리 대상 폴더 밖으로 저장할 수 없습니다.")
+    return candidate
+
+
+def _organizer_item(path: Path, classification: Any, *, source_kind: str) -> dict[str, Any]:
+    target_dir = classification.target_dir
+    if target_dir is None or target_dir == FOLDER_ROOT:
+        target_relative = ""
+    else:
+        try:
+            target_relative = target_dir.relative_to(FOLDER_ROOT).as_posix()
+        except ValueError:
+            target_relative = ""
+    stat = path.stat()
+    return {
+        "id": uuid.uuid5(uuid.NAMESPACE_URL, str(path.resolve())).hex,
+        "name": path.name,
+        "sourcePath": str(path),
+        "sourceKind": source_kind,
+        "size": stat.st_size,
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "customer": classification.customer,
+        "itemNo": classification.item_no,
+        "family": classification.family,
+        "productName": classification.product_name,
+        "process": classification.process,
+        "categoryKey": classification.category_key,
+        "categoryLabel": classification.category_label,
+        "confidence": classification.confidence,
+        "reasons": classification.reasons,
+        "targetDir": target_relative,
+        "targetPath": (Path(target_relative) / path.name).as_posix(),
+        "matchedProductFolder": classification.matched_product_folder,
+        "detailPath": classification.detail_path,
+    }
+
+
+def _scan_organizer_source() -> list[dict[str, Any]]:
+    if not FILE_SOURCE_ROOT.is_dir():
+        return []
+    ignored = {name.casefold() for name in FILE_ORGANIZER_RULES.get("ignored_names", [])}
+    paths = sorted(
+        (
+            path for path in FILE_SOURCE_ROOT.rglob("*")
+            if path.is_file()
+            and not path.name.startswith("~$")
+            and path.name.casefold() not in ignored
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    classifications = classify_batch(classifier, paths)
+    return [
+        _organizer_item(path, classification, source_kind="source")
+        for path, classification in zip(paths, classifications)
+    ]
+
+
+def _file_database_status(check_connection: bool) -> dict[str, Any]:
+    database_url = _active_file_database_url()
+    response: dict[str, Any] = {
+        "configured": bool(database_url),
+        "label": safe_database_label(database_url),
+        "connected": None,
+        "catalogCount": 0,
+        "operationCount": 0,
+    }
+    if not database_url or not check_connection:
+        return response
+    try:
+        summary = MariaDBRepository(database_url).get_summary()
+        response.update(summary, connected=True)
+    except FileDatabaseError as exc:
+        response.update(connected=False, error=str(exc))
+    return response
+
+
+async def file_organizer_status(request: Request) -> JSONResponse:
+    check_database = request.query_params.get("checkDb") == "1"
+    database = await run_in_threadpool(_file_database_status, check_database)
+    return JSONResponse(
+        {
+            "sourceRoot": str(FILE_SOURCE_ROOT),
+            "destinationRoot": str(FOLDER_ROOT),
+            "sourceAvailable": FILE_SOURCE_ROOT.is_dir(),
+            "destinationAvailable": FOLDER_ROOT.is_dir(),
+            "database": database,
+        }
+    )
+
+
+async def file_organizer_scan(_request: Request) -> JSONResponse:
+    try:
+        items = await run_in_threadpool(_scan_organizer_source)
+        return JSONResponse({"items": items, "count": len(items)})
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_upload(request: Request) -> JSONResponse:
+    FILE_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        form = await request.form(
+            max_files=100,
+            max_fields=4,
+            max_part_size=MAX_FILE_ORGANIZER_UPLOAD_BYTES,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": f"업로드를 읽지 못했습니다: {exc}"}, status_code=400)
+    uploads = form.getlist("files")
+    if not uploads:
+        return JSONResponse({"error": "업로드할 파일이 없습니다."}, status_code=400)
+    destinations: list[Path] = []
+    for upload in uploads:
+        filename = Path(getattr(upload, "filename", "") or "").name
+        if not filename or filename.startswith("~$"):
+            continue
+        upload_dir = FILE_STAGING_ROOT / uuid.uuid4().hex
+        upload_dir.mkdir(parents=True, exist_ok=False)
+        destination = upload_dir / filename
+        total = 0
+        try:
+            with destination.open("wb") as stream:
+                while chunk := await upload.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_FILE_ORGANIZER_UPLOAD_BYTES:
+                        raise ValueError("파일 한 개는 500MB 이하만 업로드할 수 있습니다.")
+                    stream.write(chunk)
+            destinations.append(destination)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            upload_dir.rmdir()
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        finally:
+            await upload.close()
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    classifications = classify_batch(classifier, destinations)
+    items = [
+        _organizer_item(destination, classification, source_kind="upload")
+        for destination, classification in zip(destinations, classifications)
+    ]
+    return JSONResponse({"items": items, "count": len(items)})
+
+
+def _discard_staged_upload(source_path: str) -> None:
+    """대기열에서 지운 업로드 파일의 임시 사본을 정리한다.
+
+    원본 폴더(FILE_SOURCE_ROOT)에서 스캔한 실제 회사 파일은 절대 지우지 않도록,
+    file_staging 아래에 있는 업로드 임시 파일일 때만 지운다 — 그 밖의 경로는
+    조용히 무시한다(대기열에서 빼는 것 자체는 프론트엔드가 이미 처리했으므로).
+    """
+    try:
+        candidate = Path(source_path).resolve()
+    except OSError:
+        return
+    if not _path_is_within(candidate, FILE_STAGING_ROOT.resolve()):
+        return
+    candidate.unlink(missing_ok=True)
+    try:
+        candidate.parent.rmdir()
+    except OSError:
+        pass
+
+
+async def file_organizer_discard(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        source_path = str(payload.get("sourcePath", ""))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not source_path:
+        return JSONResponse({"error": "sourcePath가 필요합니다."}, status_code=400)
+    await run_in_threadpool(_discard_staged_upload, source_path)
+    return JSONResponse({"ok": True})
+
+
+def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 200:
+        raise ValueError("한 번에 1~200개 파일을 선택해야 합니다.")
+    operation = str(payload.get("operation", "copy"))
+    conflict = str(payload.get("conflict", "rename"))
+    if operation not in {"copy", "move"} or conflict not in {"rename", "skip", "overwrite"}:
+        raise ValueError("지원하지 않는 파일 작업 설정입니다.")
+
+    parsed_items: list[tuple[Path, str | None]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("파일 항목 형식이 올바르지 않습니다.")
+        source = _safe_organizer_source(str(raw_item.get("sourcePath", "")))
+        manual_target = raw_item.get("targetDir")
+        parsed_items.append((source, str(manual_target) if manual_target is not None else None))
+
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    sources = [source for source, _ in parsed_items]
+    batch_classifications = classify_batch(classifier, sources)
+
+    pairs: list[tuple[Path, Path]] = []
+    classifications: dict[str, Any] = {}
+    for (source, manual_target), classification in zip(parsed_items, batch_classifications):
+        target_dir = (
+            _safe_organizer_target(manual_target)
+            if manual_target is not None
+            else classification.target_dir
+        )
+        if target_dir is None:
+            target_dir = FOLDER_ROOT / FILE_ORGANIZER_RULES.get("unclassified_folder", "_미분류")
+        pairs.append((source, target_dir / source.name))
+        classifications[MariaDBRepository._source_key(source)] = classification
+
+    results = execute_batch(pairs, operation=operation, conflict=conflict)
+    write_history(results, FILE_LOG_ROOT)
+    database_note = "MariaDB 미설정 · 로컬 감사 로그 저장"
+    database_url = _active_file_database_url()
+    if database_url:
+        try:
+            db_result = MariaDBRepository(database_url).record_batch(
+                batch_id=str(uuid.uuid4()),
+                results=results,
+                classifications=classifications,
+                storage_root=FOLDER_ROOT,
+            )
+            database_note = (
+                f"MariaDB 이력 {db_result.operation_count}건 · "
+                f"카탈로그 {db_result.catalog_count}건"
+            )
+        except FileDatabaseError as exc:
+            database_note = f"MariaDB 기록 실패 · 로컬 감사 로그 보존 ({exc})"
+
+    for source, result in zip(sources, results):
+        if result.status == "success" and _path_is_within(source, FILE_STAGING_ROOT.resolve()):
+            try:
+                source.unlink(missing_ok=True)
+                source.parent.rmdir()
+            except OSError:
+                pass
+    return {
+        "results": [
+            {
+                "source": result.source,
+                "destination": result.destination,
+                "operation": result.operation,
+                "status": result.status,
+                "message": result.message,
+            }
+            for result in results
+        ],
+        "databaseNote": database_note,
+    }
+
+
+async def file_organizer_execute(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        response = await run_in_threadpool(_execute_file_organizer, payload)
+        return JSONResponse(response)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_database(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        status = await run_in_threadpool(_file_database_status, True)
+        return JSONResponse(status)
+    try:
+        payload = await request.json()
+        database_url = str(payload.get("databaseUrl", "")).strip()
+        if not database_url:
+            raise ValueError("MariaDB 연결 URL을 입력해 주세요.")
+        version = await run_in_threadpool(
+            MariaDBRepository(database_url).test_and_initialize
+        )
+        save_database_url(FILE_ORGANIZER_DIR, database_url)
+        return JSONResponse(
+            {
+                "configured": True,
+                "connected": True,
+                "label": safe_database_label(database_url),
+                "version": version,
+            }
+        )
+    except (FileDatabaseError, OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+_AXIS_OPTIONS = [{"id": axis, "label": AXIS_LABELS[axis]} for axis in AXES]
+
+
+async def file_organizer_folder_order(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        order = await run_in_threadpool(_active_folder_order)
+        return JSONResponse({"folderOrder": order, "axes": _AXIS_OPTIONS})
+    try:
+        payload = await request.json()
+        order = payload.get("folderOrder")
+        if not is_valid_folder_order(order):
+            raise ValueError(
+                "folderOrder는 차종·상세품번과 자료유형을 반드시 포함하고, "
+                + ", ".join(AXES)
+                + " 값을 겹치지 않게 사용해야 합니다."
+            )
+        previous_order = await run_in_threadpool(_active_folder_order)
+        migration = await run_in_threadpool(
+            migrate_folder_structure, FOLDER_ROOT, FILE_ORGANIZER_RULES,
+            previous_order, order,
+        )
+        await run_in_threadpool(save_folder_order, FILE_ORGANIZER_DIR, order)
+        return JSONResponse(
+            {
+                "folderOrder": order,
+                "axes": _AXIS_OPTIONS,
+                "migration": {
+                    "moved": migration.moved,
+                    "skipped": migration.skipped,
+                    "errors": migration.errors,
+                },
+            }
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _organizer_path_locks() -> tuple[bool, bool]:
+    source_locked = bool(os.environ.get("AJIN_FILE_SOURCE_ROOT", "").strip())
+    destination_locked = bool(os.environ.get("AJIN_FOLDER_ROOT", "").strip())
+    return source_locked, destination_locked
+
+
+def _set_organizer_roots(source_root: str, destination_root: str) -> None:
+    global FILE_SOURCE_ROOT, FOLDER_ROOT
+    source_path = Path(source_root).expanduser().resolve()
+    destination_path = Path(destination_root).expanduser().resolve()
+    source_path.mkdir(parents=True, exist_ok=True)
+    destination_path.mkdir(parents=True, exist_ok=True)
+    FILE_ORGANIZER_DIR.mkdir(parents=True, exist_ok=True)
+    _ORGANIZER_PATHS_FILE.write_text(
+        json.dumps(
+            {"sourceRoot": str(source_path), "destinationRoot": str(destination_path)},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    FILE_SOURCE_ROOT = source_path
+    FOLDER_ROOT = destination_path
+
+
+async def file_organizer_paths(request: Request) -> JSONResponse:
+    source_locked, destination_locked = _organizer_path_locks()
+    if request.method == "GET":
+        return JSONResponse(
+            {
+                "sourceRoot": str(FILE_SOURCE_ROOT),
+                "destinationRoot": str(FOLDER_ROOT),
+                "sourceLocked": source_locked,
+                "destinationLocked": destination_locked,
+            }
+        )
+    try:
+        if source_locked or destination_locked:
+            raise ValueError(
+                "ui/.env 의 AJIN_FILE_SOURCE_ROOT/AJIN_FOLDER_ROOT 로 경로가 고정되어 "
+                "있어 웹에서 바꿀 수 없습니다. .env 값을 지우거나 바꾼 뒤 서버를 다시 "
+                "시작해 주세요."
+            )
+        payload = await request.json()
+        source_root = str(payload.get("sourceRoot", "")).strip()
+        destination_root = str(payload.get("destinationRoot", "")).strip()
+        if not source_root or not destination_root:
+            raise ValueError("원본 폴더와 정리 대상 폴더 경로를 모두 입력해 주세요.")
+        await run_in_threadpool(_set_organizer_roots, source_root, destination_root)
+        return JSONResponse(
+            {
+                "sourceRoot": str(FILE_SOURCE_ROOT),
+                "destinationRoot": str(FOLDER_ROOT),
+                "sourceLocked": False,
+                "destinationLocked": False,
+            }
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_reveal(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        which = str(payload.get("which", ""))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    target = {"source": FILE_SOURCE_ROOT, "destination": FOLDER_ROOT}.get(which)
+    if target is None:
+        return JSONResponse({"error": "which은 source 또는 destination이어야 합니다."}, status_code=400)
+    if not target.is_dir():
+        return JSONResponse({"error": "폴더가 아직 없습니다."}, status_code=400)
+    if not hasattr(os, "startfile"):
+        return JSONResponse({"error": "이 서버 환경에서는 탐색기 열기를 지원하지 않습니다."}, status_code=400)
+    try:
+        os.startfile(str(target))  # noqa: S606 - 로컬 데스크톱 전용 앱, 사용자 자신의 PC 탐색기를 연다.
+    except OSError as exc:
+        return JSONResponse({"error": f"탐색기를 열지 못했습니다: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True})
 
 
 app = Starlette(

@@ -38,3 +38,8 @@ label_removal/output/*
 
 !label_removal/input/.gitkeep
 !label_removal/output/.gitkeep
+
+# AJIN Die Insight file-organizer runtime data
+ui/backend/file_staging/
+ui/backend/file_operation_logs/
+ui/.env
