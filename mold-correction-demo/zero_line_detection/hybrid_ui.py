@@ -42,6 +42,90 @@ def _scale_for(filename: str) -> float:
     return 2.0
 
 
+def _matching_review_spec(filename: str):
+    """Return the bundled review specification for a known standard scan.
+
+    The correction-only review inputs include the inpainted scan, its colour
+    map and the gray-area sign assignment.  They are the authoritative input
+    for the supplied standard scans; re-estimating those from an uploaded PNG
+    changes the connected components and can select the wrong case.
+    """
+    import generate_adaptive_zero_line_preview as kdt
+
+    normalized = filename.upper()
+    return next(
+        (spec for spec in kdt.SPECS if spec.key.upper() in normalized), None
+    )
+
+
+def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
+    """Expose each final zero region boundary in the response schema."""
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    lines: list[dict] = []
+    for index, contour in enumerate(contours, start=1):
+        points = contour.reshape(-1, 2)
+        if len(points) >= 2:
+            lines.append({"id": index, "points": points.tolist()})
+    return lines
+
+
+def _detect_from_review_inputs(
+    image_bgr: np.ndarray, filename: str
+) -> HybridZeroLineOutput | None:
+    """Run the exact review pipeline for a bundled standard scan.
+
+    ``None`` means arbitrary input, which continues through the generic
+    in-memory path.  A size mismatch also must not apply a mask at wrong
+    pixels.
+    """
+    import generate_final_hybrid_zero_line as hybrid
+
+    spec = _matching_review_spec(filename)
+    if spec is None:
+        return None
+    common = hybrid.load_common_inputs(spec, hybrid.DEFAULT_CORRECTION_DIR)
+    if tuple(common["part"].shape) != tuple(image_bgr.shape[:2]):
+        return None
+
+    selected_case = hybrid.select_case(common["zero_ratio"], common["zero_count"])
+    if selected_case == 1:
+        final_mask, _details = hybrid.run_case1(common)
+        lines = _mask_contours_as_lines(final_mask)
+        overlay = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        tint = np.zeros_like(overlay)
+        tint[final_mask] = (0, 235, 255)
+        overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
+    else:
+        final_mask, details = hybrid.run_case2(common)
+        lines = []
+        for index, selection in enumerate(details["selections"], start=1):
+            points = np.asarray(
+                selection["closure_validation"]["route"]["path_points"],
+                dtype=np.int32,
+            )
+            if len(points) >= 2:
+                lines.append({"id": index, "points": points.tolist()})
+        _construction, overlay = hybrid.draw_team_route_view(
+            common["image"].copy(), details, final_mask
+        )
+
+    return HybridZeroLineOutput(
+        mask=final_mask.astype(bool),
+        overlay_rgb=overlay,
+        case=selected_case,
+        regions=len(lines),
+        ratio=float(final_mask.sum()) / max(1, int(common["part_px"])),
+        lines=lines,
+        warnings=[
+            f"검토 입력 재사용: {spec.key} / {selected_case}번 방식 "
+            f"(제로 가능영역 {common['zero_ratio']:.2%}, "
+            f"{common['zero_count']}개)"
+        ],
+    )
+
+
 def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroLineOutput:
     """Detect a UI-ready zero result, with a safe case-1 fallback.
 
@@ -49,6 +133,10 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
     components whose total area is below 40% choose case 1; all other inputs
     choose the original case-2 routing implementation.
     """
+    review_result = _detect_from_review_inputs(image_bgr, filename)
+    if review_result is not None:
+        return review_result
+
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
     fallback_part_px = max(1, int(base.part_mask.sum()))
