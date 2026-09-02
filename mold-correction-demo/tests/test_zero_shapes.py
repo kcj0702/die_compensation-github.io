@@ -107,3 +107,30 @@ def test_스크립트가_바뀌면_열쇠가_바뀐다():
     assert stamp and stamp == lab_runner._script_stamp("JD_64XX2-DR000")
     assert stamp != lab_runner._script_stamp("JD_67XX6-DR000"), (
         "부품이 다르면 스크립트도 다르다")
+
+
+def test_뒤집힌_그림_좌표를_되돌린다():
+    """받은 파이프라인은 컬러바 위아래를 전제한다.
+
+    실측 67XX6 스캔의 사본 하나가 180도 돌아가 있었고, 그것을 올리면
+    2단계에서 멈춘 채 조용히 우리 자체 검출로 넘어가 얹힘이 99% 에서
+    48% 로 보였다. 돌려서 다시 해 보고, 좌표는 원래 그림 기준으로
+    되돌려야 화면의 그림과 자리가 맞는다.
+    """
+    from zero_line_detection import lab_runner
+
+    width, height = 100, 60
+    turned = lab_runner._turned_back([[0, 0], [99, 59], [30, 20]],
+                                     width, height)
+    assert turned == [[99.0, 59.0], [0.0, 0.0], [69.0, 39.0]]
+    # 두 번 되돌리면 제자리다
+    again = lab_runner._turned_back(turned, width, height)
+    assert again == [[0.0, 0.0], [99.0, 59.0], [30.0, 20.0]]
+
+
+def test_컬러바_실패만_돌려_본다():
+    """다른 이유로 멈춘 것을 돌려서 다시 하면 시간만 버린다."""
+    from zero_line_detection import lab_runner
+
+    assert lab_runner.COLORBAR_FAILURE in (
+        "RuntimeError: The source color bar could not be detected")

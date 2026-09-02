@@ -91,7 +91,9 @@ type AnalysisResult = {
   };
   warnings: string[];
   warningsByEngine?: Partial<Record<Engine, string[]>>;
-  errors: Partial<Record<Engine, string>>;
+  /* 엔진별 오류. labZero 는 탭이 없는 엔진이라(현업 파이프라인)
+     따로 적어 둔다 — 타입에 없으면 화면에서 못 쓴다. */
+  errors: Partial<Record<Engine | 'labZero', string>>;
   valueMode: string;
 };
 type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string };
@@ -1990,6 +1992,21 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 </span>
                 <span>{summary?.n_faces.toLocaleString()} 삼각형</span>
               </div>
+              {/* 현업 파이프라인이 실패하면 조용히 우리 검출로 넘어간다.
+                  그러면 화면에는 제로라인이 나오긴 하는데 근거가 다른
+                  것이라, 왜 평소와 달라 보이는지 알 길이 없다. 실측
+                  67XX6 에서 이것 때문에 얹힘 99% 가 48% 로 보였다. */}
+              {(() => {
+                const picked = scans.find((s) => s.id === overlayScanId);
+                const failed = picked?.result?.errors?.labZero;
+                if (!failed) return null;
+                return <p className="cad-lab-error">
+                  <b>현업 제로라인 파이프라인이 이 스캔에서 실패했습니다.</b>
+                  {' '}지금 보이는 제로라인은 그 결과가 아니라 우리 자체
+                  검출입니다 — 근거가 다르므로 그대로 쓰지 마세요.
+                  <em>{failed}</em>
+                </p>;
+              })()}
               {overlay && showAlign && <div className="cad-align">
                 <div className="cad-align__head">
                   <b>정렬 맞추기 — 스캔 그림을 형상 위에서 밀고 돌립니다</b>

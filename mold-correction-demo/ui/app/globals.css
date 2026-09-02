@@ -696,3 +696,8 @@ button { cursor: pointer; }
 .cad-align__rate.is-ok{background:#e6f6ec;color:#26734a}
 .cad-align__toggle{padding:3px 10px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;font-size:10.5px;color:#3d4e5f;cursor:pointer}
 .cad-align__toggle.is-on{border-color:#2f8f5b;background:#e6f6ec;color:#26734a}
+
+/* 현업 파이프라인 실패 — 조용히 넘어가면 안 되는 일이다 */
+.cad-lab-error{margin:0 0 8px;padding:9px 12px;border:1px solid #e2b4b4;border-left:4px solid #bd4650;border-radius:6px;background:#fdf3f3;color:#7a2b33;font-size:11.5px;line-height:1.6}
+.cad-lab-error b{color:#a3323f}
+.cad-lab-error em{display:block;margin-top:4px;color:#8a5a60;font-style:normal;font-size:10.5px;word-break:break-all}

@@ -120,8 +120,17 @@ def _write(path: Path, image: np.ndarray) -> None:
     encoded.tofile(str(path))
 
 
-def run(scan_bgr: np.ndarray, part_no: str | None,
-        keep_dir: Path | None = None) -> dict:
+# 컬러바를 못 찾았다는 실패는 그림이 뒤집혔을 때 난다.
+COLORBAR_FAILURE = "color bar could not be detected"
+
+
+def _turned_back(points: list, width: int, height: int) -> list:
+    """180도 돌려서 얻은 좌표를 원래 그림 좌표로 되돌린다."""
+    return [[width - 1 - float(x), height - 1 - float(y)] for x, y in points]
+
+
+def _run_once(scan_bgr: np.ndarray, part_no: str | None,
+              keep_dir: Path | None = None) -> dict:
     """스캔 한 장으로 제로라인을 만든다.
 
     Args:
@@ -236,6 +245,39 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
     except Exception:
         pass          # 캐시를 못 써도 결과는 이미 나왔다
     return result
+
+
+
+def run(scan_bgr: np.ndarray, part_no: str | None,
+        keep_dir: Path | None = None) -> dict:
+    """스캔 한 장으로 제로라인을 만든다. 뒤집힌 그림도 받아 준다.
+
+    [왜 뒤집기를 다루나]
+    받은 파이프라인은 컬러바의 위아래(위가 +)를 전제한다. 그림이 180도
+    돌아가 있으면 2단계에서 "The source color bar could not be detected"
+    로 멈춘다. 실측: 같은 67XX6 스캔의 사본 하나가 180도 돌아가 있었고,
+    그것을 올리면 파이프라인이 실패한 채 조용히 우리 자체 검출로 넘어가
+    얹힘이 99% 에서 48% 로 보였다.
+
+    사람이 그림을 돌려 저장하는 일은 흔하다. 실패하면 한 번 돌려서 다시
+    해 보고, 나온 좌표는 **원래 그림 좌표로 되돌려** 준다. 그래야 화면에
+    보이는 그림과 자리가 맞는다.
+    """
+    first = _run_once(scan_bgr, part_no, keep_dir)
+    if COLORBAR_FAILURE not in str(first.get("error") or ""):
+        return first
+
+    turned = _run_once(cv2.rotate(scan_bgr, cv2.ROTATE_180), part_no, keep_dir)
+    if turned.get("error"):
+        return first          # 돌려도 안 되면 처음 이유를 그대로 알린다
+
+    height, width = scan_bgr.shape[:2]
+    turned["lines"] = [_turned_back(line, width, height)
+                       for line in (turned.get("lines") or [])]
+    turned["areas"] = [_turned_back(area, width, height)
+                       for area in (turned.get("areas") or [])]
+    turned["rotated180"] = True
+    return turned
 
 
 def _regions_of(picked: dict) -> list:
