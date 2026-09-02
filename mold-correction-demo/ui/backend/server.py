@@ -1468,7 +1468,9 @@ async def sheet(request: Request) -> Response:
             ),
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
-                "X-Sheet-Summary": json.dumps(summary, ensure_ascii=False),
+                # HTTP 헤더는 latin-1만 허용한다. 한글 경고는 JSON escape로
+                # 보내고, UI가 필요하면 정상적으로 JSON.parse 할 수 있다.
+                "X-Sheet-Summary": json.dumps(summary, ensure_ascii=True),
             },
         )
     except Exception as exc:
