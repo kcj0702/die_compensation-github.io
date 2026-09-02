@@ -1258,6 +1258,12 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
 
     fit, vertices, faces, shifted, cut_axis, cut_mid, cut_side = best
 
+    # 마지막으로 **얹힘 비율을 직접 올린다.** 자세 찾기는 실루엣 겹침을
+    # 보는데, 그건 대리 지표라 부품에 따라 크게 어긋난다.
+    #   64XX2 99.7 -> 99.7 · 67XX6 88.0 -> 99.0 · 71XX2 67.7 -> 90.0
+    fit = ov.polish_by_hit_rate(
+        fit, vertices, faces, analysis["part_mask"], shifted)
+
     # 작업자가 손으로 맞춘 값이 있으면 그대로 따른다. 자동 정합은
     # 실루엣만 보므로 몇 퍼센트가 모자랄 수 있는데, 그때 사람이 조금
     # 돌리고 옮겨서 맞출 수 있어야 쓸 수 있는 도구가 된다.

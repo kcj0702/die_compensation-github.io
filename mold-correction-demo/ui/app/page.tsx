@@ -894,6 +894,12 @@ function zeroLinesToShow(result: AnalysisResult): SimpleZeroLine[] {
       tolerance_coverage: 1, length_px: 0, mean_abs_deviation: 0,
     } as unknown as SimpleZeroLine));
   }
+  // 현업 파이프라인이 **영역**으로 답한 부품(67XX6)은 그것이 답이다.
+  //
+  // 예전에는 선이 없으면 우리 자체 검출로 넘어갔다. 그래서 67XX6 시트에
+  // 현업 네모와 우리 대각선이 같이 그려져, 선이 부품 밖으로 뻗어 나가고
+  // 무엇이 답인지 알 수 없었다.
+  if ((result.labZeroAreas?.length ?? 0) > 0) return [];
   return result.simpleZeroLines || [];
 }
 

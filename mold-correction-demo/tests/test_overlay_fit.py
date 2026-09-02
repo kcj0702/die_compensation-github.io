@@ -252,3 +252,37 @@ def test_자세를_여러_개_받을_수_있다():
     assert all(hasattr(f, "mm_per_px") for f in got)
     # 겹침이 좋은 순이어야 한다
     assert got[0].iou >= got[-1].iou
+
+
+def test_얹힘으로_다듬으면_안_나빠진다():
+    """실루엣 겹침으로 고른 자세를 얹힘 기준으로 더 다듬는다."""
+    import cv2
+
+    vertices, faces = _bar()
+    tab = trimesh.creation.box(extents=[60, 60, 40])
+    tab.apply_translation([-160, 0, 65])
+    grown = trimesh.util.concatenate([
+        trimesh.Trimesh(vertices=vertices, faces=faces, process=False), tab])
+    grown_v = np.asarray(grown.vertices, float)
+    grown_f = np.asarray(grown.faces)
+
+    mask = np.zeros((300, 500), np.uint8)
+    cv2.rectangle(mask, (60, 110), (440, 190), 255, -1)
+    mesh = trimesh.Trimesh(vertices=grown_v, faces=grown_f, process=False)
+
+    fit = ov.fit_view(grown_v, grown_f, mask)
+    before = ov.measure_hit_rate(fit, grown_v, grown_f, mask, mesh)
+    after_fit = ov.polish_by_hit_rate(fit, grown_v, grown_f, mask, mesh)
+    assert after_fit.hit_rate >= before - 1e-6, "다듬어서 되레 나빠졌다"
+    assert after_fit.hit_rate == round(
+        ov.measure_hit_rate(after_fit, grown_v, grown_f, mask, mesh), 4)
+
+
+def test_이미_완벽하면_그대로_둔다():
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+    fit = ov.fit_view(vertices, faces, mask)
+    polished = ov.polish_by_hit_rate(fit, vertices, faces, mask, mesh)
+    assert polished.hit_rate >= ov.measure_hit_rate(
+        fit, vertices, faces, mask, mesh) - 1e-6

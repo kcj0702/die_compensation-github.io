@@ -731,7 +731,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 서버가 선 위를 촘촘히(4px 간격) 쏴서 표면에 얹어 주므로, 그
       // 점들을 이으면 곡면을 그대로 따라간다.
       const lift = radius * 0.004;
-      for (const line of overlay.zeroLines || []) {
+      // 영역으로 답한 부품은 영역만 그린다 — 우리 자체 검출선을 같이
+      // 그리면 부품을 가로질러 밖으로 뻗어 나간다.
+      const zeroLines = (overlay.zeroKind === 'areas'
+        && (overlay.zeroAreas?.length ?? 0)) ? [] : (overlay.zeroLines || []);
+      for (const line of zeroLines) {
         // 빈 공간을 지나는 구간은 점선으로. 부품이 없는 자리라 실선으로
         // 그리면 거짓이 된다 — 받은 파이프라인은 구멍을 지나갈 수 있게
         // 돼 있어서 링 부품(선루프)에서 실제로 빈 데를 가로지른다.
@@ -760,8 +764,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         // **면 위에 얹은 스티커**처럼 보인다. 깊이 검사는 켜 두고
         // polygonOffset 으로 살짝만 띄워 z-파이팅만 피한다 — 그래야
         // 굴곡을 따라 파묻히고 돌아 나오는 게 보인다.
+        // 흰 테두리를 깔고 그 위에 색선을 얹는다.
+        //
+        // 밝은 회색 판금 위에 얇은 빨간 선만 그리면 잘 안 읽힌다.
+        // 보정시트도 같은 방법을 쓴다(흰 선 위에 주황 선).
+        const casing = new THREE.Mesh(
+          new THREE.TubeGeometry(
+            curve, Math.max(pts.length, 32), lift * 2.1, 8, false),
+          new THREE.MeshBasicMaterial({
+            color: 0xffffff,
+            polygonOffset: true, polygonOffsetFactor: -3,
+          }));
+        casing.renderOrder = 8;
+        overlayRoot.add(casing);
+
         const tube = new THREE.Mesh(
-          new THREE.TubeGeometry(curve, Math.max(pts.length, 32), lift, 8, false),
+          new THREE.TubeGeometry(
+            curve, Math.max(pts.length, 32), lift * 1.25, 8, false),
           new THREE.MeshBasicMaterial({
             color: ZERO_TINT,
             polygonOffset: true, polygonOffsetFactor: -4,
@@ -807,10 +826,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         for (const run of area.runs ?? []) {
           const pts = run.map(([x, y, z]) => new THREE.Vector3(x, y, z));
           if (pts.length < 2) continue;
+          const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
+          const casing = new THREE.Mesh(
+            new THREE.TubeGeometry(
+              curve, Math.max(pts.length, 32), lift * 2.0, 8, false),
+            new THREE.MeshBasicMaterial({
+              color: 0xffffff,
+              polygonOffset: true, polygonOffsetFactor: -5,
+            }));
+          casing.renderOrder = 9;
+          overlayRoot.add(casing);
+
           const edge = new THREE.Mesh(
             new THREE.TubeGeometry(
-              new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0),
-              Math.max(pts.length, 32), lift * 1.15, 8, false),
+              curve, Math.max(pts.length, 32), lift * 1.2, 8, false),
             new THREE.MeshBasicMaterial({
               color: ZERO_TINT,
               polygonOffset: true, polygonOffsetFactor: -6,
