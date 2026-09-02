@@ -2129,6 +2129,8 @@ function CadWorkspace() {
   const [mesh, setMesh] = useState<CadMesh | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<CadNote[]>([]);
+  const [regions, setRegions] = useState<CadRegion[]>([]);
 
   const uploadCad = async (file: File) => {
     setLoading(true); setError(null);
@@ -2138,6 +2140,8 @@ function CadWorkspace() {
       const data = await response.json() as CadMesh & { error?: string };
       if (!response.ok) throw new Error(data.error || 'CAD 파일을 읽지 못했습니다.');
       setMesh(data);
+      setNotes([]);
+      setRegions([]);
     } catch (err) {
       setError(String((err as Error).message || err));
     } finally { setLoading(false); }
@@ -2149,7 +2153,7 @@ function CadWorkspace() {
       <label className="dropzone"><input type="file" accept=".stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && void uploadCad(event.target.files[0])} /><span className="dropzone__icon"><Layers3 size={29} /></span><b>{loading ? 'CAD 형상을 읽는 중…' : 'CAD 파일을 선택하세요'}</b><span>STEP 파일은 현재 서버에 OCCT를 설치한 뒤 활성화할 수 있습니다.</span></label>
       {error && <p className="sheet-note__error">{error}</p>}
     </div>
-    {mesh && <div className="card cad-viewer" style={{ height: 640 }}><CadViewer active mesh={mesh} showHoles={false} /></div>}
+    {mesh && <div className="card cad-viewer" style={{ height: 640 }}><CadViewer active mesh={mesh} showHoles notes={notes} onNotesChange={setNotes} regions={regions} onRegionsChange={setRegions} /></div>}
   </section>;
 }
 

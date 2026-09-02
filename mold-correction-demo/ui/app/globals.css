@@ -214,6 +214,17 @@ button { cursor: pointer; }
 .cad-viewer__legend small{margin-top:2px;color:#7d90a2;font-size:8px}
 .cad-viewer__canvas:active{cursor:grabbing}
 .cad-viewer__error{display:grid;place-items:center;height:100%;padding:20px;color:#bd4650;font-size:10px;text-align:center}
+/* CAD controls are rendered by cad-viewer.tsx itself.  Keep them above the
+   WebGL canvas; without these anchors the measurement value is laid out
+   outside the visible stage. */
+.cad-viewer__controls{position:absolute;left:12px;right:12px;bottom:12px;display:flex;flex-direction:column;align-items:flex-start;gap:7px;z-index:2;pointer-events:none}
+.cad-viewer__controls>*{pointer-events:auto}
+.cad-viewer__section,.cad-viewer__morph-key{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 11px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);color:#c6d4e0;font-size:9px;backdrop-filter:blur(6px)}
+.cad-viewer__section input{width:118px;accent-color:#6fb4e8}.cad-viewer__section span{min-width:44px;color:#8fa3b4;font-size:8.5px}.cad-viewer__morph-key i{width:11px;height:11px;border-radius:3px}.cad-viewer__morph-key em{color:#8fa3b4;font-style:normal}
+.cad-viewer__side{position:absolute;right:12px;top:52px;bottom:52px;display:flex;flex-direction:column;align-items:flex-end;gap:8px;z-index:2;pointer-events:none;overflow:hidden}.cad-viewer__side>*{pointer-events:auto}.cad-viewer__side .cad-viewer__bar{position:static}.cad-viewer__side .cad-viewer__legend{position:static;margin-top:auto}
+.cad-viewer__measure,.cad-viewer__pick{position:absolute;left:12px;top:12px;display:flex;flex-direction:column;gap:3px;padding:10px 13px;border:1px solid rgba(53,214,138,.5);border-radius:7px;background:rgba(14,22,30,.9);z-index:4;backdrop-filter:blur(6px)}
+.cad-viewer__pick{border-color:rgba(255,139,61,.5)}.cad-viewer__measure b{color:#35d68a;font-size:13px;font-variant-numeric:tabular-nums}.cad-viewer__pick b{color:#ff8b3d;font-size:11px}.cad-viewer__measure span,.cad-viewer__pick span{color:#c6d4e0;font-size:9px}.cad-viewer__measure button,.cad-viewer__pick button{margin-top:5px;padding:3px 8px;border:1px solid rgba(255,255,255,.22);border-radius:5px;color:#c6d4e0;background:transparent;font-size:8.5px}
+.cad-viewer__pick-level{display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;backdrop-filter:blur(6px)}.cad-viewer__pick-level input{width:82px;accent-color:#ffef3a}.cad-viewer__pick-level input.cad-viewer__num{width:46px;padding:2px 4px;border:1px solid rgba(255,255,255,.2);border-radius:4px;color:#e6eef6;background:#0d151d}
 .cad-drop{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;min-height:470px;margin:16px;border:1.5px dashed #d3dae1;border-radius:12px;color:#8b95a2;background:#fafbfc;text-align:center}
 .cad-drop svg{color:#b6c0ca}
 .cad-drop b{color:#3d4c60;font-size:12px}

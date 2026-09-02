@@ -80,6 +80,7 @@ def _detect_from_review_inputs(
     in-memory path.  A size mismatch also must not apply a mask at wrong
     pixels.
     """
+    import generate_adaptive_zero_line_preview as kdt
     import generate_final_hybrid_zero_line as hybrid
 
     spec = _matching_review_spec(filename)
@@ -91,12 +92,23 @@ def _detect_from_review_inputs(
 
     selected_case = hybrid.select_case(common["zero_ratio"], common["zero_count"])
     if selected_case == 1:
-        final_mask, _details = hybrid.run_case1(common)
+        final_mask, details = hybrid.run_case1(common)
         lines = _mask_contours_as_lines(final_mask)
-        overlay = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        tint = np.zeros_like(overlay)
-        tint[final_mask] = (0, 235, 255)
-        overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
+        # Keep the review result untouched: it is drawn on the inpainted
+        # source, with the blue zero-area fill and its 4 px boundary.  The
+        # uploaded original has labels/noise that were explicitly removed
+        # before correction and zero-line detection.
+        _board, overlay = kdt.build_board(
+            common["image"],
+            common["positive"],
+            common["negative"],
+            common["zero"],
+            "case1_contour_polygon",
+            details,
+            None,
+            common["zero_ratio"],
+            common["zero_count"],
+        )
     else:
         final_mask, details = hybrid.run_case2(common)
         lines = []
