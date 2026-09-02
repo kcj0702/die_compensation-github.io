@@ -1754,6 +1754,17 @@ def open_morph_as_cad(cad_id: str, corrections: dict, positions: dict,
         "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
     })
     web["work"] = result.get("work") or []
+    # 이 탭이 무엇인지 적어 둔다. 안 적으면 "홀을 찾지 못했습니다" 가
+    # 떠서 읽기 실패처럼 보인다 — 파생 형상이라 홀 정보가 없는 게 맞다.
+    volumes = " · ".join(
+        f"{'용접' if w['kind'] == 'weld' else '가공'} "
+        f"{w['volume_mm3'] / 1000:.1f}cc"
+        for w in (result.get("work") or []))
+    web["note"] = (
+        f"보정 후 형상입니다 — {entry.get('name', '원본')} 을(를) "
+        f"보정 포인트 {result.get('points', 0)}개로 민 삼각망입니다. "
+        f"조립 홀·기준면은 원본 탭에서 봅니다"
+        + (f" · {volumes}" if volumes else "") + ".")
     return web
 
 

@@ -883,6 +883,12 @@ function LabProfileOverlay({ shapes, width, height }: { shapes: LabShape[]; widt
 /** 이 스캔이 이 CAD 의 짝인가. CAD 파일과 스캔의 품번 규칙이 다르다 —
  *  64XX1 도면이 64XX2 스캔의 짝이다. */
 export function scanFitsCad(scan: ScanItem, mesh: CadMesh) {
+  // 보정 후 형상은 **원본에서 만든 것**이라 스캔을 다시 맞추지 않는다.
+  //
+  // 다시 맞추면 두 가지가 어긋난다 — 스캔은 보정 **전** 부품을 찍은
+  // 것이라 맞을 이유가 없고, 그 어긋난 자세로 카메라까지 잡혀 형상이
+  // 모로 서서 조각처럼 보인다. 제로라인·보정량은 원본 탭에서 본다.
+  if (mesh.summary.source_format === 'morph') return false;
   const name = (mesh.summary.name || '').toUpperCase().replace(/[-_]/g, '');
   const pairs: [string, string][] = [
     ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
@@ -1824,6 +1830,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
      (71XX1 은 21%). 품번이 다른 스캔을 얹는 것 자체가 틀린 일이다. */
   useEffect(() => {
     if (!mesh) return;
+    if (mesh.summary.source_format === 'morph') {
+      // 보정 후 형상 탭 — 얹을 것이 없다
+      setOverlay(null);
+      setOverlayScanId('');
+      return;
+    }
     const chosen = analysed.find((scan) => scan.id === overlayScanId);
     const fits = chosen && scanFitsCad(chosen, mesh);
     if (fits) return;
