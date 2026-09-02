@@ -1369,16 +1369,6 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      있는 layouts 상태를 콜백으로 위로 끌어올린다. */
   const [sheetLayouts, setSheetLayouts] = useState<SheetLayout[]>([]);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
-  /* 제로라인 손질 — 시트에서 고치고 [3D 에 적용] 을 눌러야 3D 가 따른다.
-     누를 때마다 서버에 다시 물으면 느려서, 초안을 들고 있다가 한 번에
-     보낸다. */
-  const [draftEdits, setDraftEdits] = useState<ZeroEdit[]>(zeroEdits);
-  const [zeroPanel, setZeroPanel] = useState(false);
-  /* 품번을 바꾸면 그 스캔에 적용해 둔 것에서 다시 시작한다 —
-     앞 부품에서 손본 값이 따라오면 안 된다. */
-  useEffect(() => { setDraftEdits(zeroEdits);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scan.id]);
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const addedPointSequenceRef = useRef(0);
   const [addPointMode, setAddPointMode] = useState(false);
