@@ -16,7 +16,7 @@ import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMo
 
 const API_BASE = 'http://127.0.0.1:8000';
 
-type View = 'workspace' | 'results' | 'service' | 'files';
+type View = 'workspace' | 'results' | 'service' | 'files' | 'cad';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 /* source 가 'colormap' 이면 작업자가 찍은 추정 포인트다. 라벨을 읽어 얻은 실측값과
@@ -1068,6 +1068,7 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
     { id: 'results' as const, label: '엔진 결과', icon: BarChart3 },
     { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
     { id: 'files' as const, label: '품번 파일 정리', icon: Files },
+    { id: 'cad' as const, label: '3D CAD 뷰어', icon: Layers3 },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
     <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /></div>
@@ -2117,6 +2118,34 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   </section>;
 }
 
+function CadWorkspace() {
+  const [mesh, setMesh] = useState<CadMesh | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const uploadCad = async (file: File) => {
+    setLoading(true); setError(null);
+    const form = new FormData(); form.append('file', file, file.name);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: form });
+      const data = await response.json() as CadMesh & { error?: string };
+      if (!response.ok) throw new Error(data.error || 'CAD 파일을 읽지 못했습니다.');
+      setMesh(data);
+    } catch (err) {
+      setError(String((err as Error).message || err));
+    } finally { setLoading(false); }
+  };
+
+  return <section className="page page--workspace">
+    <div className="page-heading"><div><span className="breadcrumb">ADC WORKSPACE</span><h2>3D CAD 뷰어</h2><p>STL, PLY, OBJ, GLB, 3MF 파일을 로컬에서 읽어 형상을 확인합니다.</p></div></div>
+    <div className="card upload-panel">
+      <label className="dropzone"><input type="file" accept=".stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && void uploadCad(event.target.files[0])} /><span className="dropzone__icon"><Layers3 size={29} /></span><b>{loading ? 'CAD 형상을 읽는 중…' : 'CAD 파일을 선택하세요'}</b><span>STEP 파일은 현재 서버에 OCCT를 설치한 뒤 활성화할 수 있습니다.</span></label>
+      {error && <p className="sheet-note__error">{error}</p>}
+    </div>
+    {mesh && <div className="card" style={{ minHeight: 640 }}><CadViewer active mesh={mesh} showHoles={false} /></div>}
+  </section>;
+}
+
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
@@ -2193,6 +2222,6 @@ export default function Home() {
     if (!response.ok) throw new Error('정렬을 저장하지 못했습니다.');
   };
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeyPointsOnly={showOnlyKeyPoints} onAllPointsToggle={setAllPointsVisible} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}</div></main>;
+  const selectView = (next: View) => { if (next === 'workspace' || next === 'files' || next === 'cad' || hasResult) setView(next); };
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeyPointsOnly={showOnlyKeyPoints} onAllPointsToggle={setAllPointsVisible} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}{view === 'cad' && <CadWorkspace />}</div></main>;
 }

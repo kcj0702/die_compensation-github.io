@@ -101,6 +101,7 @@ from sheet_export import (  # noqa: E402
     crop_view,
     stack_workbooks,
 )
+from cad_import.mesh_io import is_mesh_file, load_mesh, to_web_mesh  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
@@ -2167,6 +2168,32 @@ async def file_organizer_reveal(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _load_cad_mesh(path: Path, name: str) -> dict[str, Any]:
+    if not is_mesh_file(path):
+        raise ValueError("현재 UI CAD 뷰어는 STL, PLY, OBJ, GLB, 3MF 형식을 지원합니다. STEP 지원은 별도 OCCT 설치가 필요합니다.")
+    return {**to_web_mesh(load_mesh(path), name=name, source_format=path.suffix.lower().lstrip(".")), "holes": [], "planes": [], "counts": {"cylinders": 0, "holes": 0, "planes": 0}}
+
+
+async def cad(request: Request) -> JSONResponse:
+    """Read a local mesh upload and return a compact Three.js payload."""
+    try:
+        form = await request.form()
+        uploaded = form.get("file")
+        if uploaded is None or not getattr(uploaded, "filename", ""):
+            raise ValueError("CAD 파일을 선택하세요.")
+        suffix = Path(uploaded.filename).suffix.lower()
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            temp_path = Path(handle.name)
+            handle.write(await uploaded.read())
+        try:
+            payload = await run_in_threadpool(_load_cad_mesh, temp_path, uploaded.filename)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        return JSONResponse(payload)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
 app = Starlette(
     routes=[
         Route("/api/health", health, methods=["GET"]),
@@ -2180,6 +2207,7 @@ app = Starlette(
         Route("/api/sheet", sheet, methods=["POST"]),
         Route("/api/products", products, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
+        Route("/api/cad", cad, methods=["POST"]),
         Route("/api/file-organizer/status", file_organizer_status, methods=["GET"]),
         Route("/api/file-organizer/scan", file_organizer_scan, methods=["POST"]),
         Route("/api/file-organizer/upload", file_organizer_upload, methods=["POST"]),
