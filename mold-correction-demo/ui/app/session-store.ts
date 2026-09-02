@@ -28,6 +28,10 @@ export type SessionSnapshot = {
     coefficient?: number;
     overrides?: Record<string, number>;
     hidden?: string[];
+    /* 시트 머리말 — 관리 NO · 공정 · 원소재 · 적용일자.
+       파일명에 없는 항목이라 작업자가 채운다. 한 번 채우면 다음에도
+       그대로 나와야 쓸 만하다. */
+    head?: Record<string, string>;
   }>;
   /* 3D 주석과 공정 구역 — CAD **파일 이름**으로 묶는다.
      cadId 는 파일을 열 때마다 새로 만드는 uuid 라 새로고침을 못 넘긴다.

@@ -1470,22 +1470,48 @@ function Explorer() {
    자리에 파일명 전체를 밀어 넣고 공정은 "금형 보정" 으로 박아 뒀는데,
    현업 시트에는 그런 값이 들어가지 않는다. 못 읽은 칸은 비워 둔다 —
    지어내는 것보다 비는 편이 낫다. */
-function SheetTitleBlock({ scan }: { scan: ScanItem }) {
+/** 시트 머리말. 파일명에서 읽힌 것은 채워 두고, 나머지는 작업자가 적는다.
+ *
+ *  예전에는 전부 읽기 전용이라 관리 NO · 공정 · 원소재 · 적용일자가
+ *  줄줄이 "—" 로 남았다. 현업 시트는 그 칸이 비어 있으면 결재가 안 된다.
+ *  적은 값은 품번별로 저장돼 다음에도 그대로 나온다. */
+function SheetTitleBlock({ scan, head, onHeadChange }: {
+  scan: ScanItem;
+  head: Record<string, string>;
+  onHeadChange: (key: string, value: string) => void;
+}) {
   const named = scan.result?.naming;
-  const blank = <span className="sheet-title-block__blank">—</span>;
-  const applied = named?.applied_at
-    ? new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'long', day: 'numeric' })
-        .format(new Date(`${named.applied_at}T00:00:00`))
-    : null;
+  const fromName: Record<string, string> = {
+    controlNo: named?.control_no ?? '',
+    partName: named?.part_name ?? '',
+    process: named?.process ?? '',
+    partNo: named?.part_no ?? scan.partNo ?? '',
+    material: '',
+    appliedAt: named?.applied_at ?? '',
+  };
+  const value = (key: string) => head[key] ?? fromName[key] ?? '';
+
+  const field = (key: string, hint: string, type = 'text') =>
+    <div className="sheet-title-block__value">
+      <input className="sheet-title-block__input" type={type}
+        value={value(key)} placeholder={hint} aria-label={hint}
+        onChange={(event) => onHeadChange(key, event.target.value)} />
+    </div>;
 
   return <section className="sheet-title-block" aria-label="보정 적용 내용">
     <div className="sheet-title-block__heading"><strong>보정 적용 내용</strong></div>
-    <div className="sheet-title-block__label">관리 NO</div><div className="sheet-title-block__value">{named?.control_no ?? `${scan.partNo}-01`}</div>
-    <div className="sheet-title-block__label">PART NAME</div><div className="sheet-title-block__value" title={named?.part_name ?? ''}>{named?.part_name ?? blank}</div>
-    <div className="sheet-title-block__label">공정</div><div className="sheet-title-block__value">{named?.process ?? blank}</div>
-    <div className="sheet-title-block__label">PART NO</div><div className="sheet-title-block__value">{named?.part_no ?? scan.partNo}</div>
-    <div className="sheet-title-block__label">원소재</div><div className="sheet-title-block__value">{blank}</div>
-    <div className="sheet-title-block__label">적용일자</div><div className="sheet-title-block__value">{applied ?? blank}</div>
+    <div className="sheet-title-block__label">관리 NO</div>
+    {field('controlNo', `예: JM ${scan.partNo ?? ''}-13`)}
+    <div className="sheet-title-block__label">PART NAME</div>
+    {field('partName', '예: REINF SIDE OTR')}
+    <div className="sheet-title-block__label">공정</div>
+    {field('process', '예: OP50')}
+    <div className="sheet-title-block__label">PART NO</div>
+    {field('partNo', '품번')}
+    <div className="sheet-title-block__label">원소재</div>
+    {field('material', '예: SGARC440 1.2t')}
+    <div className="sheet-title-block__label">적용일자</div>
+    {field('appliedAt', '', 'date')}
   </section>;
 }
 
@@ -2183,8 +2209,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   </section>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeepKeyPointsOnly, onShowAllPoints, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient, zeroEdits, onZeroEditsChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeepKeyPointsOnly: () => void; onShowAllPoints: () => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void;
-  zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void }) {
+function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, onKeepKeyPointsOnly, onShowAllPoints, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, coefficient, setCoefficient, zeroEdits, onZeroEditsChange,
+  sheetHead, onSheetHeadChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onKeepKeyPointsOnly: () => void; onShowAllPoints: () => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; coefficient: number; setCoefficient: (value: number) => void;
+  zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void;
+  sheetHead: Record<string, string>;
+  onSheetHeadChange: (key: string, value: string) => void }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
@@ -2387,7 +2416,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
           )}
         </div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} showZero={showZero} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroEdits={draftEdits} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock scan={scan} head={sheetHead} onHeadChange={onSheetHeadChange} /><div className="sheet-stage sheet-stage--light"><SheetCanvas key={scan.id} scan={scan} imageUrl={baseImage} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} showZero={showZero} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={onOverrideChange} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroEdits={draftEdits} /><div className="sheet-stamp sheet-stamp--paper"><span>AJIN INDUSTRIAL</span><b>DIE CORRECTION SHEET</b><small>{scan.partNo} · REV.01</small></div></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>레이아웃의 제목 막대를 끌어 이동하고, 선택 테두리의 핸들 또는 W/H 슬라이더로 크기를 조절할 수 있습니다.</b></span><button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button><button type="button" className="sheet-print" onClick={saveExcel} disabled={excelState === 'saving'}><Download size={14} /> {excelState === 'saving' ? '엑셀 만드는 중…' : '기업 양식 엑셀 저장'}</button>{excelError && <span className="sheet-excel-error">{excelError}</span>}</div>
     </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div>{(result.keyPoints?.length ?? 0) > 0 && <div className="card key-point-card">
       <div className="card-title"><div><h3>핵심 포인트</h3>
@@ -2426,6 +2455,10 @@ export default function Home() {
   /* 시트에서 손본 제로라인. 스캔별로 위에서 들고 있어야 시트와 3D 가
      같은 것을 본다. */
   const [zeroEditsByScan, setZeroEditsByScan] = useState<Record<string, ZeroEdit[]>>({});
+  /* 시트 머리말 — 관리 NO · 공정 · 원소재 · 적용일자.
+     파일명에 없는 항목이라 작업자가 채운다. 스캔별로 들고 저장한다. */
+  const [sheetHeadByScan, setSheetHeadByScan] =
+    useState<Record<string, Record<string, string>>>({});
   /* 작업 내용을 이 PC 에 남긴다 — 새로고침으로 날아가면 안 된다.
      스캔 아이디는 파일을 다시 올릴 때마다 바뀌므로 품번으로 묶는다. */
   const [sessionNote, setSessionNote] = useState<string | null>(null);
@@ -2556,6 +2589,10 @@ export default function Home() {
         setCoefficientByScan((c) => ({ ...c, [scan.id]: entry.coefficient! }));
         touched = true;
       }
+      if (entry.head && !sheetHeadByScan[scan.id]) {
+        setSheetHeadByScan((c) => ({ ...c, [scan.id]: entry.head! }));
+        touched = true;
+      }
       if (entry.overrides && !pointOverridesByScan[scan.id]) {
         setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
         touched = true;
@@ -2577,11 +2614,14 @@ export default function Home() {
       const overrides = pointOverridesByScan[scan.id];
       const hidden = hiddenPointIdsByScan[scan.id];
       const coefficient = coefficientByScan[scan.id];
-      if (!overrides && !hidden && coefficient === undefined) continue;
+      const head = sheetHeadByScan[scan.id];
+      const hasHead = head && Object.values(head).some((v) => v);
+      if (!overrides && !hidden && coefficient === undefined && !hasHead) continue;
       snapshot.byPart[partOf(scan.id)] = {
         coefficient,
         overrides: overrides ? { ...overrides } : undefined,
         hidden: hidden ? [...hidden] : undefined,
+        head: hasHead ? { ...head } : undefined,
       };
     }
     /* 3D 주석·공정 구역. 빈 것은 담지 않는다 — 지운 뒤에도 되살아나면
@@ -2623,6 +2663,7 @@ export default function Home() {
           if (entry.coefficient !== undefined) setCoefficientByScan((c) => ({ ...c, [scan.id]: entry.coefficient! }));
           if (entry.overrides) setPointOverridesByScan((c) => ({ ...c, [scan.id]: entry.overrides! }));
           if (entry.hidden) setHiddenPointIdsByScan((c) => ({ ...c, [scan.id]: new Set(entry.hidden!) }));
+          if (entry.head) setSheetHeadByScan((c) => ({ ...c, [scan.id]: entry.head! }));
         }
         setSessionNote(`${Object.keys(parsed.byPart).length}개 품번을 불러왔습니다`);
       }}
@@ -2630,12 +2671,18 @@ export default function Home() {
         clearSession();
         sessionRef.current = emptySession();
         setPointOverridesByScan({}); setHiddenPointIdsByScan({});
+        setSheetHeadByScan({});
         setCoefficientByScan({});
         setSessionNote('작업 내용을 비웠습니다');
       }} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} valleyLines={valleyLines} setValleyLines={setValleyLines} />}{view === 'service' && completedScan?.result && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeepKeyPointsOnly={keepKeyPointsOnly} onShowAllPoints={() => setAllPointsVisible(true)} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} coefficient={coefficient} setCoefficient={setCoefficient}
         zeroEdits={completedScan ? zeroEditsByScan[completedScan.id] ?? [] : []}
         onZeroEditsChange={(edits) => completedScan && setZeroEditsByScan(
-          (current) => ({ ...current, [completedScan.id]: edits }))} />}{/* 3D 화면은 조건부로 그리지 않는다. 탭을 옮길 때마다 컴포넌트가
+          (current) => ({ ...current, [completedScan.id]: edits }))}
+        sheetHead={completedScan ? sheetHeadByScan[completedScan.id] ?? {} : {}}
+        onSheetHeadChange={(key, value) => completedScan && setSheetHeadByScan(
+          (current) => ({ ...current,
+            [completedScan.id]: { ...(current[completedScan.id] ?? {}),
+                                  [key]: value } }))} />}{/* 3D 화면은 조건부로 그리지 않는다. 탭을 옮길 때마다 컴포넌트가
         통째로 사라져서 **읽어 둔 CAD 가 초기화됐다** — 215MB STEP 을
         다시 읽으라는 얘기다. 감추기만 하고 상태는 살려 둔다.
         카메라 위치와 오버레이까지 그대로 돌아온다. */}
