@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
+from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -152,6 +153,9 @@ def build_sheet(
     *,
     output: Path,
     template: Path | None = None,
+    title_fonts: dict[str, str] | None = None,
+    title_font_sizes: dict[str, float | int | None] | None = None,
+    point_font_family: str | None = None,
 ) -> BuildReport:
     """Write the correction sheet and report what it contains."""
     if not views:
@@ -170,8 +174,25 @@ def build_sheet(
     book = _open_template(template)
     sheet = book.active
     _write_heading(sheet)
-    for cell, value in (title or TitleBlock()).as_cells().items():
+    title_values = title or TitleBlock()
+    for cell, value in title_values.as_cells().items():
         sheet[cell] = value
+    for field_name, cell in config.TITLE_CELLS.items():
+        if not getattr(title_values, field_name):
+            continue
+        family = (title_fonts or {}).get(field_name)
+        size = (title_font_sizes or {}).get(field_name)
+        if not family and size is None:
+            continue
+        font = copy(sheet[cell].font)
+        if family:
+            font.name = str(family)
+        try:
+            if size is not None:
+                font.sz = float(size)
+        except (TypeError, ValueError):
+            pass
+        sheet[cell].font = font
 
     default_layout(list(views))
 
@@ -231,7 +252,8 @@ def build_sheet(
             )
             anchors.append(
                 drawing.text_box(
-                    label_id, placed.text, placed.label_x, placed.label_y
+                    label_id, placed.text, placed.label_x, placed.label_y,
+                    font_family=point_font_family,
                 )
             )
 

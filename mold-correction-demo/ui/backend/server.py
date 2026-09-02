@@ -1405,7 +1405,14 @@ def build_sheet_bytes(
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output = Path(temp_dir) / "correction-sheet.xlsx"
-        report = build_sheet(views, title, output=output)
+        report = build_sheet(
+            views,
+            title,
+            output=output,
+            title_fonts=payload.get("titleFonts") if isinstance(payload.get("titleFonts"), dict) else None,
+            title_font_sizes=payload.get("titleFontSizes") if isinstance(payload.get("titleFontSizes"), dict) else None,
+            point_font_family=str(payload.get("pointFontFamily") or "").strip() or None,
+        )
         data = output.read_bytes()
 
     stacked_warnings: list[str] = []
