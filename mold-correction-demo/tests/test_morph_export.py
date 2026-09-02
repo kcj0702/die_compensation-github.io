@@ -81,3 +81,52 @@ def test_부호가_지켜진다():
         vertices, faces, normals, [vertices[top]], [-1.0], reach_ratio=0.15)
     assert plus[top] > 0 and minus[top] < 0
     assert abs(plus[top] + minus[top]) < 1e-6
+
+
+def test_보정_후_형상은_원본_자리에_그대로_있다():
+    """새 CAD 로 열 때 다시 원점으로 옮기면 원본과 겹쳐 볼 수 없다.
+
+    실측에서 최대 이동이 2.886mm 로 나왔다 — 보정 최대는 2.000mm 인데
+    상수 오프셋이 얹힌 것이다.
+    """
+    from cad_import import mesh_io
+
+    vertices, faces, normals = _plate()
+    spot = vertices[int(np.argmax(vertices[:, 2]))]
+    moved, _shift, _stats = mp.morph(
+        vertices, faces, normals, [spot], [1.5], reach_ratio=0.15)
+
+    mesh = trimesh.Trimesh(vertices=moved, faces=faces, process=False)
+    web = mesh_io.to_web_mesh(mesh, name="후", source_format="morph",
+                              recenter=False)
+    back = np.asarray(web["positions"], float).reshape(-1, 3)
+    walked = np.linalg.norm(back - vertices, axis=1).max()
+    assert walked <= 1.5 + 1e-3, (
+        f"보정량({1.5}mm)보다 크게 움직였다 ({walked:.3f}mm) — 자리가 밀렸다")
+
+
+def test_다시_원점으로_옮기면_어긋난다():
+    """왜 recenter=False 여야 하는지 — 반대 경우를 붙잡아 둔다.
+
+    자동차 부품은 차량 좌표계라 원점에서 수천 mm 떨어져 있다(실측
+    64XX1 중심이 459.9, 0.0, 437.4). 그 상태에서 다시 원점으로 옮기면
+    원본과 겹쳐 볼 수가 없다.
+    """
+    from cad_import import mesh_io
+
+    vertices, faces, normals = _plate()
+    vertices = vertices + np.array([1500.0, -700.0, 400.0])   # 차량 좌표계
+    spot = vertices[int(np.argmax(vertices[:, 2]))]
+    moved, _shift, _stats = mp.morph(
+        vertices, faces, normals, [spot], [1.5], reach_ratio=0.15)
+    mesh = trimesh.Trimesh(vertices=moved, faces=faces, process=False)
+
+    shifted = mesh_io.to_web_mesh(mesh, name="후", source_format="morph")
+    back = np.asarray(shifted["positions"], float).reshape(-1, 3)
+    assert np.linalg.norm(back - vertices, axis=1).max() > 100.0, (
+        "원점으로 옮겼는데도 자리가 그대로다 — 시험이 성립하지 않는다")
+
+    stayed = mesh_io.to_web_mesh(mesh, name="후", source_format="morph",
+                                 recenter=False)
+    kept = np.asarray(stayed["positions"], float).reshape(-1, 3)
+    assert np.linalg.norm(kept - vertices, axis=1).max() <= 1.5 + 1e-3

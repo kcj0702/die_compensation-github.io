@@ -1703,6 +1703,76 @@ async def cad_morph(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+def open_morph_as_cad(cad_id: str, corrections: dict, positions: dict,
+                      reach_ratio: float) -> dict[str, Any]:
+    """보정 후 형상을 **새 CAD 로 등록**해 원본처럼 다루게 한다.
+
+    [왜 이렇게 하나]
+    화면에서만 밀어 보여 주면, 내보낸 파일이 정말 그 형상인지 알 수 없다.
+    고친 형상을 실제로 만들어 다시 올리면 —
+      · 원본과 같은 도구(단면·측정·주석·공정 구역)를 그대로 쓴다
+      · 탭을 오가며 원본과 견준다
+      · 화면에 보이는 것이 곧 내보내는 STL 이다(둘이 갈라지지 않는다)
+
+    B-Rep 은 아니다. 원본 STEP 의 자유곡면을 고쳐 내보내는 것은 전용
+    소프트웨어 영역이고, 면으로 쪼갠 STEP 은 실측 삼각형당 1.6ms ·
+    2.4KB 라 이 부품(363,431 삼각형)이면 10분 · 852MB 다. 여기서 만드는
+    것은 **삼각망**이고, 그것이 STL 로 나가는 것과 같은 형상이다.
+    """
+    import trimesh
+    from cad_import import mesh_io
+
+    entry = _cad_cache.get(cad_id)
+    if entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+
+    result = cad_morph_for(cad_id, corrections, positions, reach_ratio)
+    moved = np.asarray(result["positions"], dtype=float).reshape(-1, 3)
+    faces = np.asarray(entry["display_faces"])
+    # 화면용 정점은 원점을 옮겨 놓았다. 새 CAD 도 같은 자리에 서야
+    # 원본과 겹쳐 볼 수 있으므로 되돌리지 않는다.
+    mesh = trimesh.Trimesh(vertices=moved, faces=faces, process=False)
+
+    name = f"{entry.get('name', 'part')}_보정후"
+    # **다시 원점으로 옮기지 않는다.**
+    #
+    # 화면용 정점은 이미 원본을 옮겨 놓은 좌표계에 있다. to_web_mesh 가
+    # 기본으로 자기 바운딩 상자 중심으로 또 옮기면 새 형상이 원본과
+    # 어긋나 겹쳐 볼 수가 없다 — 실측에서 최대 이동이 2.886mm 로 나왔다
+    # (보정 최대는 2.000mm 인데 상수 오프셋이 얹힌 것이다).
+    web = mesh_io.to_web_mesh(mesh, name=name, source_format="morph",
+                              recenter=False)
+    web["holes"] = []
+    web["planes"] = []
+    web["counts"] = {"cylinders": 0, "holes": 0, "planes": 0}
+    web["cadId"] = _cache_cad({
+        "mesh": mesh,
+        "offset": np.asarray(entry.get("offset"), dtype=float),
+        "name": name,
+        "display_vertices": np.asarray(
+            web["positions"], dtype=float).reshape(-1, 3),
+        "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
+    })
+    web["work"] = result.get("work") or []
+    return web
+
+
+async def cad_morph_open(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            open_morph_as_cad, str(body.get("cadId") or ""),
+            {str(k): float(v) for k, v in (body.get("corrections") or {}).items()},
+            {str(k): v for k, v in (body.get("positions") or {}).items()},
+            float(body.get("reachRatio") or 0.04),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_morph_stl(request: Request) -> Response:
     """보정 후 형상을 STL 로 내보낸다.
 
@@ -1993,6 +2063,7 @@ app = Starlette(
         Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
         Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),
+        Route("/api/cad-morph-open", cad_morph_open, methods=["POST"]),
         Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/sample", sample, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET"]),

@@ -1640,6 +1640,35 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     }
   };
 
+  /* 보정 후 형상을 **새 CAD 탭으로** 연다.
+   *
+   * 화면에서만 밀어 보여 주면 내보낸 파일이 정말 그 형상인지 알 수 없다.
+   * 실제로 만들어 다시 올리면 원본과 같은 도구(단면·측정·주석·공정 구역)
+   * 를 그대로 쓰고, 탭을 오가며 견줄 수 있고, 화면에 보이는 것이 곧
+   * 내보내는 STL 이 된다. */
+  const openMorphAsCad = async () => {
+    if (!mesh?.cadId) return;
+    setMorphState('working'); setMorphError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-morph-open`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(morphPayload()),
+      });
+      const data = await response.json() as CadMesh & { error?: string };
+      if (!response.ok) throw new Error(data.error || '만들지 못했습니다.');
+      setMeshes((current) => {
+        const rest = current.filter((m) => m.summary.name !== data.summary.name);
+        return [...rest, data];
+      });
+      setActiveCadId(data.cadId ?? data.summary.name);
+      setMorphMode('off');       // 새 탭 자체가 보정 후 형상이다
+      setMorphState('idle');
+    } catch (err) {
+      setMorphError(String((err as Error).message || err));
+      setMorphState('error');
+    }
+  };
+
   /* CAD 작업자에게 넘길 보정표.
    *
    * STEP 을 그대로 고쳐 내보내는 것은 못 한다 — 자유곡면 제어점을
@@ -2222,6 +2251,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                     </select>
                     <button type="button" className="tool-button"
                       onClick={() => saveMorphStl('after')}>STL 저장</button>
+                    <button type="button" className="tool-button"
+                      title="보정 후 형상을 새 탭으로 열어 원본처럼 다룹니다"
+                      disabled={morphState === 'working'}
+                      onClick={openMorphAsCad}>새 탭으로 열기</button>
                     {overlay && <button type="button" className="tool-button"
                       title="부품 좌표와 보정량·공정을 표로 내려받습니다 (CATIA 작업용)"
                       onClick={saveCadTable}>CAD 보정표</button>}

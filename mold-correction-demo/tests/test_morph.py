@@ -94,3 +94,47 @@ def test_가중치가_포인트_자리에서_매끄럽다():
     curve = np.diff(shift[peak - 6:peak + 7])
     assert abs(curve[5]) < 0.01 and abs(curve[6]) < 0.01, (
         "포인트 자리에서 꺾인다 — 원뿔처럼 보인다")
+
+
+def test_얇은_판이_두꺼워지지_않고_옮겨진다():
+    """판금은 앞뒤 두 껍질이다.
+
+    정점마다 자기 법선으로 밀면 앞뒤가 서로 반대로 움직여 형상이
+    옮겨지지 않고 부푼다 — 실측 2mm 판에 2mm 보정을 넣었더니 두께가
+    2.0 -> 4.0mm 가 됐다. 금형이 판을 미는 것은 한 방향이다.
+    """
+    plate = trimesh.creation.box(
+        extents=[200, 200, 2.0]).subdivide().subdivide()
+    vertices = np.asarray(plate.vertices, float)
+    faces = np.asarray(plate.faces)
+    normals = np.asarray(plate.vertex_normals, float)
+
+    top = vertices[vertices[:, 2] > 0.5]
+    spot = top[int(np.argmin(np.linalg.norm(top[:, :2], axis=1)))]
+    moved, _shift, _stats = mp.morph(
+        vertices, faces, normals, [spot], [2.0], reach_ratio=0.25)
+
+    near = np.linalg.norm(vertices[:, :2] - spot[:2], axis=1) < 20
+    upper = near & (vertices[:, 2] > 0.5)
+    lower = near & (vertices[:, 2] < -0.5)
+    before = vertices[upper, 2].mean() - vertices[lower, 2].mean()
+    after = moved[upper, 2].mean() - moved[lower, 2].mean()
+    assert abs(after - before) < 0.05, (
+        f"두께가 {before:.2f} -> {after:.2f}mm 로 바뀌었다 — 부풀었다는 뜻")
+    # 그리고 실제로 옮겨져야 한다
+    assert moved[upper, 2].mean() - vertices[upper, 2].mean() > 1.5
+
+
+def test_두께를_가로질러_이어_준다():
+    """앞뒤 껍질은 표면을 따라가면 부품 테두리를 빙 돌아야 닿는다."""
+    plate = trimesh.creation.box(extents=[200, 200, 2.0]).subdivide()
+    vertices = np.asarray(plate.vertices, float)
+    faces = np.asarray(plate.faces)
+    top = vertices[vertices[:, 2] > 0.5]
+    spot = top[int(np.argmin(np.linalg.norm(top[:, :2], axis=1)))]
+
+    along = mp.surface_distances(vertices, faces, spot.reshape(1, 3), 40.0)
+    assert along is not None
+    lower = vertices[:, 2] < -0.5
+    reached = int((along[0][lower] < 40.0).sum())
+    assert reached > 0, "뒷면에 하나도 못 닿았다 — 두께 간선이 없다"

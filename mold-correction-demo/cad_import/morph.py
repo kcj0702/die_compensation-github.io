@@ -65,6 +65,19 @@ DEFAULT_REACH_RATIO = 0.04
 # 가중치가 급격히 떨어지는 정도. 클수록 포인트 주변만 뾰족하게 밀린다.
 FALLOFF_POWER = 2.0
 
+# 판 두께를 가로질러 이어 줄 거리(mm).
+#
+# [왜 필요한가]
+# 판금은 앞뒤 두 껍질이다. 표면을 따라간 거리로만 재면 뒷면은 부품
+# 테두리를 빙 돌아야 닿아서, 반경 안에 못 들어온다. 그러면 앞면만
+# 밀려 **형상이 옮겨지는 게 아니라 두꺼워진다** — 실측 2mm 판에
+# 2mm 보정을 넣었더니 두께가 2.0 -> 4.0mm 가 됐다.
+#
+# 그래서 공간상 이만큼 안에 있는 정점끼리는 이어 준다. 판 두께
+# 언저리만 잇는 값이라, 40~80mm 떨어진 건너편 살까지 이어지지는
+# 않는다(그건 애초에 표면 거리를 쓰는 이유다).
+THICKNESS_LINK_MM = 3.0
+
 
 @dataclass
 class MorphResult:
@@ -87,7 +100,8 @@ def displacement_field(
     reach: float,
     power: float = FALLOFF_POWER,
     faces: np.ndarray | None = None,
-) -> np.ndarray:
+    want_heading: bool = False,
+):
     """정점마다 밀어낼 양(mm)을 구한다.
 
     Args:
@@ -97,9 +111,17 @@ def displacement_field(
         values: (M,) 보정량(mm). 양수면 살을 붙이는 쪽이다.
         reach: 영향 반경(mm).
         faces: 주면 표면을 따라 거리를 잰다. 없으면 직선거리다.
+        want_heading: 참이면 (이동량, 방향) 을 준다.
+
+    [방향은 정점 법선이 아니라 **보정 포인트의 법선**이다]
+    정점마다 자기 법선으로 밀면 판금의 앞뒤 껍질이 서로 반대로 움직여
+    형상이 옮겨지지 않고 두꺼워진다. 금형이 판을 미는 것은 한 방향이므로,
+    그 자리에 걸린 보정 포인트들의 법선을 가중평균한 **한 방향**으로
+    앞뒤를 같이 민다. 그래야 두께가 지켜진다.
     """
     if not len(spots):
-        return np.zeros(len(vertices), dtype=float)
+        blank = np.zeros(len(vertices), dtype=float)
+        return (blank, np.asarray(normals, dtype=float)) if want_heading else blank
 
     # 표면을 따라 잰 거리. 못 재면 None 이고, 그때는 직선거리를 쓴다.
     along = surface_distances(vertices, faces, spots, reach)         if faces is not None else None
@@ -118,6 +140,13 @@ def displacement_field(
     # 1 - Π(1 - w) 는 포인트 자리에서 1, 모든 반경 밖에서 0 이고,
     # 가중치가 양 끝에서 기울기 0 이라 이어 붙인 자리도 매끄럽다.
     cover = np.ones(len(vertices), dtype=float)
+    # 방향 — 보정 포인트의 법선을 가중평균한다
+    heading = np.zeros((len(vertices), 3), dtype=float)
+    normals = np.asarray(normals, dtype=float)
+    spot_normal = [
+        normals[int(np.argmin(np.linalg.norm(vertices - spot, axis=1)))]
+        for spot in spots
+    ]
     for index, (spot, value) in enumerate(zip(spots, values)):
         distance = (along[index] if along is not None
                     else np.linalg.norm(vertices - spot, axis=1))
@@ -133,11 +162,20 @@ def displacement_field(
         shift[near] += weight * value
         weight_sum[near] += weight
         cover[near] *= (1.0 - weight)
+        heading[near] += weight[:, None] * spot_normal[index]
 
     busy = weight_sum > 1e-9
     shift[busy] /= weight_sum[busy]
     shift[~busy] = 0.0
-    return shift * (1.0 - cover)
+    shift = shift * (1.0 - cover)
+    if not want_heading:
+        return shift
+
+    size = np.linalg.norm(heading, axis=1)
+    ok = size > 1e-9
+    heading[ok] /= size[ok, None]
+    heading[~ok] = normals[~ok]        # 아무 포인트도 안 걸린 자리
+    return shift, heading
 
 
 def surface_distances(vertices: np.ndarray, faces: np.ndarray,
@@ -175,10 +213,30 @@ def surface_distances(vertices: np.ndarray, faces: np.ndarray,
     length = np.linalg.norm(vertices[raw[:, 0]] - vertices[raw[:, 1]], axis=1)
     edges = welded[raw]
 
+    # 판 두께를 가로지르는 짧은 간선을 더한다 — 앞뒤 껍질이 같이 움직여야
+    # 형상이 옮겨진다(안 그러면 두꺼워진다).
+    rows = [edges[:, 0], edges[:, 1]]
+    cols = [edges[:, 1], edges[:, 0]]
+    weights = [length, length]
+    try:
+        from scipy.spatial import cKDTree
+
+        welded_xyz = np.zeros((count, 3), dtype=float)
+        welded_xyz[welded] = vertices
+        tree = cKDTree(welded_xyz)
+        pairs = np.asarray(list(tree.query_pairs(THICKNESS_LINK_MM)), dtype=int)
+        if len(pairs):
+            gap = np.linalg.norm(
+                welded_xyz[pairs[:, 0]] - welded_xyz[pairs[:, 1]], axis=1)
+            rows += [pairs[:, 0], pairs[:, 1]]
+            cols += [pairs[:, 1], pairs[:, 0]]
+            weights += [gap, gap]
+    except Exception:
+        pass          # 없으면 표면 거리만으로 간다
+
     graph = coo_matrix(
-        (np.concatenate([length, length]),
-         (np.concatenate([edges[:, 0], edges[:, 1]]),
-          np.concatenate([edges[:, 1], edges[:, 0]]))),
+        (np.concatenate(weights),
+         (np.concatenate(rows), np.concatenate(cols))),
         shape=(count, count)).tocsr()
 
     # 각 포인트에서 가장 가까운 정점을 출발점으로 삼는다
@@ -211,9 +269,10 @@ def morph(
     span = float(np.linalg.norm(vertices.max(axis=0) - vertices.min(axis=0)))
     reach = max(span * reach_ratio, 1e-6)
 
-    shift = displacement_field(vertices, normals, spots, values, reach,
-                               faces=np.asarray(faces))
-    moved = vertices + normals * shift[:, None]
+    shift, heading = displacement_field(
+        vertices, normals, spots, values, reach,
+        faces=np.asarray(faces), want_heading=True)
+    moved = vertices + heading * shift[:, None]
 
     touched = np.abs(shift) > 1e-6
     result = MorphResult(
