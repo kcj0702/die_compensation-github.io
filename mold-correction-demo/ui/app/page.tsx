@@ -874,6 +874,18 @@ function LabProfileOverlay({ shapes, width, height }: { shapes: LabShape[]; widt
 /* 현업 파이프라인 결과를 겹침층이 아는 모양으로 바꾼다.
    그 선은 허용범위 밖 영역을 윤곽 위 제로포인트 둘로 닫은 것이라
    근거가 가장 분명하다 — 있으면 이걸 먼저 쓴다. */
+/** 이 스캔이 이 CAD 의 짝인가. CAD 파일과 스캔의 품번 규칙이 다르다 —
+ *  64XX1 도면이 64XX2 스캔의 짝이다. */
+export function scanFitsCad(scan: ScanItem, mesh: CadMesh) {
+  const name = (mesh.summary.name || '').toUpperCase().replace(/[-_]/g, '');
+  const pairs: [string, string][] = [
+    ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
+  ];
+  const wanted = pairs.find(([cad]) => name.includes(cad))?.[1];
+  const part = (scan.partNo || '').toUpperCase().replace(/[-_]/g, '');
+  return wanted ? part.includes(wanted) : Boolean(part && name.includes(part));
+}
+
 function zeroLinesToShow(result: AnalysisResult): SimpleZeroLine[] {
   const lab = result.labZeroLines ?? [];
   if (lab.length) {
@@ -1660,17 +1672,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   /* CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
      64XX1 CAD 는 64XX2 스캔과, 71XX1 은 71XX2 와 짝이다(좌우 대칭품이라
      CAD 가 한쪽만 온다). 백엔드 CAD_TO_SCAN_PART 과 같은 표다. */
-  const suggested = useMemo(() => {
-    const name = (mesh?.summary.name || '').toUpperCase().replace(/[-_]/g, '');
-    const pairs: [string, string][] = [
-      ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
-    ];
-    const wanted = pairs.find(([cad]) => name.includes(cad))?.[1];
-    return analysed.find((s) => {
-      const part = (s.partNo || '').toUpperCase().replace(/[-_]/g, '');
-      return wanted ? part.includes(wanted) : part && name.includes(part);
-    });
-  }, [analysed, mesh]);
+  const suggested = useMemo(
+    () => (mesh ? analysed.find((s) => scanFitsCad(s, mesh)) : undefined),
+    [analysed, mesh]);
 
   /* 3D 에 얹을 값은 최종 보정시트가 정한다 — 작업자가 고친 값과 숨긴
      포인트, 보정 계수를 그대로 따른다. 여기서 따로 계산하면 시트와
@@ -1695,16 +1699,20 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   /* 품번이 맞는 스캔이 있으면 **고르지 않아도** 바로 얹는다.
      예전에는 드롭다운의 값만 바꿔 놓고 요청은 안 해서, 짝이 뻔한데도
      사람이 한 번 더 골라야 결과가 나왔다. */
+  /* CAD 를 바꾸면 **그 CAD 에 맞는 스캔**으로 다시 잡는다.
+     
+     예전에는 고른 스캔이 하나뿐이라 CAD 탭을 옮겨도 그대로 따라갔다.
+     67XX6 스캔을 걸어 둔 채 64XX1 CAD 로 넘어가면 그 스캔을 64XX1 에
+     얹어 버려서 얹힘이 34% 로 떨어지고 "이 부품은 안 된다" 처럼 보였다
+     (71XX1 은 21%). 품번이 다른 스캔을 얹는 것 자체가 틀린 일이다. */
   useEffect(() => {
-    if (!suggested || !mesh) return;
-    // 이미 **쓸 수 있는** 것이 걸려 있으면 그대로 둔다.
-    //
-    // 예전에는 `overlayScanId` 가 비었을 때만 자동으로 걸었다. 그런데
-    // 저장해 둔 작업을 불러오면 그때의 스캔 아이디가 남아 있고, 그
-    // 스캔이 지금 목록에 없으면 아무것도 안 걸린 채로 막힌다 —
-    // 자동 정합도 안 되고 화면에는 아무것도 안 뜬다.
-    if (analysed.some((scan) => scan.id === overlayScanId)) return;
-    requestOverlay(suggested.id, mesh.cadId);
+    if (!mesh) return;
+    const chosen = analysed.find((scan) => scan.id === overlayScanId);
+    const fits = chosen && scanFitsCad(chosen, mesh);
+    if (fits) return;
+    if (suggested) requestOverlay(suggested.id, mesh.cadId);
+    else if (chosen) return;      // 짝이 없으면 사람이 고른 것을 존중한다
+    else setOverlay(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [suggested, overlayScanId, mesh, analysed]);
 
@@ -1978,10 +1986,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
               </div>
               {overlay && showAlign && <div className="cad-align">
                 <div className="cad-align__head">
-                  <b>정렬 맞추기</b>
-                  <span>자동 정합은 겉모양만 봅니다. 스캔에 안 보이는 살이
-                    있으면 몇 %가 모자랍니다 — 여기서 맞추면 얹힘이 바로
-                    다시 계산됩니다.</span>
+                  <b>정렬 맞추기 — 스캔 그림을 형상 위에서 밀고 돌립니다</b>
+                  <span>스캔에서 읽은 제로라인·보정량이 형상의 엉뚱한 자리에
+                    찍혔을 때 씁니다. 자동 정합은 겉모양만 보므로 스캔에 안
+                    보이는 살이 있으면 조금 어긋납니다. 누를 때마다
+                    <b>얹힘</b>이 다시 계산되니 숫자가 오르는 쪽으로
+                    맞추면 됩니다.</span>
                 </div>
                 <div className="cad-align__rows">
                   <span className="cad-align__group">
@@ -2027,7 +2037,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 {overlay && <button type="button"
                   className={`cad-align__toggle${showAlign ? ' is-on' : ''}`}
                   onClick={() => setShowAlign((v) => !v)}
-                  title="자동 정합이 조금 어긋났을 때 손으로 맞춥니다">
+                  title="제로라인·보정량이 형상의 엉뚱한 자리에 찍혔을 때 손으로 맞춥니다">
                   정렬 맞추기
                 </button>}
                 {overlayStatus === 'loading' && <span className="cad-overlay-bar__note">올리는 중…</span>}

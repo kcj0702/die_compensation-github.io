@@ -348,6 +348,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const clipRefValue = useRef<number | null>(clip);
   clipRefValue.current = clip;
   /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
+  /* 화면 돌리기(roll). 길쭉한 부품이 세로로 서서 나오면 화면을 반도
+     못 쓴다 — 실측 64XX1 은 220 x 1492 x 555mm 라 세로로 선다.
+     CATIA 식 조작(가운데+오른쪽 끌기)으로는 화면 안에서 눕히는 회전을
+     못 하고, 마우스 가운데 버튼이 없는 사람도 있다. 버튼으로 준다. */
+  const rollRef = useRef(0);
+  const [roll, setRoll] = useState(0);
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
      핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
@@ -410,6 +416,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const viewApi = useRef<{
     frame: (direction: THREE.Vector3) => void;
     snapshot: () => string;
+    /* 카메라를 지금 값으로 다시 세운다(화면 돌리기 등). */
+    refresh: () => void;
     centre: THREE.Vector3; radius: number;
     /* 단면 슬라이더가 쓸 실제 Z 범위. 구 반지름으로 갈음하면
        원점이 부품 밖에 있는 CAD 에서 최대로 밀어도 잘린다. */
@@ -763,28 +771,28 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         }
       }
 
-      // 영역형(67XX6 처럼 시트가 면으로 표기한 것)만 표면을 칠한다
-      const stencil = overlay.zeroSurface;
-      const zeroIndex = geometry.getIndex();
-      if (overlay.zeroKind === 'areas' && stencil?.length && zeroIndex) {
-        const keep: number[] = [];
-        for (let i = 0; i < zeroIndex.count; i += 3) {
-          const a = zeroIndex.getX(i), b = zeroIndex.getX(i + 1),
-                c = zeroIndex.getX(i + 2);
-          if (stencil[a] && stencil[b] && stencil[c]) keep.push(a, b, c);
+      // 제로 **영역**(67XX6)은 테두리로만 그린다.
+      //
+      // 예전에는 표면을 칠했다. 칠하기는 정점 단위라, 세 꼭짓점이 모두
+      // 영역 안에 든 삼각형만 남는다 — 리브와 구멍이 많은 면에서
+      // 조각조각 갈라져 **네모로 만들어 놓고도 물감 칠한 것처럼**
+      // 보였다. 세 번을 고쳐도 그대로였던 게 이 칠하기 때문이다.
+      //
+      // 테두리는 서버가 네모의 네 변을 촘촘히 쏴서 표면에 얹어 준다.
+      // 곡면을 타면서도 경계가 반듯하다.
+      if (overlay.zeroKind === 'areas' && (overlay.zeroAreas?.length ?? 0)) {
+        const seat = new THREE.Vector3();
+        let seen = 0;
+        for (const area of overlay.zeroAreas ?? []) {
+          for (const run of area.runs ?? []) {
+            for (const [x, y, z] of run) {
+              seat.add(new THREE.Vector3(x, y, z));
+              seen += 1;
+            }
+          }
         }
-        if (keep.length) {
-          const patch = geometry.clone();
-          patch.setIndex(keep);
-          patch.computeBoundingSphere();
-          const skin = new THREE.Mesh(patch, new THREE.MeshBasicMaterial({
-            color: ZERO_TINT, transparent: true, opacity: 0.8,
-            side: THREE.DoubleSide, depthWrite: false,
-            polygonOffset: true, polygonOffsetFactor: -2,
-          }));
-          skin.renderOrder = 7;
-          overlayRoot.add(skin);
-          const seat = patch.boundingSphere?.center ?? new THREE.Vector3();
+        if (seen) {
+          seat.divideScalar(seen);
           const tag = makeZoneLabel('제로라인 (영역)', radius * 0.04);
           tag.position.copy(seat).add(new THREE.Vector3(0, 0, radius * 0.06));
           tag.renderOrder = 15;
@@ -1108,6 +1116,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         Math.min(radius * 40, spherical.radius));
       camera.position.copy(target).add(
         new THREE.Vector3().setFromSpherical(spherical));
+      // 시선 축을 중심으로 위쪽 방향을 돌린다 — 화면 안에서만 도는
+      // 회전이라 부품을 눕혀 볼 수 있다.
+      const look = camera.position.clone().sub(target).normalize();
+      camera.up.set(0, 1, 0).applyAxisAngle(look, rollRef.current);
+      if (Math.abs(camera.up.dot(look)) > 0.999) camera.up.set(0, 0, 1);
       camera.lookAt(target);
 
       // 근평면을 **지금 거리에 맞춰** 다시 잡는다.
@@ -1422,7 +1435,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.render(scene, camera);
       return renderer.domElement.toDataURL('image/png');
     };
-    viewApi.current = { frame, snapshot, centre: centre.clone(), radius,
+    viewApi.current = { frame, snapshot, refresh: applyCamera,
+                        centre: centre.clone(), radius,
                         zMin: box.min.z, zMax: box.max.z };
     setDepth({ min: box.min.z, max: box.max.z });
 
@@ -1732,6 +1746,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           {view.label}
         </button>
       ))}
+      <button type="button" title="화면을 90도 돌립니다 (길쭉한 부품 눕히기)"
+        onClick={() => {
+          const next = (roll + 90) % 360;
+          setRoll(next);
+          rollRef.current = (next * Math.PI) / 180;
+          viewApi.current?.refresh();
+        }}>
+        {roll ? `${roll}°` : '눕히기'}
+      </button>
       <button type="button" onClick={toggleFull}
         title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
         {full ? '축소' : '확대'}

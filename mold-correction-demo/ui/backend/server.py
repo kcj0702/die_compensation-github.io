@@ -1422,14 +1422,14 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         left = points[:, cut_axis] < cut_mid
         return left if cut_side < 0 else ~left
 
+    # 제로 영역을 표면에 **칠하지 않는다.**
+    #
+    # 정점 단위로 칠하면 세 꼭짓점이 모두 영역에 든 삼각형만 남아,
+    # 리브와 구멍이 많은 면에서 조각조각 갈라진다 — 네모로 만들어
+    # 놓고도 화면에서는 물감 칠한 것처럼 보였다. 이제 네모의 테두리를
+    # 표면에 얹어 그린다(zero_areas). 도장 계산은 그만큼 뺀다 —
+    # 화면용 정점이 40만 개라 공짜가 아니다.
     zero_surface: list = []
-    if display is not None and stencil.any():
-        spots = np.asarray(display, dtype=float)
-        zero_surface = ov.sample_flags(spots, fit, stencil)
-        mine = _own_side(spots)
-        if not mine.all():
-            zero_surface = [v if mine[i] else 0
-                            for i, v in enumerate(zero_surface)]
 
     # 영역 테두리를 표면 위로 옮긴다 — 제로라인과 같은 방식이다.
     zero_areas: list = []
