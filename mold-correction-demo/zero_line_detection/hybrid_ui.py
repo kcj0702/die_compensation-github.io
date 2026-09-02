@@ -133,7 +133,12 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
     components whose total area is below 40% choose case 1; all other inputs
     choose the original case-2 routing implementation.
     """
-    review_result = _detect_from_review_inputs(image_bgr, filename)
+    try:
+        review_result = _detect_from_review_inputs(image_bgr, filename)
+    except Exception:
+        # A missing review asset must not make the standard-scan shortcut a
+        # single point of failure for an otherwise valid upload.
+        review_result = None
     if review_result is not None:
         return review_result
 
