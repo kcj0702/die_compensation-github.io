@@ -2149,7 +2149,7 @@ function CadWorkspace() {
       <label className="dropzone"><input type="file" accept=".stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && void uploadCad(event.target.files[0])} /><span className="dropzone__icon"><Layers3 size={29} /></span><b>{loading ? 'CAD 형상을 읽는 중…' : 'CAD 파일을 선택하세요'}</b><span>STEP 파일은 현재 서버에 OCCT를 설치한 뒤 활성화할 수 있습니다.</span></label>
       {error && <p className="sheet-note__error">{error}</p>}
     </div>
-    {mesh && <div className="card" style={{ minHeight: 640 }}><CadViewer active mesh={mesh} showHoles={false} /></div>}
+    {mesh && <div className="card cad-viewer" style={{ height: 640 }}><CadViewer active mesh={mesh} showHoles={false} /></div>}
   </section>;
 }
 
