@@ -4,16 +4,16 @@
 /* eslint-disable @next/next/no-img-element */
 
 import {
-  Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronRight,
-  Circle, CircleHelp, Crosshair, Eye, EyeOff, File, FileSpreadsheet, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon,
-  Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Settings2,
-  Printer, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
+  Activity, AlertTriangle, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCircle2, ChevronDown, ChevronRight,
+  Circle, CircleHelp, Copy, Crosshair, Database, Eye, EyeOff, File, FileSpreadsheet, Files, Folder, FolderOpen, Gauge, Grid2X2, HardDrive, Image as ImageIcon,
+  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Play, RefreshCw, Settings2,
+  Printer, Server, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
-type View = 'workspace' | 'results' | 'service';
+type View = 'workspace' | 'results' | 'service' | 'files';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 /* source 가 'colormap' 이면 작업자가 찍은 추정 포인트다. 라벨을 읽어 얻은 실측값과
@@ -62,6 +62,14 @@ type CorrectionHistoryEntry = {
 };
 type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
 type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
+type FileDatabaseStatus = { configured: boolean; label: string; connected: boolean | null; catalogCount: number; operationCount: number; version?: string; error?: string };
+type FileOrganizerStatus = { sourceRoot: string; destinationRoot: string; sourceAvailable: boolean; destinationAvailable: boolean; database: FileDatabaseStatus };
+type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
+type FolderAxis = 'family' | 'category' | 'product';
+type FolderAxisOption = { id: FolderAxis; label: string };
+type FolderMigration = { moved: number; skipped: number; errors: string[] };
+type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]; migration?: FolderMigration; error?: string };
+type OrganizerPathsResponse = { sourceRoot: string; destinationRoot: string; sourceLocked: boolean; destinationLocked: boolean };
 type SheetTitleField = 'heading' | 'managementLabel' | 'managementNo' | 'partNameLabel' | 'partName' | 'processLabel' | 'process' | 'partNoLabel' | 'partNo' | 'materialLabel' | 'material' | 'appliedDateLabel' | 'appliedDate';
 type SheetTitleValues = Record<SheetTitleField, string>;
 type SheetTitleFonts = Record<SheetTitleField, string>;
@@ -1007,10 +1015,11 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
     { id: 'results' as const, label: '엔진 결과', icon: BarChart3 },
     { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
+    { id: 'files' as const, label: '품번 파일 정리', icon: Files },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
     <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /></div>
-    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
+    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = (item.id === 'results' || item.id === 'service') && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <div className="sidebar__guide"><CircleHelp size={19} /><div><b>실제 엔진 연결</b><span>모든 처리는 이 PC 안에서 실행</span></div><ChevronRight size={16} /></div>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
@@ -1130,6 +1139,316 @@ function Explorer() {
   if (available === false) return null;
   const filtered = entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())); const segments = path ? path.split('/') : [];
   return <div className="explorer card"><div className="explorer__title"><div><FolderOpen size={20} /><b>실시간 품번별 폴더</b></div><span>{available == null ? '연결 확인 중' : '현재 PC 폴더와 연결됨'}</span></div><div className="explorer__bar"><div className="explorer__crumb"><button disabled={!path} onClick={() => openFolder(segments.slice(0, -1).join('/'))}><ArrowLeft size={14} /></button><span><button onClick={() => openFolder('')}>{rootName}</button>{segments.map((segment, index) => <span key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => openFolder(segments.slice(0, index + 1).join('/'))}>{segment}</button></span>)}</span></div><label><ZoomIn size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="현재 폴더 검색" /></label></div><div className="explorer__body"><div className="folder-tree"><button className={`tree-root ${!path ? 'selected' : ''}`} onClick={() => openFolder('')}><ChevronDown size={15} /><FolderOpen size={17} /> <span>{rootName}</span></button><div className="tree-children">{rootEntries.map((entry) => <FolderTreeNode key={entry.path} entry={entry} selectedPath={path} onOpen={openFolder} />)}</div></div><div className="folder-content"><div className="folder-content__head"><span>이름</span><span>수정한 날짜</span><span>크기</span></div>{filtered.map((entry) => <button className="folder-row" key={entry.path} onDoubleClick={() => entry.isDirectory && openFolder(entry.path)} onClick={() => entry.isDirectory && openFolder(entry.path)}><span>{entry.isDirectory ? <Folder size={19} fill="currentColor" /> : <File size={18} />}{entry.name}</span><small>{new Date(entry.modified).toLocaleString('ko-KR')}</small><small>{entry.isDirectory ? '파일 폴더' : formatBytes(entry.size)}</small></button>)}{!filtered.length && <div className="empty-search">이 폴더는 비어 있습니다.</div>}<div className="folder-content__status">{filtered.length}개 항목 <span>·</span> 실시간 로컬 조회</div></div></div></div>;
+}
+
+function OrganizerFolderNode({ entry, onAssign }: { entry: FolderEntry; onAssign: (ids: string[], path: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [children, setChildren] = useState<FolderEntry[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const toggle = async () => {
+    if (!loaded) {
+      const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(entry.path)}`);
+      const data = await response.json() as FolderResponse;
+      if (response.ok) {
+        setChildren(data.entries || []);
+        setLoaded(true);
+      }
+    }
+    setExpanded((current) => !current);
+  };
+  const acceptDrop = (event: DragEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.currentTarget.classList.remove('drop-ready');
+    try {
+      const ids = JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[];
+      if (ids.length) onAssign(ids, entry.path);
+    } catch { /* 외부 파일 드롭은 왼쪽 업로드 영역에서 처리한다. */ }
+  };
+  const folders = children.filter((child) => child.isDirectory);
+  const files = children.filter((child) => !child.isDirectory);
+  return <div className="organizer-folder-node">
+    <button type="button" onClick={toggle} onDragOver={(event) => { event.preventDefault(); event.currentTarget.classList.add('drop-ready'); }} onDragLeave={(event) => event.currentTarget.classList.remove('drop-ready')} onDrop={acceptDrop}>
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={16} fill="currentColor" /><span>{entry.name}</span>
+    </button>
+    {expanded && <div>
+      {folders.map((child) => <OrganizerFolderNode key={child.path} entry={child} onAssign={onAssign} />)}
+      {files.map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}
+      {loaded && !children.length && <small>비어 있음</small>}
+    </div>}
+  </div>;
+}
+
+function FileOrganizerPage() {
+  const [status, setStatus] = useState<FileOrganizerStatus | null>(null);
+  const [items, setItems] = useState<FileOrganizerItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [rootEntries, setRootEntries] = useState<FolderEntry[]>([]);
+  const [rootName, setRootName] = useState('품번별 폴더');
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<'copy' | 'move'>('copy');
+  const [conflict, setConflict] = useState<'rename' | 'skip' | 'overwrite'>('rename');
+  const [notice, setNotice] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [showDatabase, setShowDatabase] = useState(false);
+  const [databaseUrl, setDatabaseUrl] = useState('');
+  const [showFolderOrder, setShowFolderOrder] = useState(false);
+  const [folderOrder, setFolderOrder] = useState<FolderAxis[]>(['family', 'category', 'product']);
+  const [axisOptions, setAxisOptions] = useState<FolderAxisOption[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
+
+  const axisLabel = (axis: FolderAxis) => axisOptions.find((option) => option.id === axis)?.label || axis;
+
+  const loadFolderOrder = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`);
+      const data = await response.json() as FolderOrderResponse;
+      if (!response.ok) throw new Error(data.error || '폴더 순서를 불러오지 못했습니다.');
+      setFolderOrder(data.folderOrder);
+      setAxisOptions(data.axes);
+    } catch { /* 상태 카드/기본 순서로 충분히 안내되므로 조용히 넘어간다. */ }
+  }, []);
+
+  const [showPaths, setShowPaths] = useState(false);
+  const [pathsInfo, setPathsInfo] = useState<OrganizerPathsResponse | null>(null);
+  const [sourceRootInput, setSourceRootInput] = useState('');
+  const [destinationRootInput, setDestinationRootInput] = useState('');
+  const [savingPaths, setSavingPaths] = useState(false);
+
+  const loadOrganizerPaths = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/paths`);
+      const data = await response.json() as OrganizerPathsResponse & { error?: string };
+      if (!response.ok) throw new Error(data.error || '경로 설정을 불러오지 못했습니다.');
+      setPathsInfo(data);
+      setSourceRootInput(data.sourceRoot);
+      setDestinationRootInput(data.destinationRoot);
+    } catch { /* 저장소 상태 카드에 이미 현재 경로가 표시되므로 조용히 넘어간다. */ }
+  }, []);
+
+  const saveOrganizerPaths = async () => {
+    setSavingPaths(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/paths`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceRoot: sourceRootInput, destinationRoot: destinationRootInput }),
+      });
+      const data = await response.json() as OrganizerPathsResponse & { error?: string };
+      if (!response.ok) throw new Error(data.error || '경로를 저장하지 못했습니다.');
+      setNotice({ tone: 'success', text: '경로를 저장했습니다. 다음 스캔부터 적용됩니다.' });
+      setShowPaths(false);
+      setPathsInfo(data);
+      await loadStatus(true); await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '경로 저장 중 오류가 발생했습니다.' });
+    } finally { setSavingPaths(false); }
+  };
+
+  const openInExplorer = async (which: 'source' | 'destination') => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/reveal`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ which }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || '탐색기를 열지 못했습니다.');
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '탐색기를 여는 중 오류가 발생했습니다.' });
+    }
+  };
+
+  const loadStatus = useCallback(async (checkDb = false) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/status?checkDb=${checkDb ? '1' : '0'}`);
+      const data = await response.json() as FileOrganizerStatus & { error?: string };
+      if (!response.ok) throw new Error(data.error || '저장소 상태를 확인하지 못했습니다.');
+      setStatus(data);
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '로컬 백엔드에 연결할 수 없습니다.' });
+    }
+  }, []);
+
+  const loadFolders = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/folders?path=`);
+      const data = await response.json() as FolderResponse;
+      if (!response.ok || data.available === false) return;
+      setRootEntries(data.entries || []);
+      setRootName(data.rootName || '품번별 폴더');
+    } catch { /* 대상 경로가 아직 준비되지 않은 경우 상태 카드가 안내한다. */ }
+  }, []);
+
+  useEffect(() => { void loadStatus(true); void loadFolders(); void loadFolderOrder(); void loadOrganizerPaths(); }, [loadFolders, loadFolderOrder, loadOrganizerPaths, loadStatus]);
+
+  const mergeItems = useCallback((incoming: FileOrganizerItem[]) => {
+    setItems((current) => {
+      const merged = new Map(current.map((item) => [item.sourcePath, item]));
+      incoming.forEach((item) => merged.set(item.sourcePath, item));
+      return Array.from(merged.values());
+    });
+    setSelected((current) => new Set([...current, ...incoming.map((item) => item.id)]));
+  }, []);
+
+  const scanSource = async () => {
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/scan`);
+      const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '원본 폴더를 스캔하지 못했습니다.');
+      mergeItems(data.items || []);
+      setNotice({ tone: 'info', text: `원본 폴더에서 ${(data.items || []).length}개 파일을 분석했습니다.` });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '스캔 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const uploadFiles = async (files: FileList | File[]) => {
+    if (!files.length) return;
+    setBusy(true); setNotice(null);
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append('files', file, file.name));
+      const response = await fetch(`${API_BASE}/api/file-organizer/upload`, { method: 'POST', body: form });
+      const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '파일을 등록하지 못했습니다.');
+      mergeItems(data.items || []);
+      setNotice({ tone: 'info', text: `${(data.items || []).length}개 파일의 자동 분류가 끝났습니다.` });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '파일 등록 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const assignTarget = (ids: string[], targetDir: string) => {
+    const idSet = new Set(ids);
+    setItems((current) => current.map((item) => idSet.has(item.id) ? { ...item, targetDir, targetPath: `${targetDir}/${item.name}`.replace(/^\//, '') } : item));
+    setNotice({ tone: 'info', text: `${ids.length}개 파일의 대상 폴더를 수동 지정했습니다.` });
+  };
+
+  const toggleSelected = (id: string) => setSelected((current) => {
+    const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
+  });
+  const activeItems = items.filter((item) => selected.has(item.id));
+
+  const removeItem = (item: FileOrganizerItem) => {
+    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    setSelected((current) => { const next = new Set(current); next.delete(item.id); return next; });
+    if (item.sourceKind === 'upload') {
+      void fetch(`${API_BASE}/api/file-organizer/discard`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath: item.sourcePath }),
+      }).catch(() => { /* 대기열에서는 이미 지웠으니, 임시 파일 정리 실패는 조용히 넘어간다. */ });
+    }
+  };
+
+  const execute = async () => {
+    if (!activeItems.length) { setNotice({ tone: 'error', text: '실행할 파일을 하나 이상 선택해 주세요.' }); return; }
+    const action = operation === 'copy' ? '복사' : '이동';
+    if (!window.confirm(`선택한 ${activeItems.length}개 파일을 ${action}할까요?`)) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation, conflict, items: activeItems.map((item) => ({ sourcePath: item.sourcePath, targetDir: item.targetDir })) }),
+      });
+      const data = await response.json() as { results?: { source: string; status: string; message: string }[]; databaseNote?: string; error?: string };
+      if (!response.ok) throw new Error(data.error || '파일 정리를 실행하지 못했습니다.');
+      const successful = new Set((data.results || []).filter((result) => result.status === 'success').map((result) => result.source));
+      const failed = (data.results || []).filter((result) => result.status === 'error').length;
+      setItems((current) => current.filter((item) => !successful.has(item.sourcePath)));
+      setSelected((current) => new Set([...current].filter((id) => items.some((item) => item.id === id && !successful.has(item.sourcePath)))));
+      setNotice({ tone: failed ? 'error' : 'success', text: `${successful.size}개 ${action} 완료${failed ? ` · ${failed}개 오류` : ''} · ${data.databaseNote || '감사 로그 저장'}` });
+      await loadStatus(true); await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '파일 정리 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const connectDatabase = async () => {
+    if (!databaseUrl.trim()) { setNotice({ tone: 'error', text: 'MariaDB 연결 URL을 입력해 주세요.' }); return; }
+    setBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/database`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ databaseUrl }) });
+      const data = await response.json() as FileDatabaseStatus & { error?: string };
+      if (!response.ok) throw new Error(data.error || 'MariaDB에 연결하지 못했습니다.');
+      setNotice({ tone: 'success', text: `${data.label} 연결과 테이블 초기화를 완료했습니다.` });
+      setShowDatabase(false); await loadStatus(true);
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'MariaDB 연결 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const moveAxis = (index: number, direction: -1 | 1) => {
+    setFolderOrder((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const saveFolderOrder = async () => {
+    if (!window.confirm('실제 정리 대상 폴더 안의 폴더들을 새 순서로 지금 바로 옮깁니다. 계속할까요?')) return;
+    setSavingOrder(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderOrder: folderOrder }),
+      });
+      const data = await response.json() as FolderOrderResponse;
+      if (!response.ok) throw new Error(data.error || '폴더 순서를 저장하지 못했습니다.');
+      setFolderOrder(data.folderOrder);
+      const migration = data.migration;
+      const summary = migration
+        ? migration.moved > 0
+          ? `폴더 ${migration.moved}개를 새 구조로 옮겼습니다${migration.errors.length ? ` · 오류 ${migration.errors.length}건` : ''}.`
+          : '이미 이 순서였습니다 — 옮길 폴더가 없습니다.'
+        : '폴더 순서를 저장했습니다.';
+      setNotice({ tone: migration?.errors.length ? 'error' : 'success', text: summary });
+      setShowFolderOrder(false);
+      await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '폴더 순서 저장 중 오류가 발생했습니다.' });
+    } finally { setSavingOrder(false); }
+  };
+
+  const db = status?.database;
+  const examplePath = folderOrder.map((axis) => {
+    if (axis === 'family') return '64XX2';
+    if (axis === 'category') return '01. 3D제품데이터';
+    return 'JD PNL DASH 64XX2-DR000';
+  }).join(' / ');
+  return <section className="page page--file-organizer">
+    <div className="page-heading"><div><h2>품번 태그로 파일을 자동 정리하세요</h2><p>파일명을 분석해 품번 계열, 자료유형, 상세 품번 폴더를 확인한 뒤 로컬 또는 NAS로 복사·이동합니다.</p></div><div className="file-heading-actions"><button type="button" className="file-order-pill" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> {folderOrder.map(axisLabel).join(' → ')}</button><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
+    {notice && <div className={`file-organizer-notice ${notice.tone}`}>{notice.tone === 'success' ? <CheckCircle2 size={16} /> : notice.tone === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}<span>{notice.text}</span><button onClick={() => setNotice(null)} aria-label="알림 닫기"><X size={14} /></button></div>}
+    {showFolderOrder && <div className="card file-order-settings">
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>자료유형과 차종·상세품번, 두 축의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 폴더도 세부 하위 구조를 보존한 채 새 순서로 옮겨집니다.</small></span></div>
+      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
+      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
+      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
+    </div>}
+    {showDatabase && <div className="card file-database-settings"><div><Database size={20} /><span><b>MariaDB 연결</b><small>파일은 로컬/NAS에, 태그와 작업 이력은 MariaDB에 저장됩니다.</small></span></div><input value={databaseUrl} onChange={(event) => setDatabaseUrl(event.target.value)} placeholder="mysql://사용자:비밀번호@서버:3306/file_organizer" /><button type="button" onClick={() => setDatabaseUrl('mysql://file_demo:file_demo_password@127.0.0.1:3307/file_organizer?charset=utf8mb4&connect_timeout=5')}>데모 설정</button><button type="button" className="primary-button" onClick={connectDatabase} disabled={busy}>연결 테스트·저장</button></div>}
+    <div className="file-storage-strip">
+      <div><Server size={18} /><span><small>원본 폴더</small><b title={status?.sourceRoot}>{status?.sourceRoot || '확인 중'}</b></span><em className={status?.sourceAvailable ? 'ok' : ''}>{status?.sourceAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('source')} title="탐색기에서 열기" aria-label="원본 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
+      <ChevronRight size={17} />
+      <div><HardDrive size={18} /><span><small>정리 대상 · 추후 NAS</small><b title={status?.destinationRoot}>{status?.destinationRoot || '확인 중'}</b></span><em className={status?.destinationAvailable ? 'ok' : ''}>{status?.destinationAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('destination')} title="탐색기에서 열기" aria-label="정리 대상 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
+      <button type="button" className="file-storage-action file-storage-edit" onClick={() => setShowPaths((current) => !current)} title="경로 변경" aria-label="경로 변경"><Settings2 size={14} /></button>
+      <div className="file-storage-metrics"><span>카탈로그 <b>{db?.catalogCount || 0}</b></span><span>작업 이력 <b>{db?.operationCount || 0}</b></span></div>
+    </div>
+    {showPaths && <div className="card file-path-settings">
+      <div className="file-path-settings__intro"><Settings2 size={20} /><span><b>원본·정리 대상 경로</b><small>{(pathsInfo?.sourceLocked || pathsInfo?.destinationLocked) ? 'ui/.env에 경로가 고정되어 있어 여기서는 바꿀 수 없습니다.' : '두 경로를 바꾸면 다음 스캔부터 적용됩니다.'}</small></span></div>
+      <label>원본 폴더<input value={sourceRootInput} onChange={(event) => setSourceRootInput(event.target.value)} disabled={pathsInfo?.sourceLocked} placeholder="C:\path\to\incoming-files" /></label>
+      <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
+      <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
+    </div>}
+    <div className="file-organizer-grid">
+      <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3><p>외부 파일을 끌어 놓거나 지정된 원본 폴더를 스캔하세요.</p></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
+        <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
+        <div className="file-organizer-table"><div className="file-organizer-table__head"><input type="checkbox" checked={items.length > 0 && selected.size === items.length} onChange={(event) => setSelected(event.target.checked ? new Set(items.map((item) => item.id)) : new Set())} aria-label="전체 선택" /><span>파일명 / 감지 태그</span><span>자료유형</span><span>예정 위치</span><span>신뢰도</span><span /></div>{items.map((item) => <div className="file-organizer-row" key={item.id} draggable onDragStart={(event) => { const ids = selected.has(item.id) ? [...selected] : [item.id]; event.dataTransfer.setData('text/ajin-file-ids', JSON.stringify(ids)); event.dataTransfer.effectAllowed = 'move'; }} title={item.reasons.join('\n')}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`${item.name} 선택`} /><span className="file-organizer-name"><File size={17} /><span><b>{item.name}</b><small>{[item.customer, item.itemNo, item.productName, item.process].filter(Boolean).join(' · ') || '품번 태그 미검출'} <em>{item.sourceKind === 'upload' ? '업로드' : '원본'}</em></small></span></span><span className={`file-category category-${item.categoryKey || 'unknown'}`}>{item.categoryKey || '--'} {item.categoryLabel}</span><span className="file-target-path" title={item.targetPath}>{item.targetDir || '_미분류'}</span><span className={`file-confidence ${item.confidence >= 70 ? 'good' : ''}`}>{item.confidence}%</span><button type="button" className="file-row-delete" onClick={() => removeItem(item)} aria-label={`${item.name} 대기열에서 삭제`} title="대기열에서 삭제"><Trash2 size={14} /></button></div>)}{!items.length && <div className="file-organizer-empty">분류할 파일이 아직 없습니다.</div>}</div>
+        <div className="file-execute-bar"><div className="file-operation-switch"><button type="button" className={operation === 'copy' ? 'active' : ''} onClick={() => setOperation('copy')}><Copy size={14} /> 복사</button><button type="button" className={operation === 'move' ? 'active' : ''} onClick={() => setOperation('move')}><Move size={14} /> 이동</button></div><label>동명 파일<select value={conflict} onChange={(event) => setConflict(event.target.value as typeof conflict)}><option value="rename">자동 이름 변경</option><option value="skip">건너뛰기</option><option value="overwrite">덮어쓰기</option></select></label><button type="button" className="primary-button file-execute" onClick={execute} disabled={busy || !activeItems.length}>{busy ? '처리 중…' : `선택 ${activeItems.length}개 정리 실행`} <ArrowRight size={16} /></button></div>
+      </div>
+      <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3><p>파일을 끌어 놓아 위치를 바꾸세요. (실제 폴더 구조)</p></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div><div className="file-target-hint"><b>세부 자동 분류</b><span>금형도면은 LAYOUT·구조도·패턴도·완성도와 OP별로, 문서는 성형해석·보정이력으로, NC데이터는 OP10~OP50으로 나뉩니다.</span></div><div className="file-target-hint"><b>드래그 앤 드롭</b><span>파일을 폴더 위에 놓아 자동 분류 위치를 직접 수정할 수 있습니다.</span></div></aside>
+    </div>
+  </section>;
 }
 
 function SheetTitleBlock({ values, onChange, fonts, onFontChange, fontSizes, onFontSizeChange }: { values: SheetTitleValues; onChange: (field: SheetTitleField, value: string) => void; fonts: SheetTitleFonts; onFontChange: (field: SheetTitleField, fontFamily: string) => void; fontSizes: SheetTitleFontSizes; onFontSizeChange: (field: SheetTitleField, size: number) => void }) {
@@ -1632,6 +1951,6 @@ export default function Home() {
     setSheetTitleFontSizesByScan((current) => ({ ...current, [targetScan.id]: { ...(current[targetScan.id] || {}), [field]: size } }));
   };
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}</div></main>;
+  const selectView = (next: View) => { if (next === 'workspace' || next === 'files' || hasResult) setView(next); };
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}{view === 'files' && <FileOrganizerPage />}</div></main>;
 }

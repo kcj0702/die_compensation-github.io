@@ -145,6 +145,269 @@ class UiBackendModelDiscoveryTest(unittest.TestCase):
         self.assertEqual(found, model_dir.resolve())
 
 
+class UiBackendFileOrganizerTest(unittest.TestCase):
+    def test_folder_order_keeps_category_required(self) -> None:
+        self.assertFalse(backend_server.is_valid_folder_order(["product"]))
+        self.assertTrue(backend_server.is_valid_folder_order(["product", "category"]))
+        self.assertTrue(
+            backend_server.is_valid_folder_order(["category", "family", "product"])
+        )
+
+    def test_folder_order_migration_preserves_detail_tree_without_accumulation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            product = root / "JD" / "PNL DASH" / "64XX2-DR000"
+            drawing_file = product / "02. 금형도면" / "02. 패턴도" / "OP30" / "pattern.zip"
+            document_file = product / "03. 문서" / "02. 보정이력" / "history.xlsx"
+            drawing_file.parent.mkdir(parents=True)
+            document_file.parent.mkdir(parents=True)
+            drawing_file.write_bytes(b"drawing")
+            document_file.write_bytes(b"document")
+
+            first = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["product", "category"],
+                ["category", "product"],
+            )
+            self.assertEqual(first.errors, [])
+            self.assertEqual(
+                (
+                    root / "02. 금형도면" / "JD" / "PNL DASH" / "64XX2"
+                    / "02. 패턴도" / "OP30" / "pattern.zip"
+                ).read_bytes(),
+                b"drawing",
+            )
+
+            second = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "product"],
+                ["product", "category"],
+            )
+            self.assertEqual(second.errors, [])
+            self.assertEqual(
+                (
+                    root / "JD" / "PNL DASH" / "64XX2" / "02. 금형도면"
+                    / "02. 패턴도" / "OP30" / "pattern.zip"
+                ).read_bytes(),
+                b"drawing",
+            )
+            self.assertEqual(
+                (
+                    root / "JD" / "PNL DASH" / "64XX2" / "03. 문서"
+                    / "02. 보정이력" / "history.xlsx"
+                ).read_bytes(),
+                b"document",
+            )
+            self.assertEqual(
+                sorted(path.name for path in root.iterdir() if path.is_dir()),
+                ["JD"],
+            )
+
+    def test_classify_reuses_family_only_folder_across_different_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["product", "category"],
+            )
+
+            first = classifier.classify(
+                Path("JM_67312-DZ000_DASH LWR_OP30_패턴도_260825.zip")
+            )
+            self.assertIsNotNone(first.target_dir)
+            first.target_dir.mkdir(parents=True)
+
+            # 같은 계열(67312)이지만 상세 코드가 다른 파일 — 품번 폴더는 계열까지만
+            # 이름 짓기 때문에, 전체 품번이 달라도 같은 차종/품명/계열 폴더로 모여야 한다.
+            second = classifier.classify(
+                Path("JM_67312-DZ001_DASH LWR_OP20_완성도_260825.zip")
+            )
+
+            first_product_dir = destination_root / "JM" / "DASH LWR" / "67312"
+            self.assertEqual(
+                first.target_dir.relative_to(first_product_dir).parts,
+                ("02. 금형도면", "02. 패턴도", "OP30"),
+            )
+            self.assertEqual(
+                second.target_dir.relative_to(first_product_dir).parts,
+                ("02. 금형도면", "03. 완성도", "OP20"),
+            )
+            self.assertEqual(second.matched_product_folder, "67312")
+
+    def test_excel_detail_tags_select_drawing_document_and_nc_subfolders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            product_root = destination_root / "JD" / "PNL DASH" / "64XX2-DR000"
+            for category in ("02. 금형도면", "03. 문서", "06. NC DATA"):
+                (product_root / category).mkdir(parents=True)
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["product", "category"],
+            )
+
+            drawing = classifier.classify(
+                Path("JD_64XX2-DR000_PNL DASH_OP30_패턴도_260825.zip")
+            )
+            document = classifier.classify(
+                Path("JD_64XX2-DR000_보정적용_260825.xlsx")
+            )
+            nc_data = classifier.classify(
+                Path("260825_JD_64XX2-DR000_DASH_OP50_형상_UPRDIE_NC DATA.ZIP")
+            )
+
+            self.assertEqual(drawing.category_key, "02")
+            self.assertEqual(drawing.detail_path, "02. 패턴도/OP30")
+            self.assertEqual(
+                drawing.target_dir.relative_to(product_root).parts,
+                ("02. 금형도면", "02. 패턴도", "OP30"),
+            )
+            self.assertEqual(document.detail_path, "02. 보정이력")
+            self.assertEqual(
+                document.target_dir.relative_to(product_root).parts,
+                ("03. 문서", "02. 보정이력"),
+            )
+            self.assertEqual(nc_data.category_key, "06")
+            self.assertEqual(nc_data.detail_path, "OP50")
+            self.assertEqual(
+                nc_data.target_dir.relative_to(product_root).parts,
+                ("06. NC DATA", "OP50"),
+            )
+
+    def test_folder_order_migration_recognizes_family_only_product_folders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            leaf = root / "JD" / "PNL DASH" / "64XX2" / "02. 금형도면" / "01. 구조도" / "OP30"
+            leaf.mkdir(parents=True)
+            (leaf / "sample.zip").write_bytes(b"demo")
+
+            to_category_first = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["product", "category"],
+                ["category", "product"],
+            )
+            self.assertEqual(to_category_first.errors, [])
+            self.assertEqual(to_category_first.moved, 1)
+            moved = (
+                root / "02. 금형도면" / "JD" / "PNL DASH" / "64XX2"
+                / "01. 구조도" / "OP30" / "sample.zip"
+            )
+            self.assertEqual(moved.read_bytes(), b"demo")
+
+            back_to_product_first = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "product"],
+                ["product", "category"],
+            )
+            self.assertEqual(back_to_product_first.errors, [])
+            self.assertEqual(back_to_product_first.moved, 1)
+            self.assertEqual(
+                (
+                    root / "JD" / "PNL DASH" / "64XX2" / "02. 금형도면"
+                    / "01. 구조도" / "OP30" / "sample.zip"
+                ).read_bytes(),
+                b"demo",
+            )
+
+    def test_classify_proposes_new_folder_for_unseen_customer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            destination_root.mkdir()
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["product", "category"],
+            )
+
+            result = classifier.classify(Path("JDZ_12345-XX000_NEW PART_260825.dwg"))
+
+            self.assertEqual(result.item_no, "12345-XX000")
+            self.assertEqual(result.customer, "JDZ")
+            self.assertEqual(result.category_key, "02")
+            self.assertIsNotNone(result.target_dir)
+            self.assertEqual(
+                result.target_dir.relative_to(destination_root).parts,
+                ("JDZ", "NEW PART", "12345", "02. 금형도면"),
+            )
+
+    def test_scan_classifies_product_data_into_existing_part_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            source_root.mkdir()
+            detail = destination_root / "64XX2" / "01. 3D제품데이터" / "JD PNL DASH 64XX2-DR000"
+            detail.mkdir(parents=True)
+            source = source_root / "64XX2-DR000 제품데이터.png"
+            source.write_bytes(b"demo")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["family", "category", "product"],
+            ):
+                items = backend_server._scan_organizer_source()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["itemNo"], "64XX2-DR000")
+            self.assertEqual(items[0]["categoryKey"], "01")
+            self.assertIn("JD PNL DASH 64XX2-DR000", items[0]["targetDir"])
+
+    def test_execute_copies_file_and_keeps_local_audit_log_without_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            log_root = root / "logs"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            staging_root.mkdir()
+            detail = destination_root / "64XX2" / "01. 3D제품데이터" / "JD PNL DASH 64XX2-DR000"
+            detail.mkdir(parents=True)
+            source = source_root / "64XX2-DR000 제품데이터.png"
+            source.write_bytes(b"demo")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(backend_server, "FILE_LOG_ROOT", log_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ), patch.object(backend_server, "_active_file_database_url", return_value=""), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["family", "category", "product"],
+            ):
+                response = backend_server._execute_file_organizer(
+                    {
+                        "operation": "copy",
+                        "conflict": "rename",
+                        "items": [{"sourcePath": str(source)}],
+                    }
+                )
+            copied = detail / source.name
+            self.assertTrue(source.exists())
+            self.assertEqual(copied.read_bytes(), b"demo")
+            self.assertEqual(response["results"][0]["status"], "success")
+            self.assertIn("로컬 감사 로그", response["databaseNote"])
+            self.assertEqual(len(list(log_root.glob("*.jsonl"))), 1)
+
+    def test_source_path_outside_allowed_roots_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            staging_root.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("no", encoding="utf-8")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ):
+                with self.assertRaisesRegex(ValueError, "허용된 원본"):
+                    backend_server._safe_organizer_source(str(outside))
+
+
 class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()

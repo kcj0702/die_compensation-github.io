@@ -1,0 +1,70 @@
+{
+  "destination_root": "data/organized",
+  "source_root": "data/incoming",
+  "unclassified_folder": "_미분류",
+  "ignored_names": ["desktop.ini", "thumbs.db", ".ds_store", ".gitkeep"],
+  "customers": ["JM", "JDZ", "ADC", "CD8", "JD", "MD", "ND", "SD"],
+  "categories": [
+    {
+      "key": "01",
+      "folder": "01. 3D제품데이터",
+      "label": "3D제품데이터",
+      "keywords": ["3D제품데이터", "제품데이터", "3D도면", "모델링"],
+      "extensions": [".catpart", ".catproduct", ".3dxml", ".prt", ".x_t", ".x_b"]
+    },
+    {
+      "key": "02",
+      "folder": "02. 금형도면",
+      "label": "금형도면",
+      "keywords": ["금형도면", "LAYOUT", "구조도", "패턴도", "완성도", "도면"],
+      "extensions": [".dwg", ".catdrawing", ".dxf"]
+    },
+    {
+      "key": "03",
+      "folder": "03. 문서",
+      "label": "문서",
+      "keywords": [
+        "보정이력", "보정적용", "보정내용", "보정시트", "성형해석",
+        "해석리포트", "해석레포트", "부품표", "데이터시방서", "문서"
+      ],
+      "extensions": [".ppt", ".pptx", ".doc", ".docx", ".hwp", ".xls", ".xlsx"]
+    },
+    {
+      "key": "04",
+      "folder": "04. 금형진척사진",
+      "label": "금형진척사진",
+      "keywords": ["금형진척사진", "진척사진", "진척", "현장사진"],
+      "extensions": [".jpg", ".jpeg", ".heic"]
+    },
+    {
+      "key": "05",
+      "folder": "05. SURFACE DATA",
+      "label": "SURFACE DATA",
+      "keywords": ["SURFACEDATA", "SURFACE", "서페이스"],
+      "extensions": []
+    },
+    {
+      "key": "06",
+      "folder": "06. NC DATA",
+      "label": "NC DATA",
+      "keywords": ["NC DATA", "NCDATA", "NC데이터", "UPRDIE", "UPR DIE", "UPR PAD", "PUNCH", "수치표", "형상_윤곽"],
+      "extensions": [".nc", ".cam", ".mcam"]
+    }
+  ],
+  "fallback_extensions": {".zip": "02"},
+  "detail_rules": {
+    "02": [
+      {"folder": "00. LAYOUT", "keywords": ["LAYOUT"], "use_process": false},
+      {"folder": "01. 구조도", "keywords": ["구조도"], "use_process": true, "default_when_process": true},
+      {"folder": "02. 패턴도", "keywords": ["패턴도"], "use_process": true},
+      {"folder": "03. 완성도", "keywords": ["완성도"], "use_process": true}
+    ],
+    "03": [
+      {"folder": "01. 성형해석", "keywords": ["성형해석", "리포트", "레포트", "REPORT"]},
+      {"folder": "02. 보정이력", "keywords": ["보정", "부품표"]}
+    ],
+    "06": [
+      {"folder": "{process}", "keywords": ["NC DATA", "NCDATA", "NC데이터", "UPRDIE", "UPR DIE", "UPR PAD", "PUNCH", "수치표", "형상"], "use_process": true}
+    ]
+  }
+}
