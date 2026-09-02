@@ -7,8 +7,8 @@ The common correction masks and the case decision are KDT013's rules:
   two or more components;
 * case 2 otherwise.
 
-Case 1 uses KDT013's offset-contour intersection polygons. Case 2 uses Park
-Junhyeok's outer-zero-point pair search, collision-free routing, enclosure
+Case 1 uses KDT013's offset-contour intersection polygons. Case 2 uses the
+preserved outer-zero-point pair search, collision-free routing, enclosure
 validation, and route-complexity scoring. This remains a review-only program
 and does not modify the production engine or UI server.
 """
@@ -34,7 +34,7 @@ if str(DEMO_ROOT) not in sys.path:
 
 import generate_adaptive_zero_line_preview as kdt  # noqa: E402
 import generate_correction_only_3pct_preview as correction  # noqa: E402
-import park_junhyeok_adapter as park_adapter  # noqa: E402
+import case2_route_adapter as case2_adapter  # noqa: E402
 
 
 DEFAULT_CORRECTION_DIR = HERE / "results_correction_only_2pct"
@@ -45,7 +45,7 @@ FINAL_LINE_RGB = (255, 235, 0)
 FINAL_LINE_OUTLINE_RGB = (255, 255, 255)
 ZERO_POINT_RGB = (45, 240, 80)
 ROUTE_REGION_RGB = (255, 90, 210)
-PARK_FINAL_LINE_RGB = (0, 255, 255)
+CASE2_FINAL_LINE_RGB = (0, 255, 255)
 
 
 class ZeroLineDetection(NamedTuple):
@@ -340,7 +340,7 @@ def boundary_zero_points(
     mapped: np.ndarray,
     contour_points: np.ndarray,
 ) -> tuple[list[dict], list[Any], str]:
-    """Map KDT013 boundary sign-transition anchors to Park's contour indices."""
+    """Map KDT013 boundary sign-transition anchors to case-2 contour indices."""
     anchors = kdt.find_boundary_anchors(values, part, 230, 40.0)
     method = "kdt_boundary_sign_transition_smooth_230"
     if len(anchors) < 2:
@@ -373,7 +373,7 @@ def boundary_zero_points(
         for index, (x, y, sample_index) in enumerate(selected, start=1)
     ]
     if len(points) < 2:
-        raise ValueError("Park route selection requires at least two outer zero points")
+        raise ValueError("Case-2 route selection requires at least two outer zero points")
     return points, anchors, method
 
 
@@ -445,12 +445,12 @@ def simplified_team_rows(selections: list[dict]) -> list[dict]:
 
 
 def run_case2(common: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
-    """Run Park Junhyeok's complete original stages after the shared decision."""
+    """Run the complete preserved case-2 stages after the shared decision."""
     encoded = np.fromfile(str(common["raw_source_image"]), dtype=np.uint8)
     original_bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
     if original_bgr is None:
         raise FileNotFoundError(f"Cannot read image: {common['raw_source_image']}")
-    adapted = park_adapter.run_original_case2_pipeline(
+    adapted = case2_adapter.run_original_case2_pipeline(
         original_bgr=original_bgr,
         scale_max_mm=common["scale_max_mm"],
     )
@@ -461,7 +461,7 @@ def run_case2(common: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:
         "outer_silhouette": adapted["outer_silhouette"] > 0,
         "zero_points": adapted["zero_points"],
         "anchors": [],
-        "zero_point_method": "park_junhyeok_original_contour_graph",
+        "zero_point_method": "case2_original_contour_graph",
         "team_cleaned_image": cv2.cvtColor(
             adapted["cleaned_bgr"], cv2.COLOR_BGR2RGB
         ),
@@ -543,7 +543,7 @@ def draw_team_route_view(
             final,
             [points],
             False,
-            PARK_FINAL_LINE_RGB,
+            CASE2_FINAL_LINE_RGB,
             FINAL_LINE_WIDTH_PX,
             cv2.LINE_AA,
         )
@@ -577,7 +577,7 @@ def build_case2_board(
     panels = [
         kdt.add_title(
             kdt.fit_panel(correction_view),
-            "1. Park Junhyeok correction regions",
+            "1. Case-2 correction regions",
             f"original stage 04-05; threshold=+/-{case2['team_tolerance_mm']:.1f} mm",
         ),
         kdt.add_title(
@@ -587,7 +587,7 @@ def build_case2_board(
         ),
         kdt.add_title(
             kdt.fit_panel(construction),
-            "3. Park Junhyeok route selection",
+            "3. Case-2 route selection",
             f"zero points={len(case2['zero_points'])}; validated routes={len(case2['rows'])}",
         ),
         kdt.add_title(
@@ -620,13 +620,13 @@ def detect_zero_line(common: dict[str, Any]) -> ZeroLineDetection:
     final_mask, case2 = run_case2(common)
     return ZeroLineDetection(
         selected_case=selected_case,
-        method="case2_park_junhyeok_original_routes_via_adapter",
+        method="case2_original_routes_via_adapter",
         final_mask=final_mask,
         method_data=case2,
         summary_details={
-            "owner": "Park Junhyeok",
+            "owner": "case2_original_pipeline",
             "selector_source": "unmodified team stages 01-06",
-            "integration": "KDT013 case decision; Park Junhyeok complete case-2 pipeline",
+            "integration": "KDT013 case decision; preserved complete case-2 pipeline",
             "zero_point_method": case2["zero_point_method"],
             "contact_radius_px": case2["contact_radius_px"],
             "route_clearance_px": case2["route_clearance_px"],

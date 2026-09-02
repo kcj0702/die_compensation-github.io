@@ -1,4 +1,4 @@
-"""Adapter between the unified detector and Park Junhyeok's route selector.
+"""Adapter between the unified detector and the case-2 route selector.
 
 The selector module is kept as the original team source.  This module owns
 integration-only policy such as Boolean-mask conversion and the 100 px
@@ -12,12 +12,12 @@ from typing import Any
 import numpy as np
 import cv2
 
-import park_junhyeok_route_selector as selector
-from park_junhyeok_original import contour_graph
-from park_junhyeok_original import merge_correction_regions
-from park_junhyeok_original import out_of_tolerance
-from park_junhyeok_original import remove_labels
-from park_junhyeok_original import zero_point_selection
+import case2_route_selector as selector
+from case2_original_pipeline import contour_graph
+from case2_original_pipeline import merge_correction_regions
+from case2_original_pipeline import out_of_tolerance
+from case2_original_pipeline import remove_labels
+from case2_original_pipeline import zero_point_selection
 
 
 DEFAULT_MINIMUM_ROUTE_LENGTH_PX = 100.0
@@ -48,7 +48,7 @@ def _flatten_zero_points(contours: list[dict[str, Any]]) -> list[dict[str, Any]]
             )
             sequence += 1
     if len(points) < 2:
-        raise ValueError("Park Junhyeok pipeline requires at least two zero points")
+        raise ValueError("Case-2 pipeline requires at least two zero points")
     return points
 
 
@@ -82,7 +82,7 @@ def _outer_geometry(
         else:
             cv2.fillPoly(product_mask, [points], 0, cv2.LINE_8)
     if outer_points is None or len(outer_points) < 3:
-        raise ValueError("No Park Junhyeok outer contour was generated")
+        raise ValueError("No case-2 outer contour was generated")
     return outer_points, product_mask, outer_silhouette
 
 
@@ -147,14 +147,14 @@ def run_original_case2_pipeline(
     scale_max_mm: float,
     minimum_route_length_px: float = DEFAULT_MINIMUM_ROUTE_LENGTH_PX,
 ) -> dict[str, Any]:
-    """Run Park Junhyeok's stages 01-06 in memory as one engine branch."""
+    """Run the preserved case-2 stages 01-06 in memory as one engine branch."""
     versions = remove_labels.create_versions(original_bgr)
     cleaned = versions["4_labels_points_inpainted"]
 
     product_mask = contour_graph.build_product_mask(cleaned)
     contours = contour_graph.extract_true_contours(product_mask)
     if not contours:
-        raise ValueError("Park Junhyeok pipeline found no product contour")
+        raise ValueError("Case-2 pipeline found no product contour")
     colorbar = contour_graph.detect_colorbar(original_bgr)
     _, contour_payload = contour_graph.render_graph(
         cleaned,

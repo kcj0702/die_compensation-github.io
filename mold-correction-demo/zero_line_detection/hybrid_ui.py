@@ -1,7 +1,7 @@
 """UI adapter for the agreed hybrid zero-line engine.
 
 Case 1 keeps the in-house area decision.  Case 2 runs the preserved original
-Park Junhyeok route selector as one in-memory pipeline.  Keeping this adapter
+route selector as one in-memory pipeline.  Keeping this adapter
 here lets the UI use one engine without copying either implementation.
 """
 
@@ -47,14 +47,14 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
 
     The distribution rule is shared with the review engine: separated zero
     components whose total area is below 40% choose case 1; all other inputs
-    choose Park Junhyeok's original case-2 routing implementation.
+    choose the original case-2 routing implementation.
     """
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
     fallback_part_px = max(1, int(base.part_mask.sum()))
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
-        import park_junhyeok_adapter as park  # loaded from EXPERIMENT_DIR
+        import case2_route_adapter as case2  # loaded from EXPERIMENT_DIR
         import generate_final_hybrid_zero_line as hybrid
         import generate_adaptive_zero_line_preview as kdt
 
@@ -87,7 +87,7 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
                 warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
             )
 
-        routed = park.run_original_case2_pipeline(
+        routed = case2.run_original_case2_pipeline(
             original_bgr=image_bgr, scale_max_mm=_scale_for(filename)
         )
         line_mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)

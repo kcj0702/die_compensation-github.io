@@ -82,14 +82,14 @@ class HybridCaseSelectionTests(unittest.TestCase):
             "closure_validation": {"route": {"path_length_pixels": 100.0}},
         }
         with (
-            mock.patch.object(hybrid.park_adapter.selector, "extract_regions", return_value=[{}]),
+            mock.patch.object(hybrid.case2_adapter.selector, "extract_regions", return_value=[{}]),
             mock.patch.object(
-                hybrid.park_adapter.selector,
+                hybrid.case2_adapter.selector,
                 "select_along_outer_contour",
                 return_value=([short, long], 12, 4),
             ),
         ):
-            result = hybrid.park_adapter.run_route_selector(
+            result = hybrid.case2_adapter.run_route_selector(
                 correction_mask=np.ones((8, 8), dtype=bool),
                 zero_points=[],
                 contour_points=np.zeros((3, 2), dtype=np.float64),
