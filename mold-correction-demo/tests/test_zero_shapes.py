@@ -76,3 +76,34 @@ def test_빈_입력에도_안_터진다():
     assert zero_shapes.clean([]) == []
     assert zero_shapes.clean(None) == []
     assert zero_shapes.boxes_of([[1, 1], [2, 2]]) == []
+
+
+def test_받은_파이프라인_결과를_디스크에_남긴다(tmp_path):
+    """실측 64XX2 가 117초다 — 엔진을 다시 띄울 때마다 다시 돌 수 없다."""
+    import json
+
+    from zero_line_detection import lab_runner
+
+    key = "시험용열쇠"
+    old_dir = lab_runner.CACHE_DIR
+    lab_runner.CACHE_DIR = tmp_path
+    try:
+        answer = {"prefix": "JD_64XX2-DR000", "lines": [[[1, 2], [3, 4]]],
+                  "areas": [], "regions": []}
+        lab_runner._disk_path(key).write_text(
+            json.dumps(answer, ensure_ascii=False), encoding="utf-8")
+        found = json.loads(
+            lab_runner._disk_path(key).read_text(encoding="utf-8"))
+        assert found == answer
+    finally:
+        lab_runner.CACHE_DIR = old_dir
+
+
+def test_스크립트가_바뀌면_열쇠가_바뀐다():
+    """받은 코드를 갈아 끼우면 캐시가 저절로 무효가 돼야 한다."""
+    from zero_line_detection import lab_runner
+
+    stamp = lab_runner._script_stamp("JD_64XX2-DR000")
+    assert stamp and stamp == lab_runner._script_stamp("JD_64XX2-DR000")
+    assert stamp != lab_runner._script_stamp("JD_67XX6-DR000"), (
+        "부품이 다르면 스크립트도 다르다")

@@ -148,6 +148,45 @@ _MISSING = object()          # 캐시에 없음과 '읽었는데 None' 을 가�
 _label_cache: "OrderedDict[str, float | None]" = OrderedDict()
 _LABEL_CACHE_MAX = 4000        # 부품 한 장이 라벨 130여 개다
 
+# 판독 결과를 디스크에도 남긴다.
+#
+# 실측 64XX2 한 장이 Qwen 판독 57초다. 메모리에만 들고 있으면 엔진을
+# 다시 띄울 때마다 그 57초를 다시 쓴다 — 파이썬을 고치면 반드시 다시
+# 띄워야 하는 프로젝트라 그 일이 잦다. 열쇠가 **잘라낸 그림의 내용
+# 해시**라 그림이 같으면 값도 같다.
+# 경로는 환경변수로 옮길 수 있다(ADC_LABEL_CACHE). 시험은 이걸로
+# 임시 폴더를 가리켜 실제로 데워 둔 캐시를 지키고, 운영에서는 여러
+# 사람이 공유하는 자리로 옮길 수 있다.
+_LABEL_STORE = Path(os.environ.get("ADC_LABEL_CACHE")
+                    or (Path(__file__).resolve().parent / ".label_cache.json"))
+_label_store_dirty = False
+
+
+def _load_label_store() -> None:
+    try:
+        if _LABEL_STORE.exists():
+            found = json.loads(_LABEL_STORE.read_text(encoding="utf-8"))
+            for key, value in found.items():
+                _label_cache[key] = value
+    except Exception:
+        pass          # 깨졌으면 그냥 다시 읽는다
+
+
+def _save_label_store() -> None:
+    global _label_store_dirty
+    if not _label_store_dirty:
+        return
+    try:
+        _LABEL_STORE.write_text(
+            json.dumps(dict(_label_cache), ensure_ascii=False),
+            encoding="utf-8")
+        _label_store_dirty = False
+    except Exception:
+        pass
+
+
+_load_label_store()
+
 
 def _crop_key(crop) -> str:
     """잘라낸 라벨 그림의 내용 해시."""
@@ -160,15 +199,20 @@ def _crop_key(crop) -> str:
 
 def reset_label_cache() -> None:
     """판독 캐시를 비운다. 테스트가 서로 영향을 주지 않게 하는 용도다."""
+    global _label_store_dirty
     _label_cache.clear()
+    _label_store_dirty = False
 
 
 def _remember_labels(keys: list[str], values: list) -> None:
+    global _label_store_dirty
     for key, value in zip(keys, values):
         _label_cache[key] = value
         _label_cache.move_to_end(key)
     while len(_label_cache) > _LABEL_CACHE_MAX:
         _label_cache.popitem(last=False)
+    _label_store_dirty = True
+    _save_label_store()
 
 
 _cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
@@ -422,6 +466,9 @@ def analyze_image(image: np.ndarray, filename: str,
     points: list[dict[str, Any]] = []
     qwen_reads = 0
     unread_labels = 0
+    # 다시 읽지 않고 캐시에서 가져온 라벨 수. 판독까지 못 가고 예외가
+    # 나도 아래 응답에서 쓰므로 여기서 잡아 둔다.
+    reused_labels = 0
     detected_candidates = 0
     valid_candidates_count = 0
     deviation_warnings: list[str] = []
@@ -466,7 +513,9 @@ def analyze_image(image: np.ndarray, filename: str,
             keys = [_crop_key(crop) for crop in crops]
             cached = [_label_cache.get(key, _MISSING) for key in keys]
             todo = [i for i, value in enumerate(cached) if value is _MISSING]
-            spent["판독 재사용"] = len(crops) - len(todo)
+            # timings 는 **초**만 담는다. 개수를 같이 넣었더니 합계가
+            # 엉뚱하게 나왔다(라벨 79개가 79초로 더해졌다).
+            reused_labels = len(crops) - len(todo)
             if todo:
                 try:
                     with _timed("Qwen 모델 적재"):
@@ -848,6 +897,9 @@ def analyze_image(image: np.ndarray, filename: str,
         "labZeroAreas": lab_areas,
         "labZeroRegions": lab_zero.get("regions") or [],
         "timings": spent,
+        # 다시 읽지 않고 캐시에서 가져온 라벨 수. timings 와 단위가
+        # 달라 따로 둔다.
+        "reusedLabels": reused_labels,
         "keyPoints": [k.to_dict() for k in key_points],
         "keyPointsRejected": key_rejected,
         "knownParts": sorted(PRODUCT_COLORBAR_MM),

@@ -13,13 +13,20 @@ import 해서 함수만 부르면 깔끔하겠지만, 각 스크립트가 `__fil
 먼저다.
 
 [캐시]
-5단계를 다 도는 데 시간이 걸린다. 같은 그림이면 다시 돌리지 않도록 결과를
-그림 내용 해시로 들고 있는다 — 라벨 판독 캐시와 같은 이유다.
+단계를 다 도는 데 시간이 걸린다 — 실측 64XX2 가 **117초**로, 분석 한
+번에서 가장 큰 덩어리다(Qwen 판독 57초보다 크다). 그래서 같은 그림이면
+다시 돌리지 않는다.
+
+메모리에만 들고 있으면 서버를 껐다 켤 때마다 다시 돈다. 파이썬 코드를
+고치면 엔진을 다시 띄워야 하는 프로젝트라 그 일이 잦다. 그래서 디스크에도
+남긴다 — 열쇠에 **스크립트 내용 해시**를 넣으므로, 받은 코드가 바뀌면
+저절로 무효가 된다.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +39,9 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 PIPELINE = HERE / "lab_pipeline"
+# 환경변수로 옮길 수 있다(ADC_LAB_CACHE) — 시험이 실제 캐시를 건드리지
+# 않게 하려고 넣었고, 운영에서는 공유 폴더로 돌릴 수 있다.
+CACHE_DIR = Path(os.environ.get("ADC_LAB_CACHE") or (HERE / ".lab_cache"))
 
 # out_of_tolerance.py 의 SCAN_SCALES 에 등록된 품번들. 여기 없으면 못 돈다.
 KNOWN_PREFIXES = {
@@ -74,6 +84,25 @@ _cache: "OrderedDict[str, dict]" = OrderedDict()
 _CACHE_MAX = 8
 
 
+def _script_stamp(prefix: str) -> str:
+    """이 부품이 쓰는 스크립트 내용의 해시.
+
+    받은 코드가 바뀌면 캐시가 저절로 무효가 되게 하려고 넣는다. 사람이
+    판 번호를 올리는 것을 잊어도 안전하다.
+    """
+    digest = hashlib.blake2b(digest_size=8)
+    folder = PIPELINE / prefix
+    for path in sorted(folder.rglob("*")):
+        if path.is_file():
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _disk_path(key: str) -> Path:
+    return CACHE_DIR / f"{key}.json"
+
+
 def prefix_for(part_no: str | None) -> str | None:
     """품번 -> 파이프라인이 아는 이름. 모르면 None."""
     folded = str(part_no or "").upper().replace("-", "").replace("_", "")
@@ -109,11 +138,21 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
         return {"error": f"이 파이프라인에 등록되지 않은 품번입니다: {part_no}"}
 
     key = hashlib.blake2b(
-        np.ascontiguousarray(scan_bgr).tobytes() + prefix.encode(),
+        np.ascontiguousarray(scan_bgr).tobytes() + prefix.encode()
+        + _script_stamp(prefix).encode(),
         digest_size=16).hexdigest()
     if key in _cache:
         _cache.move_to_end(key)
         return _cache[key]
+
+    stored = _disk_path(key)
+    if stored.exists():
+        try:
+            found = json.loads(stored.read_text(encoding="utf-8"))
+            _cache[key] = found
+            return found
+        except Exception:
+            stored.unlink(missing_ok=True)   # 깨졌으면 그냥 다시 돈다
 
     area_contours: list = []
     with tempfile.TemporaryDirectory() as tmp:
@@ -190,6 +229,12 @@ def run(scan_bgr: np.ndarray, part_no: str | None,
     _cache[key] = result
     while len(_cache) > _CACHE_MAX:
         _cache.popitem(last=False)
+    try:
+        CACHE_DIR.mkdir(exist_ok=True)
+        _disk_path(key).write_text(
+            json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass          # 캐시를 못 써도 결과는 이미 나왔다
     return result
 
 

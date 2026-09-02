@@ -23,3 +23,7 @@ label_removal/output/*
 
 # 파싱한 STEP 캐시 — 파일당 수 MB 라 저장소에 넣지 않는다
 cad_import/_parsed/
+# 현업 제로라인 파이프라인 결과 (실측 64XX2 117초 -> 다시 안 돈다)
+zero_line_detection/.lab_cache/
+# Qwen 라벨 판독 결과 (실측 64XX2 57초 -> 다시 안 읽는다)
+ui/backend/.label_cache.json

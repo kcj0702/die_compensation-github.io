@@ -373,3 +373,55 @@ class OverlayCacheTest(unittest.TestCase):
         with self.assertRaises(ValueError) as caught:
             backend_server.cad_overlay_for("없는CAD", "없는분석")
         self.assertIn("CAD", str(caught.exception))
+
+
+class LabelStoreTest(unittest.TestCase):
+    """판독 결과를 디스크에도 남긴다 — 엔진을 다시 띄워도 안 잃는다."""
+
+    def setUp(self) -> None:
+        # 진짜 캐시 파일은 건드리지 않는다.
+        #
+        # 처음에는 백업했다가 되돌리는 식으로 짰는데, 그 사이에 시험이
+        # 두 항목짜리 파일을 써 버려서 실제로 데워 둔 캐시가 날아갔다 —
+        # 다음 분석이 Qwen 을 71초 다시 돌았다. 시험은 시험용 파일만
+        # 쓴다.
+        backend_server.reset_label_cache()
+        self._real = backend_server._LABEL_STORE
+        self._temp = tempfile.TemporaryDirectory()
+        backend_server._LABEL_STORE = (
+            Path(self._temp.name) / "label_cache.json")
+
+    def tearDown(self) -> None:
+        backend_server.reset_label_cache()
+        backend_server._LABEL_STORE = self._real
+        self._temp.cleanup()
+
+    @property
+    def _store(self):
+        return backend_server._LABEL_STORE
+
+    def test_남겼다가_다시_읽는다(self) -> None:
+        backend_server._remember_labels(["가", "나"], [1.5, None])
+        backend_server.reset_label_cache()
+        self.assertEqual(len(backend_server._label_cache), 0)
+        backend_server._load_label_store()
+        self.assertEqual(backend_server._label_cache.get("가"), 1.5)
+        self.assertIsNone(backend_server._label_cache.get("나"))
+        self.assertIn("나", backend_server._label_cache,
+                      "못 읽었다는 사실도 기억해야 다시 안 읽는다")
+
+    def test_파일이_깨져도_안_터진다(self) -> None:
+        self._store.write_text("{망가진", encoding="utf-8")
+        backend_server._load_label_store()      # 예외가 나면 안 된다
+        self.assertEqual(len(backend_server._label_cache), 0)
+
+    def test_같은_그림은_같은_열쇠다(self) -> None:
+        from PIL import Image
+
+        left = Image.fromarray(np.full((12, 20, 3), 128, np.uint8))
+        right = Image.fromarray(np.full((12, 20, 3), 128, np.uint8))
+        other = Image.fromarray(np.full((12, 20, 3), 129, np.uint8))
+        self.assertEqual(backend_server._crop_key(left),
+                         backend_server._crop_key(right))
+        self.assertNotEqual(backend_server._crop_key(left),
+                            backend_server._crop_key(other))
