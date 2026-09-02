@@ -1,0 +1,168 @@
+{
+  "format_version": 1,
+  "product": "JD_71XX2-DR000 3D 스캔",
+  "coordinate_system": {
+    "origin": "top_left",
+    "x_direction": "right",
+    "y_direction": "down",
+    "unit": "pixel",
+    "image_width": 1272,
+    "image_height": 768
+  },
+  "source": {
+    "nearest_zero_points_json": "output/06_nearest_zero_points/nearest_zero_points.json",
+    "label_removed_image": "output/01_label_removal/JD_71XX2-DR000 3D 스캔_4_labels_points_inpainted.png",
+    "original_image": "input/JD_71XX2-DR000 3D 스캔.png"
+  },
+  "outputs": {
+    "zero_line_on_label_removed": "01_zero_line_on_label_removed.png",
+    "zero_line_on_original": "02_zero_line_on_original.png"
+  },
+  "rendering": {
+    "outline_color_bgr": [
+      255,
+      255,
+      255
+    ],
+    "outline_width_px": 7,
+    "zero_line_color_bgr": [
+      255,
+      255,
+      0
+    ],
+    "zero_line_width_px": 4,
+    "anti_alias": true
+  },
+  "route_count": 3,
+  "routes": [
+    {
+      "region_label": "M1",
+      "zero_points": [
+        {
+          "label": "Z12",
+          "point": [
+            601.0757,
+            315.0
+          ]
+        },
+        {
+          "label": "Z1",
+          "point": [
+            124.0,
+            408.2873
+          ]
+        }
+      ],
+      "polyline": [
+        [
+          601,
+          315
+        ],
+        [
+          601,
+          317
+        ],
+        [
+          126,
+          408
+        ],
+        [
+          124,
+          408
+        ]
+      ],
+      "path_length_pixels": 487.6382945962819,
+      "path_bend_count": 2
+    },
+    {
+      "region_label": "M2",
+      "zero_points": [
+        {
+          "label": "Z1",
+          "point": [
+            124.0,
+            408.2873
+          ]
+        },
+        {
+          "label": "Z2",
+          "point": [
+            395.9469,
+            515.0
+          ]
+        }
+      ],
+      "polyline": [
+        [
+          124,
+          408
+        ],
+        [
+          126,
+          408
+        ],
+        [
+          396,
+          513
+        ],
+        [
+          396,
+          515
+        ]
+      ],
+      "path_length_pixels": 293.69811873741946,
+      "path_bend_count": 2
+    },
+    {
+      "region_label": "M3+M4",
+      "zero_points": [
+        {
+          "label": "Z6",
+          "point": [
+            742.038,
+            534.962
+          ]
+        },
+        {
+          "label": "Z7",
+          "point": [
+            1104.7941,
+            421.2059
+          ]
+        }
+      ],
+      "polyline": [
+        [
+          742,
+          535
+        ],
+        [
+          742,
+          533
+        ],
+        [
+          750,
+          422
+        ],
+        [
+          794,
+          394
+        ],
+        [
+          850,
+          394
+        ],
+        [
+          1103,
+          420
+        ],
+        [
+          1105,
+          421
+        ]
+      ],
+      "path_length_pixels": 478.010061694427,
+      "path_bend_count": 5
+    }
+  ]
+}

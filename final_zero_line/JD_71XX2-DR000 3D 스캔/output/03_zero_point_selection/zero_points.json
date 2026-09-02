@@ -1,0 +1,130 @@
+{
+  "source_contour_graph": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\02_contour_graph\\contour_graph.json",
+  "source_graph_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\02_contour_graph\\02_contour_graph.png",
+  "selection_rule": {
+    "intersection": "adjacent valid color-map values have opposite signs",
+    "touch": "absolute normalized color-map value <= 0.012",
+    "gray_out_of_range_excluded": true,
+    "outer_contour_only": true,
+    "inner_and_hole_contours_excluded": true
+  },
+  "zero_point_count": 12,
+  "contours": [
+    {
+      "name": "C1_outer",
+      "kind": "outer",
+      "closed": true,
+      "zero_point_count": 12,
+      "zero_points": [
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            124.0,
+            408.2873
+          ],
+          "sample_index": 65,
+          "normalized_value": -0.001909
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            395.9469,
+            515.0
+          ],
+          "sample_index": 233,
+          "normalized_value": -0.003358
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            477.1553,
+            519.1553
+          ],
+          "sample_index": 257,
+          "normalized_value": 0.003259
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            499.3364,
+            520.0
+          ],
+          "sample_index": 264,
+          "normalized_value": 0.000527
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            560.7052,
+            522.0
+          ],
+          "sample_index": 282,
+          "normalized_value": 0.003029
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            742.038,
+            534.962
+          ],
+          "sample_index": 337,
+          "normalized_value": 0.007967
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            1104.7941,
+            421.2059
+          ],
+          "sample_index": 499,
+          "normalized_value": -0.010733
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            1007.7446,
+            391.0
+          ],
+          "sample_index": 540,
+          "normalized_value": -0.006617
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            818.646,
+            355.0
+          ],
+          "sample_index": 600,
+          "normalized_value": -0.001317
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            757.9639,
+            343.0
+          ],
+          "sample_index": 619,
+          "normalized_value": 0.001778
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            684.7899,
+            329.7899
+          ],
+          "sample_index": 642,
+          "normalized_value": -0.000527
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            601.0757,
+            315.0
+          ],
+          "sample_index": 668,
+          "normalized_value": 0.002897
+        }
+      ]
+    }
+  ]
+}

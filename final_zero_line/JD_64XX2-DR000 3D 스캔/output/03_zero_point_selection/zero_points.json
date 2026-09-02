@@ -1,0 +1,128 @@
+{
+  "source_contour_graph": "C:\\ajin\\zero_line\\JD_64XX2-DR000 3D 스캔\\output\\02_contour_graph\\contour_graph.json",
+  "source_graph_image": "C:\\ajin\\zero_line\\JD_64XX2-DR000 3D 스캔\\output\\02_contour_graph\\02_contour_graph.png",
+  "selection_rule": {
+    "intersection": "adjacent valid color-map values have opposite signs",
+    "touch": "absolute normalized color-map value <= 0.012",
+    "gray_out_of_range_excluded": true,
+    "outer_contour_only": true,
+    "inner_and_hole_contours_excluded": true
+  },
+  "zero_point_count": 11,
+  "contours": [
+    {
+      "name": "C1_outer",
+      "kind": "outer",
+      "closed": true,
+      "zero_point_count": 11,
+      "zero_points": [
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            346.8871,
+            166.0
+          ],
+          "sample_index": 69,
+          "normalized_value": 0.007967
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            295.0,
+            189.253
+          ],
+          "sample_index": 94,
+          "normalized_value": 0.001895
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            115.0,
+            386.9102
+          ],
+          "sample_index": 214,
+          "normalized_value": 0.003514
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            113.4066,
+            441.4066
+          ],
+          "sample_index": 235,
+          "normalized_value": -0.005575
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            321.6594,
+            542.0
+          ],
+          "sample_index": 343,
+          "normalized_value": -0.004876
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            357.5287,
+            544.0
+          ],
+          "sample_index": 355,
+          "normalized_value": 0.006348
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            985.2429,
+            541.0
+          ],
+          "sample_index": 565,
+          "normalized_value": 0.00977
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            1135.421,
+            478.579
+          ],
+          "sample_index": 638,
+          "normalized_value": 0.005612
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            953.0,
+            202.5783
+          ],
+          "sample_index": 788,
+          "normalized_value": 0.003477
+        },
+        {
+          "type": "graph_contour_touch",
+          "point": [
+            932.4569,
+            166.0
+          ],
+          "sample_index": 808,
+          "normalized_value": 0.006605
+        },
+        {
+          "type": "graph_contour_intersection",
+          "point": [
+            115.0,
+            420.83227
+          ],
+          "between_values": [
+            0.061176,
+            -0.04826
+          ],
+          "interpolation_ratio": 0.55901166,
+          "between_sample_indices": [
+            226,
+            227
+          ]
+        }
+      ]
+    }
+  ]
+}

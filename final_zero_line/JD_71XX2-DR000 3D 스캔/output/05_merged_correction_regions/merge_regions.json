@@ -1,0 +1,525 @@
+{
+  "source_correction_mask": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\04_out_of_tolerance\\outside_pm0p7_mask.png",
+  "source_clean_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\01_label_removal\\JD_71XX2-DR000 3D 스캔_4_labels_points_inpainted.png",
+  "source_step03_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\03_zero_point_selection\\03_zero_points.png",
+  "merge_rule": {
+    "operation": "elliptical morphological closing",
+    "gap_ratio_of_short_image_side": 0.014,
+    "gap_kernel_size_px": 11,
+    "constrained_to_product_mask": true
+  },
+  "small_region_rule": {
+    "minimum_largest_component_ratio": 0.06,
+    "minimum_product_area_ratio": 0.001,
+    "minimum_area_px": 998.52
+  },
+  "source_component_count": 50,
+  "source_component_areas_descending": [
+    15326,
+    14134,
+    10337,
+    1441,
+    820,
+    802,
+    542,
+    403,
+    227,
+    212,
+    192,
+    190,
+    181,
+    135,
+    123,
+    123,
+    117,
+    113,
+    112,
+    103,
+    98,
+    95,
+    94,
+    70,
+    55,
+    52,
+    49,
+    47,
+    43,
+    37,
+    34,
+    34,
+    30,
+    30,
+    28,
+    26,
+    25,
+    22,
+    22,
+    20,
+    20,
+    19,
+    18,
+    18,
+    17,
+    16,
+    15,
+    15,
+    13,
+    13
+  ],
+  "merged_component_count_before_filter": 30,
+  "retained_component_count": 4,
+  "removed_component_count": 26,
+  "retained_pixel_count": 49467,
+  "components_after_gap_merge_sorted_by_area": [
+    {
+      "rank_by_area": 1,
+      "area_px": 16642,
+      "kept": true,
+      "centroid": [
+        203.345,
+        268.134
+      ],
+      "bounding_box": [
+        124,
+        190,
+        310,
+        184
+      ]
+    },
+    {
+      "rank_by_area": 2,
+      "area_px": 15206,
+      "kept": true,
+      "centroid": [
+        179.585,
+        530.052
+      ],
+      "bounding_box": [
+        120,
+        440,
+        179,
+        191
+      ]
+    },
+    {
+      "rank_by_area": 3,
+      "area_px": 14264,
+      "kept": true,
+      "centroid": [
+        976.617,
+        503.549
+      ],
+      "bounding_box": [
+        842,
+        432,
+        270,
+        136
+      ]
+    },
+    {
+      "rank_by_area": 4,
+      "area_px": 3259,
+      "kept": true,
+      "centroid": [
+        805.533,
+        434.48
+      ],
+      "bounding_box": [
+        752,
+        397,
+        104,
+        79
+      ]
+    },
+    {
+      "rank_by_area": 5,
+      "area_px": 874,
+      "kept": false,
+      "centroid": [
+        635.172,
+        417.314
+      ],
+      "bounding_box": [
+        608,
+        394,
+        58,
+        54
+      ]
+    },
+    {
+      "rank_by_area": 6,
+      "area_px": 412,
+      "kept": false,
+      "centroid": [
+        687.981,
+        425.689
+      ],
+      "bounding_box": [
+        677,
+        410,
+        26,
+        37
+      ]
+    },
+    {
+      "rank_by_area": 7,
+      "area_px": 223,
+      "kept": false,
+      "centroid": [
+        569.152,
+        432.919
+      ],
+      "bounding_box": [
+        562,
+        414,
+        16,
+        39
+      ]
+    },
+    {
+      "rank_by_area": 8,
+      "area_px": 197,
+      "kept": false,
+      "centroid": [
+        552.858,
+        470.279
+      ],
+      "bounding_box": [
+        528,
+        468,
+        49,
+        6
+      ]
+    },
+    {
+      "rank_by_area": 9,
+      "area_px": 195,
+      "kept": false,
+      "centroid": [
+        1074.318,
+        402.062
+      ],
+      "bounding_box": [
+        1066,
+        393,
+        18,
+        18
+      ]
+    },
+    {
+      "rank_by_area": 10,
+      "area_px": 155,
+      "kept": false,
+      "centroid": [
+        469.052,
+        309.342
+      ],
+      "bounding_box": [
+        449,
+        306,
+        38,
+        8
+      ]
+    },
+    {
+      "rank_by_area": 11,
+      "area_px": 123,
+      "kept": false,
+      "centroid": [
+        148.228,
+        369.919
+      ],
+      "bounding_box": [
+        144,
+        360,
+        11,
+        20
+      ]
+    },
+    {
+      "rank_by_area": 12,
+      "area_px": 92,
+      "kept": false,
+      "centroid": [
+        1052.543,
+        383.043
+      ],
+      "bounding_box": [
+        1044,
+        379,
+        18,
+        8
+      ]
+    },
+    {
+      "rank_by_area": 13,
+      "area_px": 86,
+      "kept": false,
+      "centroid": [
+        763.395,
+        398.384
+      ],
+      "bounding_box": [
+        751,
+        396,
+        25,
+        7
+      ]
+    },
+    {
+      "rank_by_area": 14,
+      "area_px": 84,
+      "kept": false,
+      "centroid": [
+        730.214,
+        504.476
+      ],
+      "bounding_box": [
+        724,
+        501,
+        13,
+        9
+      ]
+    },
+    {
+      "rank_by_area": 15,
+      "area_px": 71,
+      "kept": false,
+      "centroid": [
+        737.775,
+        412.986
+      ],
+      "bounding_box": [
+        730,
+        409,
+        15,
+        11
+      ]
+    },
+    {
+      "rank_by_area": 16,
+      "area_px": 60,
+      "kept": false,
+      "centroid": [
+        452.05,
+        515.35
+      ],
+      "bounding_box": [
+        442,
+        514,
+        21,
+        4
+      ]
+    },
+    {
+      "rank_by_area": 17,
+      "area_px": 58,
+      "kept": false,
+      "centroid": [
+        382.0,
+        493.5
+      ],
+      "bounding_box": [
+        377,
+        490,
+        11,
+        8
+      ]
+    },
+    {
+      "rank_by_area": 18,
+      "area_px": 51,
+      "kept": false,
+      "centroid": [
+        413.471,
+        453.51
+      ],
+      "bounding_box": [
+        403,
+        448,
+        21,
+        12
+      ]
+    },
+    {
+      "rank_by_area": 19,
+      "area_px": 40,
+      "kept": false,
+      "centroid": [
+        884.55,
+        420.175
+      ],
+      "bounding_box": [
+        878,
+        418,
+        14,
+        5
+      ]
+    },
+    {
+      "rank_by_area": 20,
+      "area_px": 34,
+      "kept": false,
+      "centroid": [
+        601.088,
+        499.647
+      ],
+      "bounding_box": [
+        598,
+        497,
+        8,
+        6
+      ]
+    },
+    {
+      "rank_by_area": 21,
+      "area_px": 26,
+      "kept": false,
+      "centroid": [
+        971.5,
+        401.615
+      ],
+      "bounding_box": [
+        967,
+        400,
+        10,
+        4
+      ]
+    },
+    {
+      "rank_by_area": 22,
+      "area_px": 25,
+      "kept": false,
+      "centroid": [
+        429.0,
+        462.0
+      ],
+      "bounding_box": [
+        424,
+        459,
+        11,
+        7
+      ]
+    },
+    {
+      "rank_by_area": 23,
+      "area_px": 25,
+      "kept": false,
+      "centroid": [
+        832.36,
+        499.24
+      ],
+      "bounding_box": [
+        830,
+        497,
+        6,
+        6
+      ]
+    },
+    {
+      "rank_by_area": 24,
+      "area_px": 23,
+      "kept": false,
+      "centroid": [
+        168.435,
+        406.261
+      ],
+      "bounding_box": [
+        165,
+        405,
+        8,
+        4
+      ]
+    },
+    {
+      "rank_by_area": 25,
+      "area_px": 21,
+      "kept": false,
+      "centroid": [
+        1018.476,
+        453.667
+      ],
+      "bounding_box": [
+        1015,
+        452,
+        7,
+        5
+      ]
+    },
+    {
+      "rank_by_area": 26,
+      "area_px": 14,
+      "kept": false,
+      "centroid": [
+        743.0,
+        425.5
+      ],
+      "bounding_box": [
+        742,
+        423,
+        3,
+        6
+      ]
+    },
+    {
+      "rank_by_area": 27,
+      "area_px": 13,
+      "kept": false,
+      "centroid": [
+        674.769,
+        356.231
+      ],
+      "bounding_box": [
+        673,
+        355,
+        5,
+        4
+      ]
+    },
+    {
+      "rank_by_area": 28,
+      "area_px": 11,
+      "kept": false,
+      "centroid": [
+        756.0,
+        453.0
+      ],
+      "bounding_box": [
+        754,
+        451,
+        5,
+        5
+      ]
+    },
+    {
+      "rank_by_area": 29,
+      "area_px": 8,
+      "kept": false,
+      "centroid": [
+        415.0,
+        415.5
+      ],
+      "bounding_box": [
+        414,
+        414,
+        3,
+        4
+      ]
+    },
+    {
+      "rank_by_area": 30,
+      "area_px": 8,
+      "kept": false,
+      "centroid": [
+        542.0,
+        439.5
+      ],
+      "bounding_box": [
+        541,
+        438,
+        3,
+        4
+      ]
+    }
+  ]
+}

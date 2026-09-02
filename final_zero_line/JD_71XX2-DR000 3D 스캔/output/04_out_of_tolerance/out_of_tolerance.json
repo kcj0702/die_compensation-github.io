@@ -1,0 +1,15 @@
+{
+  "source_clean_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\01_label_removal\\JD_71XX2-DR000 3D 스캔_4_labels_points_inpainted.png",
+  "source_original_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\input\\JD_71XX2-DR000 3D 스캔.png",
+  "source_step03_image": "C:\\ajin\\zero_line\\JD_71XX2-DR000 3D 스캔\\output\\03_zero_point_selection\\03_zero_points.png",
+  "tolerance_mm": 0.7,
+  "inclusive_rule": "deviation <= -0.7 mm or deviation >= +0.7 mm",
+  "gray_clipped_included": true,
+  "scale_max_mm": 2.0,
+  "positive_hue_limit": 31.0,
+  "negative_hue_limit": 93.0,
+  "positive_pixel_count": 30034,
+  "negative_pixel_count": 16411,
+  "gray_clipped_pixel_count": 265,
+  "correction_pixel_count": 46708
+}
