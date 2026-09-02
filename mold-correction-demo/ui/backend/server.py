@@ -471,6 +471,60 @@ def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
     return image
 
 
+def _resolve_product_image(
+    filename: str, uploaded: np.ndarray | None
+) -> tuple[np.ndarray | None, str | None, list[str]]:
+    """Pick the uploaded product image first, then a registered one."""
+    warnings: list[str] = []
+    if uploaded is not None:
+        return uploaded, "업로드한 이미지", warnings
+    part_number = part_number_from_name(filename)
+    if part_number is None:
+        return None, None, warnings
+    match = PRODUCT_LIBRARY.find(part_number)
+    if match is None:
+        warnings.append(f"품번 {part_number}의 제품데이터가 등록되어 있지 않습니다.")
+        return None, None, warnings
+    if not match.exact:
+        warnings.append(f"{part_number}에 정확히 맞는 제품데이터가 없어 {match.part_number}를 사용했습니다.")
+    try:
+        return read_image(match.path), f"등록됨 · {match.part_number}", warnings
+    except ValueError as exc:
+        warnings.append(str(exc))
+        return None, None, warnings
+
+
+def _align_to_product(
+    image: np.ndarray,
+    product_image: np.ndarray,
+    part_number: str | None,
+    flip_x: bool | None,
+    flip_y: bool | None,
+) -> tuple[Any, np.ndarray | None, list[str]]:
+    """Estimate the scan-to-product transform, reusing a confirmed direction."""
+    warnings: list[str] = []
+    scan_silhouette = build_part_silhouette(image)
+    product_mask = build_product_mask(product_image)
+    if flip_x is None and flip_y is None and part_number:
+        saved = ALIGNMENT_STORE.load(part_number)
+        if saved is not None:
+            flip_x, flip_y = saved.flip_x, saved.flip_y
+            warnings.append(f"{part_number}에 확정 저장된 방향을 사용했습니다.")
+    alignment = estimate_alignment(scan_silhouette, product_mask, flip_x=flip_x, flip_y=flip_y)
+    overlay = render_alignment_overlay(product_image, warp_scan_mask(alignment, scan_silhouette))
+    return alignment, overlay, warnings + list(alignment.warnings)
+
+
+def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
+    if flip_x and flip_y:
+        return cv2.flip(image, -1)
+    if flip_x:
+        return cv2.flip(image, 1)
+    if flip_y:
+        return cv2.flip(image, 0)
+    return image
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
