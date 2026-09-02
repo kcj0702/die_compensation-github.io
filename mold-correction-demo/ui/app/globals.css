@@ -716,3 +716,17 @@ button { cursor: pointer; }
 .cad-viewer__morph-key i{width:11px;height:11px;border-radius:3px;display:inline-block}
 .cad-viewer__morph-key b{color:#ffd9a3;font-variant-numeric:tabular-nums}
 .cad-viewer__morph-key em{color:#8fa3b4;font-style:normal}
+
+/* 공정별 물량 — 용접(덧살)과 CNC 가공(깎기)은 서로 다른 일이다 */
+.work-plan{margin:0 0 8px;padding:10px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb}
+.work-plan__head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;margin-bottom:7px}
+.work-plan__head>b{font-size:12px;color:#1d2b3a}
+.work-plan__head span{font-size:10.5px;color:#6b7c8c}
+.work-plan__table{width:100%;border-collapse:collapse;font-size:11px}
+.work-plan__table th{text-align:left;padding:4px 8px;color:#6b7c8c;font-weight:600;border-bottom:1px solid #e3e9ef}
+.work-plan__table td{padding:5px 8px;color:#2b3b4c;border-bottom:1px solid #eef2f6;font-variant-numeric:tabular-nums}
+.work-plan__table td:first-child{font-variant-numeric:normal}
+.work-plan__dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.work-plan__dot--weld{background:#ff6fa8}
+.work-plan__dot--cut{background:#5fb4e8}
+.work-plan__note{margin:6px 0 0;font-size:10px;color:#8494a3;line-height:1.6}

@@ -62,7 +62,9 @@ export type CadOverlay = {
                 gaps: [number, number, number][][] }[];
   zeroKind?: string;
   /* 위치만 준다. 보정량은 최종 보정시트가 정하므로 화면이 넣는다. */
-  points: { id: string; position: [number, number, number]; value: number }[];
+  points: { id: string; position: [number, number, number]; value: number;
+             /* CAD 원래 좌표(mm). CATIA 작업자가 그 자리에 값을 넣는다. */
+             cad?: [number, number, number] }[];
   scanPart?: string | null;
   /* 화면용 정점 하나하나의 스캔 편차(mm). 부품 밖이면 null. */
   surfaceDeviation?: (number | null)[];
@@ -137,6 +139,10 @@ export type CadMorph = {
   shift: number[];
   stats: { moved: number; max_shift: number; mean_shift: number; reach_mm: number };
   points: number;
+  /* 공정별 물량. 보정량의 부호가 곧 공정이다 —
+     + 살을 붙인다(용접), - 살을 깎는다(CNC 가공). */
+  work?: { kind: 'weld' | 'cut'; area_mm2: number; volume_mm3: number;
+           max_mm: number; mean_mm: number; faces: number }[];
 };
 
 export const CIRCLED = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];

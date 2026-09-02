@@ -36,6 +36,10 @@ type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_d
    시트가 제로라인의 주인이고 3D 는 그 결과를 보여 주는 자리다.
    옮김은 **그림 좌표(px)** 다. 3D 좌표로 밀면 표면에서 뜬다. */
 export type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean };
+/* 엑셀이 한글 CSV 를 깨뜨리지 않게 BOM 을 앞에 붙이고, 줄바꿈은
+   윈도우 엑셀이 기대하는 CRLF 로 쓴다. */
+const BOM = String.fromCharCode(0xFEFF);
+const CRLF = String.fromCharCode(13, 10);
 /* 작업자가 손으로 맞춘 정렬. 자동 정합은 실루엣만 보므로 몇 퍼센트가
    모자랄 수 있다 — 그때 조금 돌리고 옮겨 맞춘다. */
 export type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
@@ -1636,18 +1640,68 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     }
   };
 
-  const saveMorphStl = async () => {
+  /* CAD 작업자에게 넘길 보정표.
+   *
+   * STEP 을 그대로 고쳐 내보내는 것은 못 한다 — 자유곡면 제어점을
+   * 연속성 지키며 옮기는 건 전용 소프트웨어 영역이고, 면으로 쪼갠
+   * STEP 은 실측 삼각형당 1.6ms · 2.4KB 라 36만 삼각형이면 10분 ·
+   * 852MB 다. 대신 **부품 좌표와 보정량, 공정**을 표로 준다 —
+   * CATIA 에서 그 자리에 그 값을 넣는 것이 실제 작업 방식이다. */
+  const saveCadTable = () => {
+    if (!overlay || !mesh) return;
+    const values = sheetValues?.values ?? {};
+    const rows = [['포인트', 'X(mm)', 'Y(mm)', 'Z(mm)',
+                   '보정량(mm)', '공정', '편차(mm)']];
+    for (const point of overlay.points) {
+      const applied = values[point.id];
+      if (applied === undefined) continue;      // 시트에서 뺀 포인트
+      const spot = point.cad ?? point.position;
+      rows.push([
+        point.id,
+        spot[0].toFixed(3), spot[1].toFixed(3), spot[2].toFixed(3),
+        applied.toFixed(3),
+        applied > 0 ? '용접(덧살)' : applied < 0 ? 'CNC 가공(깎기)' : '-',
+        point.value.toFixed(3),
+      ]);
+    }
+    if (rows.length < 2) {
+      setMorphError('시트에 남은 보정 포인트가 없습니다.');
+      return;
+    }
+    // 엑셀이 한글을 깨뜨리지 않게 BOM 을 붙인다
+    const csv = BOM + rows.map((r) => r.join(',')).join(CRLF);
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${mesh.summary.name}_CAD보정표.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /* 공정별로 따로 내려받는다.
+     
+     현장에서는 전체 형상보다 **자기 공정 자리만** 있는 편이 낫다 —
+     용접공에게 깎을 자리를 같이 주면 헷갈린다. */
+  const saveMorphStl = async (part: 'after' | 'weld' | 'cut' = 'after') => {
     if (!mesh?.cadId) return;
     const response = await fetch(`${API_BASE}/api/cad-morph-stl`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(morphPayload()),
+      body: JSON.stringify({ ...morphPayload(), part }),
     });
-    if (!response.ok) { setMorphError('STL 을 만들지 못했습니다.'); return; }
+    if (!response.ok) {
+      const said = await response.json()
+        .catch(() => null) as { error?: string } | null;
+      setMorphError(said?.error || 'STL 을 만들지 못했습니다.');
+      return;
+    }
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
+    const tail = part === 'weld' ? '덧살(용접)'
+      : part === 'cut' ? '깎기(가공)' : '보정후';
     link.href = url;
-    link.download = `${mesh.summary.name}_보정후.stl`;
+    link.download = `${mesh.summary.name}_${tail}.stl`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -2033,6 +2087,41 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   <em>{failed}</em>
                 </p>;
               })()}
+              {/* 공정별 물량 — 보정량의 부호가 곧 공정이다.
+                  + 살을 붙인다(용접) · - 살을 깎는다(CNC 가공).
+                  두 일은 작업자도 견적도 다르므로 따로 적는다. */}
+              {morph && (morph.work?.length ?? 0) > 0 && (
+                <div className="work-plan">
+                  <div className="work-plan__head">
+                    <b>공정별 물량</b>
+                    <span>보정량이 <b>+</b> 면 살을 붙이고(용접),
+                      <b> −</b> 면 깎습니다(CNC 가공)</span>
+                  </div>
+                  <table className="work-plan__table">
+                    <thead><tr>
+                      <th>공정</th><th>손대는 넓이</th><th>부피</th>
+                      <th>가장 두꺼운 자리</th><th>평균 두께</th>
+                    </tr></thead>
+                    <tbody>
+                      {(morph.work ?? []).map((w) => (
+                        <tr key={w.kind}>
+                          <td><i className={`work-plan__dot work-plan__dot--${w.kind}`} />
+                            {w.kind === 'weld' ? '용접 (덧살)' : 'CNC 가공 (깎기)'}</td>
+                          <td>{(w.area_mm2 / 100).toFixed(1)} cm²</td>
+                          <td>{(w.volume_mm3 / 1000).toFixed(2)} cc</td>
+                          <td>{w.max_mm.toFixed(2)} mm</td>
+                          <td>{w.mean_mm.toFixed(2)} mm</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="work-plan__note">
+                    부피는 삼각형마다 <b>넓이 × 그 자리 이동량</b>을 더한 값입니다.
+                    0.05mm 아래로 얇게 밀린 자리는 뺐습니다 — 보간 꼬리가 넓은
+                    면적에 깔려 부피를 부풀립니다.
+                  </p>
+                </div>
+              )}
               {overlay && showAlign && <div className="cad-align">
                 <div className="cad-align__head">
                   <b>정렬 맞추기 — 스캔 그림을 형상 위에서 밀고 돌립니다</b>
@@ -2132,7 +2221,19 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                       <option value="after">보정 후만</option>
                     </select>
                     <button type="button" className="tool-button"
-                      onClick={saveMorphStl}>STL 저장</button>
+                      onClick={() => saveMorphStl('after')}>STL 저장</button>
+                    {overlay && <button type="button" className="tool-button"
+                      title="부품 좌표와 보정량·공정을 표로 내려받습니다 (CATIA 작업용)"
+                      onClick={saveCadTable}>CAD 보정표</button>}
+                    {(morph.work ?? []).map((w) => (
+                      <button key={w.kind} className="tool-button"
+                        title={w.kind === 'weld'
+                          ? '살을 붙일 자리만 담습니다 (용접 지시용)'
+                          : '살을 깎을 자리만 담습니다 (CNC 가공 지시용)'}
+                        onClick={() => saveMorphStl(w.kind)}>
+                        {w.kind === 'weld' ? '덧살만' : '깎기만'} STL
+                      </button>
+                    ))}
                     <span className="cad-overlay-bar__note">
                       최대 {morph.stats.max_shift.toFixed(2)}mm ·
                       {' '}평균 {morph.stats.mean_shift.toFixed(2)}mm ·

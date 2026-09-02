@@ -1499,6 +1499,19 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
             surface = [v if mine[i] else None
                        for i, v in enumerate(surface)]
 
+    # 보정 포인트를 **CAD 원래 좌표**로도 준다.
+    #
+    # CAD(STEP)를 그대로 고쳐 내보내는 것은 못 한다 — 자유곡면 제어점을
+    # 연속성 지키며 옮기는 건 전용 소프트웨어 영역이고, 면으로 쪼갠
+    # STEP 은 실측 삼각형당 1.6ms · 2.4KB 라 이 부품(363,431 삼각형)이면
+    # 10분 · 852MB 다. 대신 CATIA 작업자가 그 자리에 그 값을 넣을 수
+    # 있도록 **부품 좌표와 보정량**을 준다. 화면 좌표는 원점을 옮겨
+    # 놓았으므로 offset 을 되돌린다.
+    back = np.asarray(offset, dtype=float)
+    for point in points:
+        spot = np.asarray(point["position"], dtype=float) + back
+        point["cad"] = [round(float(v), 3) for v in spot]
+
     answer = {
             "fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
@@ -1659,11 +1672,16 @@ def cad_morph_for(cad_id: str, corrections: dict, positions: dict,
     moved, shift, stats = mp.morph(
         vertices, faces, normals, spots, values, reach_ratio)
 
+    # 보정량의 **부호가 곧 공정**이다 — + 용접(덧살), - CNC 가공.
+    # 두 일은 작업자도 견적도 다르므로 물량을 따로 낸다.
+    work = mp.work_volumes(vertices, faces, shift)
+
     return {
         "positions": [round(float(v), 4) for v in moved.ravel()],
         "shift": [round(float(v), 4) for v in shift],
         "stats": stats.to_dict(),
         "points": len(spots),
+        "work": [w.to_dict() for w in work],
     }
 
 
@@ -1686,10 +1704,21 @@ async def cad_morph(request: Request) -> JSONResponse:
 
 
 async def cad_morph_stl(request: Request) -> Response:
-    """보정 후 형상을 STL 로 내보낸다."""
+    """보정 후 형상을 STL 로 내보낸다.
+
+    `part` 로 무엇을 담을지 고른다 —
+      "after"(기본)  보정 후 형상 전체
+      "weld"         살을 붙일 자리만 (용접 지시용)
+      "cut"          살을 깎을 자리만 (CNC 가공 지시용)
+
+    현장에서는 전체 형상보다 **자기 공정 자리만** 있는 편이 낫다.
+    용접공에게 깎을 자리를 같이 주면 헷갈린다.
+    """
     try:
         import trimesh
+        from cad_import import morph as mp
         body = await request.json()
+        want = str(body.get("part") or "after")
         result = await run_in_threadpool(
             cad_morph_for, str(body.get("cadId") or ""),
             {str(k): float(v) for k, v in (body.get("corrections") or {}).items()},
@@ -1697,11 +1726,20 @@ async def cad_morph_stl(request: Request) -> Response:
             float(body.get("reachRatio") or 0.04),
         )
         entry = _cad_cache.get(str(body.get("cadId") or "")) or {}
-        mesh = trimesh.Trimesh(
-            vertices=np.asarray(result["positions"], dtype=float).reshape(-1, 3),
-            faces=np.asarray(entry["display_faces"]), process=False)
+        moved = np.asarray(result["positions"], dtype=float).reshape(-1, 3)
+        faces = np.asarray(entry["display_faces"])
+        tail = "보정후"
+        if want in ("weld", "cut"):
+            split = mp.split_by_process(faces, result["shift"])
+            faces = split[want]
+            if not len(faces):
+                return JSONResponse(
+                    {"error": "그 공정에 해당하는 자리가 없습니다."},
+                    status_code=404)
+            tail = "덧살(용접)" if want == "weld" else "깎기(가공)"
+        mesh = trimesh.Trimesh(vertices=moved, faces=faces, process=False)
         payload = mesh.export(file_type="stl")
-        name = f"{entry.get('name', 'part')}_보정후.stl"
+        name = f"{entry.get('name', 'part')}_{tail}.stl"
         quoted = urllib.parse.quote(name)
         return Response(payload, media_type="model/stl", headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})

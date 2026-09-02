@@ -228,5 +228,95 @@ def morph(
 
 __all__ = [
     "DEFAULT_REACH_RATIO", "FALLOFF_POWER",
-    "MorphResult", "displacement_field", "morph", "surface_distances",
+    "MorphResult", "WorkVolume", "WORK_FLOOR_MM",
+    "displacement_field", "morph", "split_by_process",
+    "surface_distances", "work_volumes",
 ]
+
+
+# ── 공정별 물량 ──────────────────────────────────────────────────
+# 보정량의 **부호가 곧 공정**이다.
+#   + 살을 붙인다  -> 용접(덧살)
+#   - 살을 깎는다  -> CNC 가공
+# 두 일은 작업자도 견적도 다르므로 물량을 따로 내야 한다.
+
+# 이보다 얇게 밀린 자리는 물량에서 뺀다(mm). 측정 잡음과 보간 꼬리가
+# 넓은 면적에 얇게 깔려 부피를 부풀린다.
+WORK_FLOOR_MM = 0.05
+
+
+@dataclass
+class WorkVolume:
+    """한 공정의 물량."""
+
+    kind: str               # "weld"(용접) | "cut"(가공)
+    area_mm2: float         # 손대는 면 넓이
+    volume_mm3: float       # 붙이거나 깎는 부피
+    max_mm: float           # 가장 두꺼운 자리
+    mean_mm: float
+    faces: int              # 해당하는 삼각형 수
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _triangle_areas(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    a = vertices[faces[:, 0]]
+    b = vertices[faces[:, 1]]
+    c = vertices[faces[:, 2]]
+    return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+
+def work_volumes(vertices, faces, shift, floor_mm: float = WORK_FLOOR_MM):
+    """민 양을 공정별(용접/가공) 물량으로 나눈다.
+
+    부피는 삼각형마다 `넓이 x 그 삼각형 세 꼭짓점의 평균 이동량` 을 더해
+    구한다. 얇은 껍질을 법선 방향으로 미는 것이므로 이 근사가 맞다.
+
+    Args:
+        shift: 정점별 이동량(mm). 양수면 살을 붙이는 쪽.
+        floor_mm: 이보다 얇으면 물량에서 뺀다.
+
+    Returns:
+        [WorkVolume, ...] — 해당하는 것만. 없으면 빈 목록.
+    """
+    vertices = np.asarray(vertices, dtype=float)
+    faces = np.asarray(faces).reshape(-1, 3)
+    shift = np.asarray(shift, dtype=float).reshape(-1)
+    if not len(faces) or not len(shift):
+        return []
+
+    areas = _triangle_areas(vertices, faces)
+    per_face = shift[faces].mean(axis=1)
+
+    out: list = []
+    for kind, picked in (("weld", per_face > floor_mm),
+                         ("cut", per_face < -floor_mm)):
+        if not picked.any():
+            continue
+        thick = np.abs(per_face[picked])
+        face_area = areas[picked]
+        out.append(WorkVolume(
+            kind=kind,
+            area_mm2=round(float(face_area.sum()), 1),
+            volume_mm3=round(float((face_area * thick).sum()), 1),
+            max_mm=round(float(thick.max()), 3),
+            mean_mm=round(float(np.average(thick, weights=face_area)), 3),
+            faces=int(picked.sum()),
+        ))
+    return out
+
+
+def split_by_process(faces, shift, floor_mm: float = WORK_FLOOR_MM):
+    """삼각형을 공정별로 갈라 준다 — 각각 따로 내보내려고.
+
+    Returns:
+        {"weld": (M,3) 면, "cut": (K,3) 면}
+    """
+    faces = np.asarray(faces).reshape(-1, 3)
+    shift = np.asarray(shift, dtype=float).reshape(-1)
+    if not len(faces) or not len(shift):
+        return {"weld": faces[:0], "cut": faces[:0]}
+    per_face = shift[faces].mean(axis=1)
+    return {"weld": faces[per_face > floor_mm],
+            "cut": faces[per_face < -floor_mm]}
