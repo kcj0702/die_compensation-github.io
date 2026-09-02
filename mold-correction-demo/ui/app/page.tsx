@@ -1925,13 +1925,12 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      40행 안에 맞춰 넣는다. 기존 파일을 골라두면 그 파일 끝에 같은 규칙으로 이어붙인다. */
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [excelSaving, setExcelSaving] = useState(false);
-  const [excelError, setExcelError] = useState<string | null>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
   /* 서버 build_sheet 경로로 저장한다. 라벨은 편집 가능한 텍스트박스로, 지시선은 라벨을
      따라 늘어나는 attached connector 로 나오고, 라벨 위치는 서버가 자동으로 잡는다.
      이전에는 html2canvas 로 프리뷰를 사진 찍어 넣었는데 그 방식은 라벨이 픽셀로 굳어
      Excel 에서 값 수정이 불가능했다. */
-  const saveExcel = async () => {
+  const saveSheetExcel = async () => {
     if (excelSaving) return;
     if (!result.productImage) {
       setExcelError('제품데이터 이미지가 없어 시트를 만들 수 없습니다.');
@@ -2111,7 +2110,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
         {excelFile && <button type="button" className="sheet-print__clear" onClick={() => { setExcelFile(null); if (excelInputRef.current) excelInputRef.current.value = ''; }} aria-label="선택한 엑셀 파일 취소" title="선택 취소"><X size={12} /></button>}
-        <button type="button" className="sheet-print" onClick={() => void saveExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
+        <button type="button" className="sheet-print" onClick={() => void saveSheetExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
         <button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button>
       </div>
     </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficient(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => setCoefficient(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>{folderAvailable && <Explorer />}
