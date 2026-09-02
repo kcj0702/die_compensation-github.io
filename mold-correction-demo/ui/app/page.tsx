@@ -942,7 +942,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   })}</div>;
 }
 
-function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, onLayoutsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
   /* 정렬 합성 이미지는 스캔 원본과 크기가 다를 수 있어 프레임 치수를 직접 받는다. */
   const sourceAspect = frameWidth / frameHeight;
   const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
@@ -950,6 +950,7 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange,
   /* 엑셀 내보내기가 Detail 영역을 알아야 해서 위로 올려 준다. */
   useEffect(() => { onRegionsChange?.(regions); }, [regions, onRegionsChange]);
   const [layouts, setLayouts] = useState<SheetLayout[]>([{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }]);
+  useEffect(() => { onLayoutsChange?.(layouts); }, [layouts, onLayoutsChange]);
   const [hiddenDetailPointIds, setHiddenDetailPointIds] = useState<Record<string, Set<string>>>({});
   const [selectedLayoutId, setSelectedLayoutId] = useState('front');
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
@@ -1290,6 +1291,10 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const frameWidth = onProduct ? alignment!.productSize[0] : result.source.width;
   const frameHeight = onProduct ? alignment!.productSize[1] : result.source.height;
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
+  /* 엑셀 내보내기가 실제 UI 배치(정면도·디테일 뷰의 캔버스 % 좌표)를
+     알아야 주석·창 위치를 시트에 그대로 옮길 수 있다. SheetCanvas 안에
+     있는 layouts 상태를 콜백으로 위로 끌어올린다. */
+  const [sheetLayouts, setSheetLayouts] = useState<SheetLayout[]>([]);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const addedPointSequenceRef = useRef(0);
@@ -1461,149 +1466,87 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const [excelSaving, setExcelSaving] = useState(false);
   const [excelError, setExcelError] = useState<string | null>(null);
   const excelInputRef = useRef<HTMLInputElement>(null);
+  /* 서버 build_sheet 경로로 저장한다. 라벨은 편집 가능한 텍스트박스로, 지시선은 라벨을
+     따라 늘어나는 attached connector 로 나오고, 라벨 위치는 서버가 자동으로 잡는다.
+     이전에는 html2canvas 로 프리뷰를 사진 찍어 넣었는데 그 방식은 라벨이 픽셀로 굳어
+     Excel 에서 값 수정이 불가능했다. */
   const saveExcel = async () => {
-    if (excelSaving || !stageRef.current) return;
+    if (excelSaving) return;
+    if (!result.productImage) {
+      setExcelError('제품데이터 이미지가 없어 시트를 만들 수 없습니다.');
+      return;
+    }
     setExcelSaving(true);
     setExcelError(null);
-    setSelectedAnnotationId(null); setTool('select'); setDetailMode(false); setLabelAreaMode(null); setAddPointMode(false);
-    document.body.classList.add('adc-printing');
     try {
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      const [{ default: ExcelJS }, { default: html2canvas }] = await Promise.all([
-        import('exceljs'), import('html2canvas'),
-      ]);
-      /* 회색 stage 여백이 아니라 실제 흰 시트만 캡처한다. 캡처 결과를 목표 비율로 먼저
-         잘라 둔 뒤 같은 비율로 엑셀에 넣어야 라벨의 글자·배경이 세로로 눌리지 않는다. */
-      const captureTarget = stageRef.current.querySelector<HTMLElement>('.sheet-canvas') || stageRef.current;
-      let capturedCanvas: HTMLCanvasElement;
-      captureTarget.classList.add('adc-excel-capture');
-      try {
-        capturedCanvas = await html2canvas(captureTarget, {
-          backgroundColor: '#ffffff', scale: 2, useCORS: true, logging: false,
-          /* 출력 CSS가 복제 문서에서 상속되지 않는 경우에도 포인트 원형 표시는 PNG에 넣지 않는다. */
-          ignoreElements: (element) => element.classList.contains('measure-point__dot') || element.classList.contains('add-point-remove'),
-        });
-      } finally {
-        captureTarget.classList.remove('adc-excel-capture');
-      }
-      const excelCanvas = cropCanvasToAspect(capturedCanvas, EXCEL_SHEET_IMAGE_ASPECT);
-      const base64 = excelCanvas.toDataURL('image/png').split(',')[1];
+      const productBlob = await (await fetch(result.productImage)).blob();
 
-      const workbook = new ExcelJS.Workbook();
-      /* 열은 A~AD 30개. 화면에 보이는 "열 너비" 3.75를 원해서 그 숫자를 그대로 저장하면, 실제
-         엑셀은 그 값을 0.58만큼 낮춰서 보여준다(3.75 저장 → 3.17로 표시) — <col width> XML 값과
-         엑셀의 ColumnWidth 사이에 고정 오프셋이 있는 실제 엑셀 동작이다. 이 PC에 설치된 엑셀을
-         COM으로 직접 열어서 여러 값을 넣어보고 정확히 검증했다: 3.75+0.58=4.33을 저장해야
-         화면에 3.75로 뜬다. */
-      const TOTAL_COLS = 30;
-      const COL_WIDTH_STORED = 4.33;
-      /* 첨부 화면의 그림 서식 값(너비 26.96cm × 높이 15.74cm)을 정확히 사용한다.
-         위에서 캡처도 같은 비율로 만들었으므로 이 크기로 넣어도 비균등 확대/축소가 없다. */
-      const IMAGE_WIDTH_PX = excelCentimetersToPixels(EXCEL_SHEET_IMAGE_WIDTH_CM);
-      const IMAGE_HEIGHT_PX = excelCentimetersToPixels(EXCEL_SHEET_IMAGE_HEIGHT_CM);
+      const visiblePointsList = sheetPoints.filter((point) => visiblePointIds.has(point.id));
+      const payloadPoints = visiblePointsList.map((point) => ({
+        id: point.id,
+        text: formatCorrection(displayFor(point)),
+        x: point.x,
+        y: point.y,
+      }));
 
-      if (excelFile) await workbook.xlsx.load(await excelFile.arrayBuffer());
-      let worksheet = workbook.worksheets[0];
-      if (!worksheet) {
-        worksheet = workbook.addWorksheet('보정 시트');
-        worksheet.columns = Array.from({ length: TOTAL_COLS }, () => ({ width: COL_WIDTH_STORED }));
-      }
-      /* 블록 하나 = 1~6행 표제란 + 7~40행 본문, 40행 고정. */
-      const HEADER_ROWS = 6;
-      const BLOCK_ROWS = 40;
-      const existingRowCount = worksheet.rowCount;
-      /* 이어붙이는 경우 이전 블록 마지막 행 바로 뒤에 페이지 나누기를 넣고, 실제 파일들처럼
-         빈 줄 없이 바로 다음 블록을 시작한다 — 인쇄하면 시트마다 정확히 한 장씩 나온다. */
-      if (existingRowCount > 0) worksheet.getRow(existingRowCount).addPageBreak();
-      const startRow = existingRowCount > 0 ? existingRowCount + 1 : 1;
-      const blockEndRow = startRow + BLOCK_ROWS - 1;
-      /* 실제 원본 양식 파일의 인쇄 설정을 COM으로 그대로 읽어서 맞췄다: A4 용지 + 폭 맞춤
-         배율(fitToWidth) + 여백 0. 이렇게 해야 AC/AD 사이에 뜨던 파란 점선(자동 페이지 나누기
-         표시)이 사라진다 — 그 점선은 "지금 용지에 폭이 안 맞아서 다음 페이지로 넘어간다"는
-         엑셀의 자동 표시였는데, 폭 맞춤 배율을 켜두면 항상 한 페이지 안에 들어가 아예 안 뜬다.
-         (이전엔 이 배율이 3.17 버그의 원인이라고 오판해서 껐었는데, 진짜 원인은 열 너비 저장값
-         오프셋이었고 이제 그건 따로 고쳤으니 배율을 켜도 문제없다 — 직접 열어서 재확인했다.) */
-      worksheet.pageSetup = { orientation: 'landscape', paperSize: 9 as import('exceljs').PaperSize, fitToPage: true, fitToWidth: 1, fitToHeight: 0, horizontalCentered: true, printArea: `A1:AD${blockEndRow}`, margins: { left: 0, right: 0, top: 0, bottom: 0, header: 0, footer: 0 } };
-      /* 페이지 나누기 미리보기 화면은 "인쇄되는 대로" 보여주는 모드라, 시스템 기본 프린터
-         용지에 맞춰 화면 배율을 자체적으로 조정하면서 열 너비 등 대화상자 값까지 실제 저장값과
-         다르게 보일 수 있다. 정확한 값 확인이 더 중요해서 기본 보기(일반 보기)로 연다. */
-      worksheet.views = [{ state: 'normal' }];
+      const payloadAnnotations = annotations.map((annotation) => ({
+        id: annotation.id,
+        kind: annotation.kind,
+        x: annotation.x,
+        y: annotation.y,
+        w: annotation.w,
+        h: annotation.h,
+        text: annotation.text ?? '',
+        fontSize: annotation.fontSize ?? null,
+        fontFamily: annotation.fontFamily ?? null,
+        color: annotation.color ?? DEFAULT_ANNOTATION_COLOR,
+      }));
 
-      const border = { style: 'thin' as const, color: { argb: 'FF171717' } };
-      const applyBorder = (cell: import('exceljs').Cell) => { cell.border = { top: border, left: border, bottom: border, right: border }; };
-      const applyFont = (cell: import('exceljs').Cell, field: SheetTitleField, bold: boolean) => {
-        cell.font = { name: extractFontName(sheetTitleFonts[field]), size: sheetTitleFontSizes[field] ?? TITLE_DEFAULT_FONT_SIZE[field], bold };
-        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-      };
-      const labelFill = { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: 'FFFAFAF8' } };
-      /* 표제란·본문 구분 없이 블록 40행 전부 13.5pt로 통일한다. */
-      for (let r = startRow; r <= blockEndRow; r++) worksheet.getRow(r).height = 13.5;
-      /* 본문(7~40행)은 도면 그림만 떠 있고 실제 셀은 필요 없어서, 30개 열 × 34행을 전부 하나로
-         병합해 둔다 — 자잘하게 나뉜 빈 칸들 대신 깔끔한 셀 하나로 만든다. */
-      worksheet.mergeCells(startRow + HEADER_ROWS, 1, blockEndRow, TOTAL_COLS);
-
-      /* 제목 배지는 A~I열(9칸), 표제란 6행 전체 높이만큼. 엑셀은 둥근 모서리·그림자를 셀로는
-         못 만들어서 테두리 있는 병합 셀로 근사한다. */
-      worksheet.mergeCells(startRow, 1, startRow + 5, 9);
-      const titleCell = worksheet.getCell(startRow, 1);
-      titleCell.value = sheetTitle.heading;
-      applyFont(titleCell, 'heading', true);
-      applyBorder(titleCell);
-
-      /* 실제 파일 기준 열 범위: 항목명1 J~L, 값1 M~S, 항목명2 T~W, 값2 X~AD. 필드 세 쌍이
-         두 행씩(관리NO/PART NAME, 공정/PART NO, 원소재/적용일자) 묶여 표제란 6행을 이룬다. */
-      const fieldRows: [SheetTitleField, SheetTitleField, SheetTitleField, SheetTitleField][] = [
-        ['managementLabel', 'managementNo', 'partNameLabel', 'partName'],
-        ['processLabel', 'process', 'partNoLabel', 'partNo'],
-        ['materialLabel', 'material', 'appliedDateLabel', 'appliedDate'],
-      ];
-      const writeField = (rowTop: number, colStart: number, colEnd: number, field: SheetTitleField, isLabel: boolean) => {
-        worksheet.mergeCells(rowTop, colStart, rowTop + 1, colEnd);
-        const cell = worksheet.getCell(rowTop, colStart);
-        cell.value = sheetTitle[field];
-        if (isLabel) cell.fill = labelFill;
-        applyFont(cell, field, false);
-        applyBorder(cell);
-      };
-      fieldRows.forEach(([labelField1, valueField1, labelField2, valueField2], index) => {
-        const rowTop = startRow + index * 2;
-        writeField(rowTop, 10, 12, labelField1, true);
-        writeField(rowTop, 13, 19, valueField1, false);
-        writeField(rowTop, 20, 23, labelField2, true);
-        writeField(rowTop, 24, 30, valueField2, false);
+      /* Detail 크롭 영역과 그 label 을 그대로 넘겨 백엔드가 별도 뷰로 자르도록 한다. */
+      const frontLayout = sheetLayouts.find((layout) => layout.kind === 'front');
+      const detailLayoutById = new Map(sheetLayouts.filter((layout) => layout.kind === 'detail').map((layout) => [layout.regionId, layout]));
+      const payloadDetails = detailRegions.map((region) => {
+        const layout = detailLayoutById.get(region.id);
+        return {
+          id: region.id,
+          label: region.label,
+          x: region.x,
+          y: region.y,
+          w: region.w,
+          h: region.h,
+          /* placement: 잘라낸 뷰가 시트 캔버스의 어느 자리에 어느 크기로 놓이는지. */
+          placement: layout ? { x: layout.x, y: layout.y, w: layout.w, h: layout.h } : null,
+        };
       });
 
-      /* 그림을 본문 셀의 외곽선과 정확히 겹쳐 놓으면 Excel의 도형 레이어가 셀 선을 가린다.
-         ExcelJS가 anchor offset을 계산하는 단위에 맞춰 0.03cm만큼 안쪽에서 시작한다. */
-      const imageStartRow = startRow - 1 + HEADER_ROWS;
-      const firstColumnWidth = worksheet.getColumn(1).width ?? COL_WIDTH_STORED;
-      const firstBodyRowHeight = worksheet.getRow(startRow + HEADER_ROWS).height ?? 13.5;
-      const imageColumnInset = EXCEL_SHEET_IMAGE_INSET_CM * 360000 / (firstColumnWidth * 10000);
-      const imageRowInset = EXCEL_SHEET_IMAGE_INSET_CM * 360000 / (firstBodyRowHeight * 10000);
+      const payload = {
+        partNumber: scan.partNo,
+        title: {
+          managementNo: sheetTitle.managementNo,
+          partName: sheetTitle.partName,
+          process: sheetTitle.process,
+          partNo: sheetTitle.partNo,
+          material: sheetTitle.material,
+          appliedDate: sheetTitle.appliedDate,
+        },
+        points: payloadPoints,
+        annotations: payloadAnnotations,
+        details: payloadDetails,
+        /* 정면도 picture 를 시트 캔버스 어디에 얼마 크기로 놓을지. UI 와 같은 % 좌표로 넘긴다. */
+        frontPlacement: frontLayout ? { x: frontLayout.x, y: frontLayout.y, w: frontLayout.w, h: frontLayout.h } : null,
+      };
 
-      worksheet.addImage(workbook.addImage({ base64, extension: 'png' }), {
-        tl: { col: imageColumnInset, row: imageStartRow + imageRowInset },
-        ext: { width: IMAGE_WIDTH_PX, height: IMAGE_HEIGHT_PX },
-      });
+      const form = new FormData();
+      form.append('payload', JSON.stringify(payload));
+      form.append('product', productBlob, 'product.png');
+      if (excelFile) form.append('previous', excelFile, excelFile.name);
 
-      /* 엑셀 파일의 "기본 글꼴"(스타일 0번, 열 너비를 "글자 수"로 계산하는 기준)이 ExcelJS가
-         기본으로 쓰는 Calibri로 남아있으면, 한글 글꼴 기준으로 만들어진 실제 양식과 달리 열
-         너비가 다르게 계산/표시된다 (원본 양식 파일의 기본 글꼴은 돋움이었다). 저장 직후 그
-         기본 글꼴만 돋움으로 바꿔친다. */
-      const rawBuffer = await workbook.xlsx.writeBuffer();
-      const { default: JSZip } = await import('jszip');
-      const zip = await JSZip.loadAsync(rawBuffer);
-      const stylesFile = zip.file('xl/styles.xml');
-      if (stylesFile) {
-        const stylesXml = await stylesFile.async('string');
-        const patched = stylesXml.replace(
-          /(<fonts[^>]*>)<font>[\s\S]*?<\/font>/,
-          '$1<font><sz val="11"/><name val="돋움"/><family val="3"/><charset val="129"/></font>',
-        );
-        zip.file('xl/styles.xml', patched);
+      const response = await fetch(`${API_BASE}/api/sheet`, { method: 'POST', body: form });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(errorData?.error || `서버 오류 (HTTP ${response.status})`);
       }
-      const buffer = await zip.generateAsync({ type: 'arraybuffer' });
-      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -1617,7 +1560,6 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     } catch (error) {
       setExcelError(error instanceof Error ? error.message : '엑셀로 저장하지 못했습니다.');
     } finally {
-      document.body.classList.remove('adc-printing');
       setExcelSaving(false);
     }
   };
@@ -1628,6 +1570,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     setAnnotations((current) => current.map((item) => item.id === selectedAnnotationId ? { ...item, color: hex } : item));
   };
   const displayFor = useCallback((point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient), [coefficient, pointOverrides]);
+  const formatCorrection = useCallback((value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`, []);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [displayFor, points]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
   const applyCorrection = async (id: string, targetOverride: number | null, action: CorrectionAction, options?: { skipRecord?: boolean }) => {
@@ -1702,7 +1645,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     <div className="service-grid"><div className="correction-card card">
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div>{keySelection && keySelection.total > 0 && <div className="point-preset" title={`피크 ${keySelection.peaks} · 부호변화 ${keySelection.signChanges} · 최대최소 ${keySelection.extremes}`}><span>포인트</span><button type="button" className={visiblePointIds.size === keySelection.selected ? 'active' : ''} onClick={onKeyPointsOnly}>주요 {keySelection.selected}</button><button type="button" className={visiblePointIds.size === sheetPoints.length ? 'active' : ''} onClick={() => onAllPointsToggle(true)}>전체 {keySelection.total}</button></div>}<div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={onProduct ? '제로라인은 스캔 좌표계 이미지라 제품데이터 위에는 겹칠 수 없습니다' : ''}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>

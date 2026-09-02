@@ -20,12 +20,35 @@ class SheetPoint:
     y_ratio: float
 
 
+@dataclass(frozen=True)
+class SheetAnnotation:
+    """A free-form annotation the operator drew on the UI preview.
+
+    Coordinates are ratios (0..1) of the containing view's image, so the
+    same annotation shifts with the picture when the layout resizes it.
+    ``kind`` mirrors the four UI tools: ``rect``, ``ellipse``, ``text``,
+    ``arrow``. ``w``/``h`` may be negative for ``arrow`` to encode
+    direction from (x, y) toward (x+w, y+h).
+    """
+
+    kind: str
+    x_ratio: float
+    y_ratio: float
+    w_ratio: float
+    h_ratio: float
+    color: str = "#e8802f"
+    text: str = ""
+    font_size_px: float | None = None
+    font_family: str | None = None
+
+
 @dataclass
 class SheetView:
     """One picture on the sheet with the points that belong to it."""
 
     image: np.ndarray
     points: list[SheetPoint] = field(default_factory=list)
+    annotations: list[SheetAnnotation] = field(default_factory=list)
     title: str = ""
     box: tuple[float, float, float, float] | None = None  # x, y, width, height
 

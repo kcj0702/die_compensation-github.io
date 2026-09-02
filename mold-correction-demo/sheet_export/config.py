@@ -11,10 +11,13 @@ EMU_PER_PIXEL = 9525
 
 # 양식의 시트 치수에서 계산한 도면 영역(px).
 # 행 높이 13.5pt = 18px, 표제란이 1~6행이라 도면은 7행(108px)부터다.
+# 인쇄 영역은 40행(=720px)에서 끝나므로 도면 바닥도 여기에 맞춘다. 예전에는
+# 738px(=41행 위쪽)로 계산해서 마지막 행 폭만큼 도면 바닥의 주석이 인쇄
+# 영역 바깥으로 밀려나 잘려 보였다.
 # 열 폭은 1~22열 3.78(31px), 23열 1.33(14px), 24~30열 5.11(41px) -> A~AD 983px.
 SHEET_WIDTH = 983
 DRAWING_TOP = 108
-DRAWING_BOTTOM = 738
+DRAWING_BOTTOM = 720
 
 # 라벨은 부품 바깥 여백에 두고 지시선으로 잇는다. 원본 시트와 같은 배치다.
 LABEL_WIDTH = 44
@@ -26,6 +29,12 @@ LABEL_FILL = "FFFFFF"
 LABEL_LINE = "404040"
 LEADER_LINE = "C05000"
 LEADER_WIDTH = 9525
+
+# 측정 포인트에 찍는 작은 원. 지금까지는 지시선 끝의 tailEnd 만 있어서 눈에 잘
+# 안 띄고, 라벨/지시선과 함께 잡아 옮길 대상도 없었다. 라벨과 같은 그룹에
+# 넣어 셋이 한 덩어리로 움직이도록 만든다.
+POINT_DOT_RADIUS = 4       # px
+POINT_DOT_COLOR = "9B1C1C"
 
 # 뷰 배치: 정면도는 위쪽, Detail View 는 아래쪽에 가로로 늘어놓는다.
 VIEW_MARGIN = 12
@@ -42,3 +51,10 @@ TITLE_CELLS = {
     "material": "M5",
     "applied_date": "Y5",
 }
+
+# 표제란 왼쪽 여백에 들어가는 시트 제목. 양식에는 비어 있는 A1:I6 영역이라
+# 새로 병합해서 채운다.
+SHEET_HEADING_TEXT = "보정 적용 내용"
+SHEET_HEADING_RANGE = "A1:I6"
+SHEET_HEADING_ANCHOR = "A1"
+SHEET_HEADING_FONT_SIZE = 18

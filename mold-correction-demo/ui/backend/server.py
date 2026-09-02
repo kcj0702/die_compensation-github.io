@@ -59,7 +59,8 @@ from product_alignment.registry import (  # noqa: E402
 )
 from point_selection import select_key_points  # noqa: E402
 from sheet_export import (  # noqa: E402
-    SheetPoint, SheetView, TitleBlock, build_sheet, crop_view,
+    SheetAnnotation, SheetPoint, SheetView, TitleBlock, build_sheet, crop_view,
+    stack_workbooks,
 )
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
@@ -449,6 +450,26 @@ def _align_to_product(
     return alignment, overlay, warnings + list(alignment.warnings)
 
 
+def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
+    """Physically flip scan pixels so printed label text reads upright.
+
+    ``product_alignment`` only ever produces a coordinate matrix -- it never
+    touches the raster. Qwen reads whatever orientation the raw scan came in,
+    so if the scan needs a flip to match the product data, every printed
+    digit is flipped right along with it and gets misread (``"0.8"`` turns
+    into ``"80.0"`` when both axes flip, i.e. a 180-degree turn). Flip the
+    pixels *before* OCR instead of only mapping points onto flipped coordinates
+    afterwards.
+    """
+    if flip_x and flip_y:
+        return cv2.flip(image, -1)
+    if flip_x:
+        return cv2.flip(image, 1)
+    if flip_y:
+        return cv2.flip(image, 0)
+    return image
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
@@ -456,7 +477,6 @@ def analyze_image(
     flip_x: bool | None = None,
     flip_y: bool | None = None,
 ) -> dict[str, Any]:
-    height, width = image.shape[:2]
     errors: dict[str, str] = {}
     part_number = part_number_from_name(filename)
 
@@ -467,12 +487,45 @@ def analyze_image(
     alignment_overlay: np.ndarray | None = None
     if product_image is not None:
         try:
+            # 라벨을 읽기 전에 방향부터 바로잡는다. 사람이 이미 확정한 방향이거나
+            # (저장된 정렬, 명시적 flipX/flipY) 자동 판정이 충분히 확실할 때만
+            # 실제 픽셀을 뒤집는다 -- 애매한 첫 추측만으로 원본을 뒤집으면 오히려
+            # 멀쩡한 스캔을 망가뜨릴 수 있다.
+            saved_alignment = (
+                ALIGNMENT_STORE.load(part_number)
+                if flip_x is None and flip_y is None and part_number
+                else None
+            )
+            probe, _, _ = _align_to_product(image, product_image, part_number, flip_x, flip_y)
+            trusted = (
+                flip_x is not None
+                or flip_y is not None
+                or saved_alignment is not None
+                or probe.confident
+            )
+            if trusted and (probe.flip_x or probe.flip_y):
+                image = _apply_flip(image, probe.flip_x, probe.flip_y)
+                # 픽셀을 이미 바로 세웠으니, 다음 정렬은 반전 없이 배율·평행이동만
+                # 다시 잡는다 -- 그러지 않으면 같은 방향을 두 번 뒤집는다.
+                flip_x, flip_y = False, False
             alignment, alignment_overlay, alignment_warnings = _align_to_product(
                 image, product_image, part_number, flip_x, flip_y
             )
+            if saved_alignment is not None:
+                # flip_x/flip_y 를 여기서 False 로 확정해 버려서 _align_to_product
+                # 내부의 "저장된 방향을 불러왔다" 안내가 두 번째 호출에서는 뜨지
+                # 않는다. 어떤 방향을 썼는지는 사용자에게 그대로 알려줘야 한다.
+                alignment_warnings = list(alignment_warnings) + [
+                    f"{part_number}에 확정 저장된 방향(좌우 {saved_alignment.flip_x}, "
+                    f"상하 {saved_alignment.flip_y})을 사용했습니다."
+                ]
             product_warnings.extend(alignment_warnings)
         except Exception as exc:  # engine errors must be shown per engine
             errors["product"] = str(exc)
+
+    # 위에서 방향을 바로잡았을 수 있으니 크기는 여기서 읽는다. 순수 반전은
+    # 가로세로를 바꾸지 않지만, 그래도 최종 image 기준으로 읽는 편이 안전하다.
+    height, width = image.shape[:2]
 
     clean_image: np.ndarray | None = None
     label_count = 0
@@ -865,13 +918,93 @@ async def realign(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+_ANNOTATION_KINDS = {"rect", "ellipse", "text", "arrow"}
+
+
+def _apply_placement(view: SheetView, placement: Any) -> None:
+    """Position a view's picture inside the sheet the way the UI shows it.
+
+    ``placement`` is ``{x, y, w, h}`` in percent of the UI's sheet canvas.
+    That canvas maps 1:1 to the Excel drawing area (from just below the
+    title block to the bottom guide), so multiplying by the drawing area's
+    size gives the exact pixel box for the picture. When placement is
+    missing the view is left alone and ``default_layout`` falls back to
+    its auto-fit behaviour.
+    """
+    if not isinstance(placement, dict):
+        return
+    try:
+        x = float(placement["x"]) / 100.0
+        y = float(placement["y"]) / 100.0
+        w = float(placement["w"]) / 100.0
+        h = float(placement["h"]) / 100.0
+    except (KeyError, TypeError, ValueError):
+        return
+    if w <= 0 or h <= 0:
+        return
+    from sheet_export import config as sheet_config  # local — avoid startup cost
+    drawing_height = sheet_config.DRAWING_BOTTOM - sheet_config.DRAWING_TOP
+    view.box = (
+        x * sheet_config.SHEET_WIDTH,
+        sheet_config.DRAWING_TOP + y * drawing_height,
+        w * sheet_config.SHEET_WIDTH,
+        h * drawing_height,
+    )
+
+
+def _sheet_annotations(raw: Any) -> list[SheetAnnotation]:
+    """Convert the UI annotation payload into ``SheetAnnotation`` values.
+
+    The frontend keeps ``x``/``y``/``w``/``h`` in percent (0–100) of the
+    preview layer, which shares its coordinate frame with the product image
+    dropped into the sheet, so a simple ``/100`` gives the ratios the
+    exporter expects. Unknown kinds are dropped so a bad payload cannot
+    poison the whole sheet.
+    """
+    if not isinstance(raw, list):
+        return []
+    result: list[SheetAnnotation] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "")).lower()
+        if kind not in _ANNOTATION_KINDS:
+            continue
+        try:
+            x = float(item.get("x", 0.0)) / 100.0
+            y = float(item.get("y", 0.0)) / 100.0
+            w = float(item.get("w", 0.0)) / 100.0
+            h = float(item.get("h", 0.0)) / 100.0
+        except (TypeError, ValueError):
+            continue
+        color = str(item.get("color") or "#e8802f")
+        text = str(item.get("text") or "")
+        font_size_raw = item.get("fontSize")
+        font_size: float | None
+        try:
+            font_size = float(font_size_raw) if font_size_raw is not None else None
+        except (TypeError, ValueError):
+            font_size = None
+        font_family = item.get("fontFamily")
+        font_family = str(font_family) if isinstance(font_family, str) else None
+        result.append(SheetAnnotation(
+            kind=kind, x_ratio=x, y_ratio=y, w_ratio=w, h_ratio=h,
+            color=color, text=text, font_size_px=font_size,
+            font_family=font_family,
+        ))
+    return result
+
+
 def build_sheet_bytes(
-    product_image: np.ndarray, payload: dict[str, Any]
+    product_image: np.ndarray, payload: dict[str, Any],
+    previous_bytes: bytes | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Turn the sheet the operator sees into the company Excel form.
 
     Point coordinates arrive as percentages of the product image, which is the
-    same frame the UI draws in, so no alignment work is repeated here.
+    same frame the UI draws in, so no alignment work is repeated here. When
+    ``previous_bytes`` is provided, the new block is appended to that
+    workbook via ``sheet_export.stack_workbooks``.
     """
     raw_points = payload.get("points") or []
     points = [
@@ -884,6 +1017,9 @@ def build_sheet_bytes(
         for index, item in enumerate(raw_points)
     ]
 
+    raw_annotations = payload.get("annotations") or []
+    annotations = _sheet_annotations(raw_annotations)
+
     title_values = payload.get("title") or {}
     title = TitleBlock(
         management_no=str(title_values.get("managementNo", "")),
@@ -894,45 +1030,63 @@ def build_sheet_bytes(
         applied_date=str(title_values.get("appliedDate", "")),
     )
 
-    views = [SheetView(image=product_image, points=points)]
+    front_view = SheetView(
+        image=product_image, points=points, annotations=annotations,
+    )
+    _apply_placement(front_view, payload.get("frontPlacement"))
+    views = [front_view]
     skipped: list[str] = []
     for index, region in enumerate(payload.get("details") or [], start=1):
         label = str(region.get("label") or f"DETAIL {index}")
         try:
-            views.append(
-                crop_view(
-                    product_image,
-                    points,
-                    (
-                        float(region["x"]) / 100.0,
-                        float(region["y"]) / 100.0,
-                        float(region["w"]) / 100.0,
-                        float(region["h"]) / 100.0,
-                    ),
-                    label,
-                )
+            detail_view = crop_view(
+                product_image,
+                points,
+                (
+                    float(region["x"]) / 100.0,
+                    float(region["y"]) / 100.0,
+                    float(region["w"]) / 100.0,
+                    float(region["h"]) / 100.0,
+                ),
+                label,
             )
         except (KeyError, TypeError, ValueError) as exc:
             skipped.append(f"{label}: {exc}")
+            continue
+        _apply_placement(detail_view, region.get("placement"))
+        views.append(detail_view)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output = Path(temp_dir) / "correction-sheet.xlsx"
         report = build_sheet(views, title, output=output)
         data = output.read_bytes()
 
+    stacked_warnings: list[str] = []
+    if previous_bytes:
+        try:
+            data = stack_workbooks(previous_bytes, data)
+        except Exception as exc:
+            stacked_warnings.append(f"이전 시트에 이어붙이지 못했습니다: {exc}")
+
     summary = {
         "pictures": report.pictures,
         "labels": report.labels,
         "leaders": report.leaders,
-        "warnings": report.warnings + skipped,
+        "warnings": report.warnings + skipped + stacked_warnings,
     }
     return data, summary
 
 
 async def sheet(request: Request) -> Response:
-    """Return the correction sheet as an .xlsx download."""
+    """Return the correction sheet as an .xlsx download.
+
+    The optional ``previous`` file part carries an existing sheet the new
+    block should be appended to. When present, ``sheet_export.stack_workbooks``
+    merges the freshly built single-block workbook onto the previous one so
+    the two print as consecutive pages of the same file.
+    """
     try:
-        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        form = await request.form(max_files=2, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
         payload = json.loads(str(form.get("payload") or "{}"))
         if not isinstance(payload, dict):
             return JSONResponse({"error": "payload는 객체여야 합니다."}, status_code=400)
@@ -950,8 +1104,13 @@ async def sheet(request: Request) -> Response:
                 )
             product_image = read_image(match.path)
 
+        previous_upload = form.get("previous")
+        previous_bytes: bytes | None = None
+        if previous_upload is not None and hasattr(previous_upload, "read"):
+            previous_bytes = await previous_upload.read() or None
+
         data, summary = await run_in_threadpool(
-            build_sheet_bytes, product_image, payload
+            build_sheet_bytes, product_image, payload, previous_bytes
         )
         name = f"{payload.get('partNumber') or 'correction'}-보정시트.xlsx"
         quoted = quote(name)

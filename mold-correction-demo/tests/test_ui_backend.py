@@ -636,6 +636,28 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
             cv2.flip(self.product, -1), (400, 240), interpolation=cv2.INTER_NEAREST
         )
         self.candidates = [_candidate((5, 5, 30, 16), (100, 60))]
+        # 이 클래스가 만드는 "64XX2-DR000" 은 실제 개발 PC에서 흔히 쓰는 진짜 품번
+        # 이름과 겹친다. analyze_image 가 이제 저장된 확정 방향을 먼저 찾아보므로,
+        # 그 자리를 매번 빈 임시 폴더로 갈아 끼우지 않으면 실제 로컬에 남아 있는
+        # 확정 정렬 파일을 조용히 읽어와 이 스몰 픽스처와 맞지 않는 값으로 테스트를
+        # 오염시킨다. 특정 테스트가 스토어를 직접 지정하면 그 with 블록 동안만
+        # 이 기본값을 덮어쓴다.
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        store_patcher = patch.object(
+            backend_server,
+            "ALIGNMENT_STORE",
+            backend_server.AlignmentStore(Path(temp_dir.name) / "alignment"),
+        )
+        store_patcher.start()
+        self.addCleanup(store_patcher.stop)
+        library_patcher = patch.object(
+            backend_server,
+            "PRODUCT_LIBRARY",
+            backend_server.ProductLibrary(Path(temp_dir.name) / "product"),
+        )
+        library_patcher.start()
+        self.addCleanup(library_patcher.stop)
 
     def tearDown(self) -> None:
         backend_server._reader = None
@@ -674,16 +696,66 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         self.assertIsNotNone(result["productImage"])
         self.assertIsNotNone(result["alignmentOverlay"])
         self.assertEqual(result["productSource"], "업로드한 이미지")
-        self.assertTrue(result["alignment"]["flipX"])
-        self.assertTrue(result["alignment"]["flipY"])
+        # self.scan 은 product 를 180도 뒤집고 2배로 키운 자료다. 방향 추정이
+        # 확실하면(여기선 확실하다) 좌표만 옮기지 않고 라벨을 읽기 전에 원본
+        # 픽셀 자체를 바로 세운다 -- 그래야 인쇄된 숫자도 똑바로 보여 OCR이
+        # 위아래가 뒤집힌 텍스트를 오독하지 않는다. 그래서 이미 바로 세운 뒤에
+        # 남는 정렬은 배율·평행이동만 필요하고 flip 은 더 이상 필요 없다.
+        self.assertFalse(result["alignment"]["flipX"])
+        self.assertFalse(result["alignment"]["flipY"])
         self.assertTrue(result["alignment"]["confident"])
 
         self.assertEqual(len(result["points"]), 1)
         point = result["points"][0]
-        # 스캔 (100, 60) -> 제품 ((399-100)/2, (239-60)/2) = (149.5, 89.5)
-        self.assertAlmostEqual(point["xProduct"], 149.5 / 200 * 100, delta=2.0)
-        self.assertAlmostEqual(point["yProduct"], 89.5 / 120 * 100, delta=2.0)
+        # detect_labels 는 이미 바로 세운 이미지에서 (100, 60) 을 찾았다고
+        # 가정하는 픽스처다. 바로 세운 스캔(400x240)을 제품(200x120)으로
+        # 절반 축소하면 (50, 30) -> 25%, 25%.
+        self.assertAlmostEqual(point["xProduct"], 25.0, delta=2.0)
+        self.assertAlmostEqual(point["yProduct"], 25.0, delta=2.0)
         self.assertEqual(result["stats"]["pointsTransferred"], 1)
+
+    def test_upside_down_scan_is_righted_before_ocr_reads_it(self) -> None:
+        """product_alignment 는 좌표 행렬만 만든다 -- 라벨의 인쇄된 숫자는
+
+        건드리지 않는다. 그래서 스캔이 제품데이터 대비 뒤집혀 있으면(이 픽스처는
+        180도), 좌표만 나중에 옮기는 예전 방식으로는 Qwen 이 뒤집힌 채로 인쇄된
+        숫자를 그대로 읽어 오독한다("0.8" 이 "80.0" 으로 읽히는 식). 라벨을 찾고
+        읽기 전에 원본 픽셀 자체를 먼저 바로 세워야 한다.
+        """
+        captured: list[np.ndarray] = []
+
+        def _capture_boxes(image: np.ndarray) -> list:
+            captured.append(image.copy())
+            return []
+
+        with (
+            patch.object(backend_server, "detect_label_boxes", side_effect=_capture_boxes),
+            patch.object(
+                backend_server,
+                "create_versions",
+                return_value={"2_labels_inpainted": self.scan.copy()},
+            ),
+            patch.object(
+                backend_server,
+                "detect_zero_line",
+                side_effect=RuntimeError("zero test disabled"),
+            ),
+            patch.object(backend_server, "detect_labels", return_value=[]),
+            patch.object(
+                backend_server,
+                "build_scan_mask",
+                return_value=np.full(self.scan.shape[:2], 255, dtype=np.uint8),
+            ),
+        ):
+            backend_server.analyze_image(self.scan, "JD_64XX2-DR000 3D 스캔.png", self.product)
+
+        self.assertEqual(len(captured), 1)
+        righted = cv2.flip(self.scan, -1)  # self.scan 은 product 를 180도 뒤집은 것이니, 되돌리면 이거다.
+        np.testing.assert_array_equal(
+            captured[0],
+            righted,
+            "라벨을 찾기 전에 스캔을 바로 세워야 OCR 이 뒤집힌 숫자를 오독하지 않는다.",
+        )
 
     def test_registered_product_is_used_without_a_second_upload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -721,11 +793,21 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
                 )
                 second = self._analyze("JD_64XX2-DR000 3D 스캔.png", None)
 
-        self.assertTrue(first["alignment"]["flipX"])
+        # first 는 자동 판정이 확실해서 이미 픽셀 자체를 바로 세웠으므로 flip 이
+        # 남지 않는다 (test_uploaded_product_image_moves_points_onto_it 참고).
+        self.assertFalse(first["alignment"]["flipX"])
+        # 사람이 확정 저장한 방향은 실제로는 틀렸다(좌우만 반전, 원래는 상하까지
+        # 필요) -- 그래도 저장된 값이니 그대로 믿고 픽셀을 그 방향으로 바로
+        # 세운다. 여전히 어긋난 상태로 남아 outline IoU 가 낮게 나오고, 그
+        # 사실을 경고로 알려야 한다.
         self.assertFalse(second["alignment"]["flipX"])
         self.assertTrue(second["alignment"]["overridden"])
+        self.assertFalse(second["alignment"]["confident"])
         self.assertTrue(
             any("확정 저장된 방향" in item for item in second["warningsByEngine"]["product"])
+        )
+        self.assertTrue(
+            any("일치도가 낮습니다" in item for item in second["warningsByEngine"]["product"])
         )
 
     def test_missing_product_leaves_the_existing_result_intact(self) -> None:

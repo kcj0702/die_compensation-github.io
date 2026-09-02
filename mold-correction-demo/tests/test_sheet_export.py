@@ -165,7 +165,7 @@ class LayoutTest(unittest.TestCase):
 
 
 class BuildSheetTest(unittest.TestCase):
-    def test_workbook_contains_one_shape_pair_per_point(self) -> None:
+    def test_workbook_emits_dot_label_leader_per_point(self) -> None:
         points = _points(4)
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "sheet.xlsx"
@@ -182,8 +182,44 @@ class BuildSheetTest(unittest.TestCase):
         self.assertEqual(report.labels, len(points))
         self.assertEqual(report.leaders, len(points))
         self.assertEqual(len(re.findall(r"<pic[ >]", xml)), 1)
-        self.assertEqual(len(re.findall(r"<sp[ >]", xml)), len(points))
+        # 세 개가 각각 독립 앵커라야 라벨만 드래그하고 포인트는 제자리에
+        # 남길 수 있다. 그룹으로 묶이는 순간 셋이 통째로 움직인다.
+        self.assertNotIn("<grpSp", xml)
+        self.assertEqual(len(re.findall(r"<sp[ >]", xml)), 2 * len(points))
         self.assertEqual(len(re.findall(r"<cxnSp[ >]", xml)), len(points))
+
+    def test_leader_is_attached_to_label_and_dot(self) -> None:
+        # <a:stCxn>/<a:endCxn> 이 있어야 Excel 이 라벨을 옮길 때 지시선을
+        # 다시 잇는다. 이 두 태그가 없으면 라벨을 옮겨도 선은 원위치에 남는다.
+        points = _points(1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "sheet.xlsx"
+            build_sheet(
+                [SheetView(image=_image(), points=points)],
+                output=output,
+                template=Path(temp_dir) / "missing.xlsx",
+            )
+            xml = _drawing_xml(output)
+
+        leader_xml = re.search(r"<cxnSp\b.*?</cxnSp>", xml, re.DOTALL)
+        self.assertIsNotNone(leader_xml)
+        body = leader_xml.group(0)
+        self.assertRegex(body, r'<a:stCxn id="\d+" idx="\d+"/>')
+        self.assertRegex(body, r'<a:endCxn id="\d+" idx="\d+"/>')
+
+    def test_text_box_is_editable(self) -> None:
+        # 값 수정이 가능하려면 txBox="1" 이 있어야 한다.
+        points = _points(1)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "sheet.xlsx"
+            build_sheet(
+                [SheetView(image=_image(), points=points)],
+                output=output,
+                template=Path(temp_dir) / "missing.xlsx",
+            )
+            xml = _drawing_xml(output)
+        self.assertIn('txBox="1"', xml)
+
 
     def test_values_reach_the_drawing_verbatim(self) -> None:
         points = [SheetPoint("P-01", "-0.7", 0.3, 0.3)]
