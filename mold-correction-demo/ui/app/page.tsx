@@ -4,10 +4,11 @@
 /* eslint-disable @next/next/no-img-element */
 
 import {
-  Activity, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, ChevronDown, ChevronRight,
-  Circle, CircleHelp, Crosshair, Eye, EyeOff, File, FileSpreadsheet, Folder, FolderOpen, Gauge, Grid2X2, Image as ImageIcon,
-  Layers3, ListFilter, Maximize2, MousePointer2, MoveRight, PanelLeftClose, Play, Settings2,
-  Printer, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
+  Activity, AlertTriangle, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCircle2, ChevronDown, ChevronRight,
+  Circle, CircleHelp, Copy, Crosshair, Database, Eye, EyeOff, File, FileSpreadsheet, Files, Folder, FolderOpen, Gauge, Grid2X2, HardDrive, Image as ImageIcon,
+  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Play, RefreshCw, Settings2,
+  Printer, Server, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
+  Box, Download,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -16,7 +17,7 @@ import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMo
 
 const API_BASE = 'http://127.0.0.1:8000';
 
-type View = 'workspace' | 'results' | 'service';
+type View = 'workspace' | 'results' | 'service' | 'files' | 'cad';
 type Engine = 'label' | 'deviation' | 'zero';
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 /* source 가 'colormap' 이면 작업자가 찍은 추정 포인트다. 라벨을 읽어 얻은 실측값과
@@ -29,6 +30,20 @@ type KeySelection = { ids: string[]; total: number; selected: number; peaks: num
 /* 스캔을 제품데이터 위로 옮기는 변환. margin 은 1위와 2위 방향의 점수 차이고,
    대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
 type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; score: number }[]; warnings: string[] };
+// ── 병합 때 빠진 분석 결과 타입 ─────────────────────────
+// main 의 AnalysisResult 가 이 이름들을 쓰는데 정의가 같이 날아가
+// 타입 검사가 11건 깨져 있었다.
+type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number; source?: string; kind?: 'point' | 'zone'; strength?: number };
+type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
+type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
+type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
+type GreenBelt = { belt_id: number; contour: [number, number][]; center: [number, number]; length_px: number; area_px: number; mean_abs_deviation: number };
+type SimpleZeroLine = { line_id: number; points: [number, number][]; route_type: string; bend_count: number; combined_coverage: number; tolerance_coverage: number; product_coverage: number; support_count: number; length_px: number };
+type LabShape = { shape_id: number; points: [number, number][]; is_closed: boolean };
+type LabDistance = { to_lab_pct: number; to_predicted_pct: number; diagonal_px: number };
+type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
+type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
+
 type AnalysisResult = {
   analysisId: string | null;
   partNo?: string;
@@ -86,7 +101,9 @@ type AnalysisResult = {
   };
   warnings: string[];
   warningsByEngine?: Partial<Record<Engine | 'product', string[]>>;
-  errors: Partial<Record<Engine | 'product', string>>;
+  /* labZero 는 엔진 탭이 없는 엔진이다(현업 제로라인 파이프라인).
+     타입에 없으면 실패를 화면에 띄울 수가 없다. */
+  errors: Partial<Record<Engine | 'product' | 'labZero', string>>;
   valueMode: string;
 };
 type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string };
@@ -110,6 +127,14 @@ type CorrectionHistoryEntry = {
 };
 type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
 type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
+type FileDatabaseStatus = { configured: boolean; label: string; connected: boolean | null; catalogCount: number; operationCount: number; version?: string; error?: string };
+type FileOrganizerStatus = { sourceRoot: string; destinationRoot: string; sourceAvailable: boolean; destinationAvailable: boolean; database: FileDatabaseStatus };
+type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
+type FolderAxis = 'family' | 'category' | 'product';
+type FolderAxisOption = { id: FolderAxis; label: string };
+type FolderMigration = { moved: number; skipped: number; errors: string[] };
+type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]; migration?: FolderMigration; error?: string };
+type OrganizerPathsResponse = { sourceRoot: string; destinationRoot: string; sourceLocked: boolean; destinationLocked: boolean };
 type SheetTitleField = 'heading' | 'managementLabel' | 'managementNo' | 'partNameLabel' | 'partName' | 'processLabel' | 'process' | 'partNoLabel' | 'partNo' | 'materialLabel' | 'material' | 'appliedDateLabel' | 'appliedDate';
 type SheetTitleValues = Record<SheetTitleField, string>;
 type SheetTitleFonts = Record<SheetTitleField, string>;
@@ -1059,22 +1084,26 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
     { id: 'workspace' as const, label: '분석 작업실', icon: Grid2X2 },
     { id: 'results' as const, label: '엔진 결과', icon: BarChart3 },
     { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
+    { id: 'files' as const, label: '품번 파일 정리', icon: Files },
+    { id: 'cad' as const, label: '3D CAD 뷰어', icon: Layers3 },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
-    <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /><div className="brand__copy"><strong>ADC</strong><span>Ajin Die Compensation</span></div></div>
-    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id !== 'workspace' && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
+    <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /></div>
+    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = (item.id === 'results' || item.id === 'service') && !hasResult; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={view === item.id ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <div className="sidebar__guide"><CircleHelp size={19} /><div><b>실제 엔진 연결</b><span>모든 처리는 이 PC 안에서 실행</span></div><ChevronRight size={16} /></div>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
 }
 
-function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
+// 작업 저장·불러오기·비우기는 배선해 준 화면에서만 쓴다. main 의 App
+// 은 아직 그 배선이 없어 필수로 두면 타입이 깨진다.
+function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile?: () => void; onLoadFile?: (file: File) => void; onReset?: () => void; note?: string | null }) {
   const fileRef = useRef<HTMLInputElement>(null);
   return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span><h1>ADC <small>Ajin Die Compensation</small></h1></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
     {/* 작업 내용은 자동으로 이 PC 에 남는다. 파일로 빼두면 보관하거나
         다른 사람에게 넘길 수 있다. */}
-    <div className="topbar__session">
+    {(onSaveFile || onLoadFile || onReset) && <div className="topbar__session">
       {note && <span className="topbar__session-note">{note}</span>}
       <button type="button" className="tool-button" onClick={onSaveFile}
         title="고친 보정값과 설정을 파일로 내려받습니다">작업 저장</button>
@@ -1086,10 +1115,10 @@ function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset,
       <input ref={fileRef} type="file" hidden accept="application/json,.json"
         onChange={(event) => {
           const file = event.target.files?.[0];
-          if (file) onLoadFile(file);
+          if (file) onLoadFile?.(file);
           event.target.value = '';
         }} />
-    </div>
+    </div>}
     <button className="icon-button" aria-label="설정"><Settings2 size={19} /></button><div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
   </div></header>;
 }
@@ -1160,7 +1189,7 @@ function Workspace({ scans, setScans, onOpenResults, backendOnline }: { scans: S
     return { ...scan, productFile: undefined, productUrl: undefined };
   }));
   return <section className="page page--workspace">
-    <div className="page-heading"><div><span className="kicker"><Sparkles size={14} /> 실제 로컬 엔진</span><h2>스캔 이미지를 한 번에 분석하세요</h2><p>업로드한 이미지는 이 PC의 세 엔진으로 처리되며 외부 서버로 전송되지 않습니다.</p></div><div className="step-pills"><span className="done"><Check size={14} /> 1. 이미지 등록</span><span className={analyzingCount ? 'active' : ''}>2. 엔진 분석</span><span>3. 보정 시트</span></div></div>
+    <div className="page-heading"><div><h2>스캔 이미지를 한 번에 분석하세요</h2><p>업로드한 이미지는 이 PC의 세 엔진으로 처리되며 외부 서버로 전송되지 않습니다.</p></div><div className="step-pills"><span className="done"><Check size={14} /> 1. 이미지 등록</span><span className={analyzingCount ? 'active' : ''}>2. 엔진 분석</span><span>3. 보정 시트</span></div></div>
     <div className="workspace-grid"><div className="upload-panel card"><div className="card-title"><div><h3>스캔 이미지 등록</h3><p>PNG, JPG, WEBP · 여러 파일 동시 선택 가능</p></div><span className="count-chip">{scans.length}개 등록</span></div>
       <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} /><span className="dropzone__icon"><UploadCloud size={29} /></span><b>스캔 이미지를 여기에 놓으세요</b><span>또는 클릭하여 파일 선택</span><em>여러 품번의 이미지를 동시에 올릴 수 있습니다</em></label>
       <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span><span className="product-slot">{scan.productFile ? <><ImageIcon size={12} /> 제품데이터 {scan.productFile.name}<button type="button" onClick={() => detachProduct(scan.id)} aria-label="제품데이터 해제">해제</button></> : <label><input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && attachProduct(scan.id, event.target.files[0])} /><UploadCloud size={12} /> 제품데이터 직접 지정 (없으면 품번으로 자동)</label>}</span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
@@ -1267,6 +1296,316 @@ function Explorer() {
   if (available === false) return null;
   const filtered = entries.filter((entry) => entry.name.toLowerCase().includes(query.toLowerCase())); const segments = path ? path.split('/') : [];
   return <div className="explorer card"><div className="explorer__title"><div><FolderOpen size={20} /><b>실시간 품번별 폴더</b></div><span>{available == null ? '연결 확인 중' : '현재 PC 폴더와 연결됨'}</span></div><div className="explorer__bar"><div className="explorer__crumb"><button disabled={!path} onClick={() => openFolder(segments.slice(0, -1).join('/'))}><ArrowLeft size={14} /></button><span><button onClick={() => openFolder('')}>{rootName}</button>{segments.map((segment, index) => <span key={`${segment}-${index}`}><ChevronRight size={13} /><button onClick={() => openFolder(segments.slice(0, index + 1).join('/'))}>{segment}</button></span>)}</span></div><label><ZoomIn size={15} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="현재 폴더 검색" /></label></div><div className="explorer__body"><div className="folder-tree"><button className={`tree-root ${!path ? 'selected' : ''}`} onClick={() => openFolder('')}><ChevronDown size={15} /><FolderOpen size={17} /> <span>{rootName}</span></button><div className="tree-children">{rootEntries.map((entry) => <FolderTreeNode key={entry.path} entry={entry} selectedPath={path} onOpen={openFolder} />)}</div></div><div className="folder-content"><div className="folder-content__head"><span>이름</span><span>수정한 날짜</span><span>크기</span></div>{filtered.map((entry) => <button className="folder-row" key={entry.path} onDoubleClick={() => entry.isDirectory && openFolder(entry.path)} onClick={() => entry.isDirectory && openFolder(entry.path)}><span>{entry.isDirectory ? <Folder size={19} fill="currentColor" /> : <File size={18} />}{entry.name}</span><small>{new Date(entry.modified).toLocaleString('ko-KR')}</small><small>{entry.isDirectory ? '파일 폴더' : formatBytes(entry.size)}</small></button>)}{!filtered.length && <div className="empty-search">이 폴더는 비어 있습니다.</div>}<div className="folder-content__status">{filtered.length}개 항목 <span>·</span> 실시간 로컬 조회</div></div></div></div>;
+}
+
+function OrganizerFolderNode({ entry, onAssign }: { entry: FolderEntry; onAssign: (ids: string[], path: string) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const [children, setChildren] = useState<FolderEntry[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const toggle = async () => {
+    if (!loaded) {
+      const response = await fetch(`${API_BASE}/api/folders?path=${encodeURIComponent(entry.path)}`);
+      const data = await response.json() as FolderResponse;
+      if (response.ok) {
+        setChildren(data.entries || []);
+        setLoaded(true);
+      }
+    }
+    setExpanded((current) => !current);
+  };
+  const acceptDrop = (event: DragEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.currentTarget.classList.remove('drop-ready');
+    try {
+      const ids = JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[];
+      if (ids.length) onAssign(ids, entry.path);
+    } catch { /* 외부 파일 드롭은 왼쪽 업로드 영역에서 처리한다. */ }
+  };
+  const folders = children.filter((child) => child.isDirectory);
+  const files = children.filter((child) => !child.isDirectory);
+  return <div className="organizer-folder-node">
+    <button type="button" onClick={toggle} onDragOver={(event) => { event.preventDefault(); event.currentTarget.classList.add('drop-ready'); }} onDragLeave={(event) => event.currentTarget.classList.remove('drop-ready')} onDrop={acceptDrop}>
+      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={16} fill="currentColor" /><span>{entry.name}</span>
+    </button>
+    {expanded && <div>
+      {folders.map((child) => <OrganizerFolderNode key={child.path} entry={child} onAssign={onAssign} />)}
+      {files.map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}
+      {loaded && !children.length && <small>비어 있음</small>}
+    </div>}
+  </div>;
+}
+
+function FileOrganizerPage() {
+  const [status, setStatus] = useState<FileOrganizerStatus | null>(null);
+  const [items, setItems] = useState<FileOrganizerItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [rootEntries, setRootEntries] = useState<FolderEntry[]>([]);
+  const [rootName, setRootName] = useState('품번별 폴더');
+  const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<'copy' | 'move'>('copy');
+  const [conflict, setConflict] = useState<'rename' | 'skip' | 'overwrite'>('rename');
+  const [notice, setNotice] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [showDatabase, setShowDatabase] = useState(false);
+  const [databaseUrl, setDatabaseUrl] = useState('');
+  const [showFolderOrder, setShowFolderOrder] = useState(false);
+  const [folderOrder, setFolderOrder] = useState<FolderAxis[]>(['family', 'category', 'product']);
+  const [axisOptions, setAxisOptions] = useState<FolderAxisOption[]>([]);
+  const [savingOrder, setSavingOrder] = useState(false);
+
+  const axisLabel = (axis: FolderAxis) => axisOptions.find((option) => option.id === axis)?.label || axis;
+
+  const loadFolderOrder = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`);
+      const data = await response.json() as FolderOrderResponse;
+      if (!response.ok) throw new Error(data.error || '폴더 순서를 불러오지 못했습니다.');
+      setFolderOrder(data.folderOrder);
+      setAxisOptions(data.axes);
+    } catch { /* 상태 카드/기본 순서로 충분히 안내되므로 조용히 넘어간다. */ }
+  }, []);
+
+  const [showPaths, setShowPaths] = useState(false);
+  const [pathsInfo, setPathsInfo] = useState<OrganizerPathsResponse | null>(null);
+  const [sourceRootInput, setSourceRootInput] = useState('');
+  const [destinationRootInput, setDestinationRootInput] = useState('');
+  const [savingPaths, setSavingPaths] = useState(false);
+
+  const loadOrganizerPaths = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/paths`);
+      const data = await response.json() as OrganizerPathsResponse & { error?: string };
+      if (!response.ok) throw new Error(data.error || '경로 설정을 불러오지 못했습니다.');
+      setPathsInfo(data);
+      setSourceRootInput(data.sourceRoot);
+      setDestinationRootInput(data.destinationRoot);
+    } catch { /* 저장소 상태 카드에 이미 현재 경로가 표시되므로 조용히 넘어간다. */ }
+  }, []);
+
+  const saveOrganizerPaths = async () => {
+    setSavingPaths(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/paths`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourceRoot: sourceRootInput, destinationRoot: destinationRootInput }),
+      });
+      const data = await response.json() as OrganizerPathsResponse & { error?: string };
+      if (!response.ok) throw new Error(data.error || '경로를 저장하지 못했습니다.');
+      setNotice({ tone: 'success', text: '경로를 저장했습니다. 다음 스캔부터 적용됩니다.' });
+      setShowPaths(false);
+      setPathsInfo(data);
+      await loadStatus(true); await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '경로 저장 중 오류가 발생했습니다.' });
+    } finally { setSavingPaths(false); }
+  };
+
+  const openInExplorer = async (which: 'source' | 'destination') => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/reveal`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ which }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || '탐색기를 열지 못했습니다.');
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '탐색기를 여는 중 오류가 발생했습니다.' });
+    }
+  };
+
+  const loadStatus = useCallback(async (checkDb = false) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/status?checkDb=${checkDb ? '1' : '0'}`);
+      const data = await response.json() as FileOrganizerStatus & { error?: string };
+      if (!response.ok) throw new Error(data.error || '저장소 상태를 확인하지 못했습니다.');
+      setStatus(data);
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '로컬 백엔드에 연결할 수 없습니다.' });
+    }
+  }, []);
+
+  const loadFolders = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/folders?path=`);
+      const data = await response.json() as FolderResponse;
+      if (!response.ok || data.available === false) return;
+      setRootEntries(data.entries || []);
+      setRootName(data.rootName || '품번별 폴더');
+    } catch { /* 대상 경로가 아직 준비되지 않은 경우 상태 카드가 안내한다. */ }
+  }, []);
+
+  useEffect(() => { void loadStatus(true); void loadFolders(); void loadFolderOrder(); void loadOrganizerPaths(); }, [loadFolders, loadFolderOrder, loadOrganizerPaths, loadStatus]);
+
+  const mergeItems = useCallback((incoming: FileOrganizerItem[]) => {
+    setItems((current) => {
+      const merged = new Map(current.map((item) => [item.sourcePath, item]));
+      incoming.forEach((item) => merged.set(item.sourcePath, item));
+      return Array.from(merged.values());
+    });
+    setSelected((current) => new Set([...current, ...incoming.map((item) => item.id)]));
+  }, []);
+
+  const scanSource = async () => {
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/scan`);
+      const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '원본 폴더를 스캔하지 못했습니다.');
+      mergeItems(data.items || []);
+      setNotice({ tone: 'info', text: `원본 폴더에서 ${(data.items || []).length}개 파일을 분석했습니다.` });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '스캔 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const uploadFiles = async (files: FileList | File[]) => {
+    if (!files.length) return;
+    setBusy(true); setNotice(null);
+    try {
+      const form = new FormData();
+      Array.from(files).forEach((file) => form.append('files', file, file.name));
+      const response = await fetch(`${API_BASE}/api/file-organizer/upload`, { method: 'POST', body: form });
+      const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '파일을 등록하지 못했습니다.');
+      mergeItems(data.items || []);
+      setNotice({ tone: 'info', text: `${(data.items || []).length}개 파일의 자동 분류가 끝났습니다.` });
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '파일 등록 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const assignTarget = (ids: string[], targetDir: string) => {
+    const idSet = new Set(ids);
+    setItems((current) => current.map((item) => idSet.has(item.id) ? { ...item, targetDir, targetPath: `${targetDir}/${item.name}`.replace(/^\//, '') } : item));
+    setNotice({ tone: 'info', text: `${ids.length}개 파일의 대상 폴더를 수동 지정했습니다.` });
+  };
+
+  const toggleSelected = (id: string) => setSelected((current) => {
+    const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
+  });
+  const activeItems = items.filter((item) => selected.has(item.id));
+
+  const removeItem = (item: FileOrganizerItem) => {
+    setItems((current) => current.filter((entry) => entry.id !== item.id));
+    setSelected((current) => { const next = new Set(current); next.delete(item.id); return next; });
+    if (item.sourceKind === 'upload') {
+      void fetch(`${API_BASE}/api/file-organizer/discard`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sourcePath: item.sourcePath }),
+      }).catch(() => { /* 대기열에서는 이미 지웠으니, 임시 파일 정리 실패는 조용히 넘어간다. */ });
+    }
+  };
+
+  const execute = async () => {
+    if (!activeItems.length) { setNotice({ tone: 'error', text: '실행할 파일을 하나 이상 선택해 주세요.' }); return; }
+    const action = operation === 'copy' ? '복사' : '이동';
+    if (!window.confirm(`선택한 ${activeItems.length}개 파일을 ${action}할까요?`)) return;
+    setBusy(true); setNotice(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation, conflict, items: activeItems.map((item) => ({ sourcePath: item.sourcePath, targetDir: item.targetDir })) }),
+      });
+      const data = await response.json() as { results?: { source: string; status: string; message: string }[]; databaseNote?: string; error?: string };
+      if (!response.ok) throw new Error(data.error || '파일 정리를 실행하지 못했습니다.');
+      const successful = new Set((data.results || []).filter((result) => result.status === 'success').map((result) => result.source));
+      const failed = (data.results || []).filter((result) => result.status === 'error').length;
+      setItems((current) => current.filter((item) => !successful.has(item.sourcePath)));
+      setSelected((current) => new Set([...current].filter((id) => items.some((item) => item.id === id && !successful.has(item.sourcePath)))));
+      setNotice({ tone: failed ? 'error' : 'success', text: `${successful.size}개 ${action} 완료${failed ? ` · ${failed}개 오류` : ''} · ${data.databaseNote || '감사 로그 저장'}` });
+      await loadStatus(true); await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '파일 정리 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const connectDatabase = async () => {
+    if (!databaseUrl.trim()) { setNotice({ tone: 'error', text: 'MariaDB 연결 URL을 입력해 주세요.' }); return; }
+    setBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/database`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ databaseUrl }) });
+      const data = await response.json() as FileDatabaseStatus & { error?: string };
+      if (!response.ok) throw new Error(data.error || 'MariaDB에 연결하지 못했습니다.');
+      setNotice({ tone: 'success', text: `${data.label} 연결과 테이블 초기화를 완료했습니다.` });
+      setShowDatabase(false); await loadStatus(true);
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : 'MariaDB 연결 중 오류가 발생했습니다.' });
+    } finally { setBusy(false); }
+  };
+
+  const moveAxis = (index: number, direction: -1 | 1) => {
+    setFolderOrder((current) => {
+      const target = index + direction;
+      if (target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const saveFolderOrder = async () => {
+    if (!window.confirm('실제 정리 대상 폴더 안의 폴더들을 새 순서로 지금 바로 옮깁니다. 계속할까요?')) return;
+    setSavingOrder(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderOrder: folderOrder }),
+      });
+      const data = await response.json() as FolderOrderResponse;
+      if (!response.ok) throw new Error(data.error || '폴더 순서를 저장하지 못했습니다.');
+      setFolderOrder(data.folderOrder);
+      const migration = data.migration;
+      const summary = migration
+        ? migration.moved > 0
+          ? `폴더 ${migration.moved}개를 새 구조로 옮겼습니다${migration.errors.length ? ` · 오류 ${migration.errors.length}건` : ''}.`
+          : '이미 이 순서였습니다 — 옮길 폴더가 없습니다.'
+        : '폴더 순서를 저장했습니다.';
+      setNotice({ tone: migration?.errors.length ? 'error' : 'success', text: summary });
+      setShowFolderOrder(false);
+      await loadFolders();
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '폴더 순서 저장 중 오류가 발생했습니다.' });
+    } finally { setSavingOrder(false); }
+  };
+
+  const db = status?.database;
+  const examplePath = folderOrder.map((axis) => {
+    if (axis === 'family') return '64XX2';
+    if (axis === 'category') return '01. 3D제품데이터';
+    return 'JD PNL DASH 64XX2-DR000';
+  }).join(' / ');
+  return <section className="page page--file-organizer">
+    <div className="page-heading"><div><h2>품번 태그로 파일을 자동 정리하세요</h2><p>파일명을 분석해 품번 계열, 자료유형, 상세 품번 폴더를 확인한 뒤 로컬 또는 NAS로 복사·이동합니다.</p></div><div className="file-heading-actions"><button type="button" className="file-order-pill" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> {folderOrder.map(axisLabel).join(' → ')}</button><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
+    {notice && <div className={`file-organizer-notice ${notice.tone}`}>{notice.tone === 'success' ? <CheckCircle2 size={16} /> : notice.tone === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}<span>{notice.text}</span><button onClick={() => setNotice(null)} aria-label="알림 닫기"><X size={14} /></button></div>}
+    {showFolderOrder && <div className="card file-order-settings">
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>자료유형과 차종·상세품번, 두 축의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 폴더도 세부 하위 구조를 보존한 채 새 순서로 옮겨집니다.</small></span></div>
+      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
+      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
+      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
+    </div>}
+    {showDatabase && <div className="card file-database-settings"><div><Database size={20} /><span><b>MariaDB 연결</b><small>파일은 로컬/NAS에, 태그와 작업 이력은 MariaDB에 저장됩니다.</small></span></div><input value={databaseUrl} onChange={(event) => setDatabaseUrl(event.target.value)} placeholder="mysql://사용자:비밀번호@서버:3306/file_organizer" /><button type="button" onClick={() => setDatabaseUrl('mysql://file_demo:file_demo_password@127.0.0.1:3307/file_organizer?charset=utf8mb4&connect_timeout=5')}>데모 설정</button><button type="button" className="primary-button" onClick={connectDatabase} disabled={busy}>연결 테스트·저장</button></div>}
+    <div className="file-storage-strip">
+      <div><Server size={18} /><span><small>원본 폴더</small><b title={status?.sourceRoot}>{status?.sourceRoot || '확인 중'}</b></span><em className={status?.sourceAvailable ? 'ok' : ''}>{status?.sourceAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('source')} title="탐색기에서 열기" aria-label="원본 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
+      <ChevronRight size={17} />
+      <div><HardDrive size={18} /><span><small>정리 대상 · 추후 NAS</small><b title={status?.destinationRoot}>{status?.destinationRoot || '확인 중'}</b></span><em className={status?.destinationAvailable ? 'ok' : ''}>{status?.destinationAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('destination')} title="탐색기에서 열기" aria-label="정리 대상 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
+      <button type="button" className="file-storage-action file-storage-edit" onClick={() => setShowPaths((current) => !current)} title="경로 변경" aria-label="경로 변경"><Settings2 size={14} /></button>
+      <div className="file-storage-metrics"><span>카탈로그 <b>{db?.catalogCount || 0}</b></span><span>작업 이력 <b>{db?.operationCount || 0}</b></span></div>
+    </div>
+    {showPaths && <div className="card file-path-settings">
+      <div className="file-path-settings__intro"><Settings2 size={20} /><span><b>원본·정리 대상 경로</b><small>{(pathsInfo?.sourceLocked || pathsInfo?.destinationLocked) ? 'ui/.env에 경로가 고정되어 있어 여기서는 바꿀 수 없습니다.' : '두 경로를 바꾸면 다음 스캔부터 적용됩니다.'}</small></span></div>
+      <label>원본 폴더<input value={sourceRootInput} onChange={(event) => setSourceRootInput(event.target.value)} disabled={pathsInfo?.sourceLocked} placeholder="C:\path\to\incoming-files" /></label>
+      <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
+      <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
+    </div>}
+    <div className="file-organizer-grid">
+      <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3><p>외부 파일을 끌어 놓거나 지정된 원본 폴더를 스캔하세요.</p></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
+        <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
+        <div className="file-organizer-table"><div className="file-organizer-table__head"><input type="checkbox" checked={items.length > 0 && selected.size === items.length} onChange={(event) => setSelected(event.target.checked ? new Set(items.map((item) => item.id)) : new Set())} aria-label="전체 선택" /><span>파일명 / 감지 태그</span><span>자료유형</span><span>예정 위치</span><span>신뢰도</span><span /></div>{items.map((item) => <div className="file-organizer-row" key={item.id} draggable onDragStart={(event) => { const ids = selected.has(item.id) ? [...selected] : [item.id]; event.dataTransfer.setData('text/ajin-file-ids', JSON.stringify(ids)); event.dataTransfer.effectAllowed = 'move'; }} title={item.reasons.join('\n')}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`${item.name} 선택`} /><span className="file-organizer-name"><File size={17} /><span><b>{item.name}</b><small>{[item.customer, item.itemNo, item.productName, item.process].filter(Boolean).join(' · ') || '품번 태그 미검출'} <em>{item.sourceKind === 'upload' ? '업로드' : '원본'}</em></small></span></span><span className={`file-category category-${item.categoryKey || 'unknown'}`}>{item.categoryKey || '--'} {item.categoryLabel}</span><span className="file-target-path" title={item.targetPath}>{item.targetDir || '_미분류'}</span><span className={`file-confidence ${item.confidence >= 70 ? 'good' : ''}`}>{item.confidence}%</span><button type="button" className="file-row-delete" onClick={() => removeItem(item)} aria-label={`${item.name} 대기열에서 삭제`} title="대기열에서 삭제"><Trash2 size={14} /></button></div>)}{!items.length && <div className="file-organizer-empty">분류할 파일이 아직 없습니다.</div>}</div>
+        <div className="file-execute-bar"><div className="file-operation-switch"><button type="button" className={operation === 'copy' ? 'active' : ''} onClick={() => setOperation('copy')}><Copy size={14} /> 복사</button><button type="button" className={operation === 'move' ? 'active' : ''} onClick={() => setOperation('move')}><Move size={14} /> 이동</button></div><label>동명 파일<select value={conflict} onChange={(event) => setConflict(event.target.value as typeof conflict)}><option value="rename">자동 이름 변경</option><option value="skip">건너뛰기</option><option value="overwrite">덮어쓰기</option></select></label><button type="button" className="primary-button file-execute" onClick={execute} disabled={busy || !activeItems.length}>{busy ? '처리 중…' : `선택 ${activeItems.length}개 정리 실행`} <ArrowRight size={16} /></button></div>
+      </div>
+      <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3><p>파일을 끌어 놓아 위치를 바꾸세요. (실제 폴더 구조)</p></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div><div className="file-target-hint"><b>세부 자동 분류</b><span>금형도면은 LAYOUT·구조도·패턴도·완성도와 OP별로, 문서는 성형해석·보정이력으로, NC데이터는 OP10~OP50으로 나뉩니다.</span></div><div className="file-target-hint"><b>드래그 앤 드롭</b><span>파일을 폴더 위에 놓아 자동 분류 위치를 직접 수정할 수 있습니다.</span></div></aside>
+    </div>
+  </section>;
 }
 
 function SheetTitleBlock({ values, onChange, fonts, onFontChange, fontSizes, onFontSizeChange }: { values: SheetTitleValues; onChange: (field: SheetTitleField, value: string) => void; fonts: SheetTitleFonts; onFontChange: (field: SheetTitleField, fontFamily: string) => void; fontSizes: SheetTitleFontSizes; onFontSizeChange: (field: SheetTitleField, size: number) => void }) {
@@ -1603,14 +1942,14 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      Excel 에서 값 수정이 불가능했다. */
   const saveSheetExcel = async () => {
     if (excelSaving) return;
-    if (!result.productImage) {
-      setExcelError('제품데이터 이미지가 없어 시트를 만들 수 없습니다.');
-      return;
-    }
     setExcelSaving(true);
     setExcelError(null);
     try {
-      const productBlob = await (await fetch(result.productImage)).blob();
+      // 제품데이터가 없으면 현재 스캔(라벨 제거본 우선)을 시트 정면도로 쓴다.
+      // 이 경우 포인트도 스캔 좌표계로 이미 계산되어 있어 별도 변환이 필요 없다.
+      const sheetImageUrl = onProduct ? result.productImage : result.cleanImage || scan.url;
+      if (!sheetImageUrl) throw new Error('시트에 넣을 이미지를 찾을 수 없습니다.');
+      const productBlob = await (await fetch(sheetImageUrl)).blob();
 
       const visiblePointsList = sheetPoints.filter((point) => visiblePointIds.has(point.id));
       const payloadPoints = visiblePointsList.map((point) => ({
@@ -1660,6 +1999,23 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
           material: sheetTitle.material,
           appliedDate: sheetTitle.appliedDate,
         },
+        titleFonts: {
+          management_no: extractFontName(sheetTitleFonts.managementNo),
+          part_name: extractFontName(sheetTitleFonts.partName),
+          process: extractFontName(sheetTitleFonts.process),
+          part_no: extractFontName(sheetTitleFonts.partNo),
+          material: extractFontName(sheetTitleFonts.material),
+          applied_date: extractFontName(sheetTitleFonts.appliedDate),
+        },
+        titleFontSizes: {
+          management_no: sheetTitleFontSizes.managementNo,
+          part_name: sheetTitleFontSizes.partName,
+          process: sheetTitleFontSizes.process,
+          part_no: sheetTitleFontSizes.partNo,
+          material: sheetTitleFontSizes.material,
+          applied_date: sheetTitleFontSizes.appliedDate,
+        },
+        pointFontFamily: extractFontName(pointLabelFont),
         points: payloadPoints,
         annotations: payloadAnnotations,
         details: payloadDetails,
@@ -1772,7 +2128,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     ? result.productImage!
     : showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
   return <section className="page page--service">
-    <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation <span className="demo-badge">DEMO</span></span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
+    <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div>{keySelection && keySelection.total > 0 && <div className="point-preset" title={`피크 ${keySelection.peaks} · 부호변화 ${keySelection.signChanges} · 최대최소 ${keySelection.extremes}`}><span>포인트</span><button type="button" className={visiblePointIds.size === keySelection.selected ? 'active' : ''} onClick={onKeyPointsOnly}>주요 {keySelection.selected}</button><button type="button" className={visiblePointIds.size === sheetPoints.length ? 'active' : ''} onClick={() => onAllPointsToggle(true)}>전체 {keySelection.total}</button></div>}<div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={onProduct ? '제로라인은 스캔 좌표계 이미지라 제품데이터 위에는 겹칠 수 없습니다' : ''}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
@@ -1788,10 +2144,959 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   </section>;
 }
 
+
+// ── 3D 시각화가 쓰는 것들 ───────────────────────────────
+export type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean };
+/* 엑셀이 한글 CSV 를 깨뜨리지 않게 BOM 을 붙이고, 줄바꿈은 CRLF 로 쓴다. */
+const BOM = String.fromCharCode(0xFEFF);
+const CRLF = String.fromCharCode(13, 10);
+/* 작업자가 손으로 맞춘 정렬. 자동 정합은 실루엣만 보므로 몇 %가 모자랄 수 있다. */
+export type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
+const NO_ADJUST: FitAdjust = { angle: 0, dx: 0, dy: 0, scale: 1 };
+
+export function partOfCad(mesh: CadMesh | null | undefined): string {
+  const name = (mesh?.summary.name || '').toUpperCase().replace(/[-_]/g, '');
+  const pairs: [string, string][] = [
+    ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
+  ];
+  return pairs.find(([cad]) => name.includes(cad))?.[1] ?? '';
+}
+
+export function scanFitsCad(scan: ScanItem, mesh: CadMesh) {
+  // 보정 후 형상은 **원본에서 만든 것**이라 스캔을 다시 맞추지 않는다.
+  //
+  // 다시 맞추면 두 가지가 어긋난다 — 스캔은 보정 **전** 부품을 찍은
+  // 것이라 맞을 이유가 없고, 그 어긋난 자세로 카메라까지 잡혀 형상이
+  // 모로 서서 조각처럼 보인다. 제로라인·보정량은 원본 탭에서 본다.
+  if (mesh.summary.source_format === 'morph') return false;
+  const name = (mesh.summary.name || '').toUpperCase().replace(/[-_]/g, '');
+  const pairs: [string, string][] = [
+    ['64XX1', '64XX2'], ['71XX1', '71XX2'], ['67XX6', '67XX6'],
+  ];
+  const wanted = pairs.find(([cad]) => name.includes(cad))?.[1];
+  const part = (scan.partNo || '').toUpperCase().replace(/[-_]/g, '');
+  return wanted ? part.includes(wanted) : Boolean(part && name.includes(part));
+}
+
+function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zeroEditsByScan,
+  zonesByPart, setZonesByPart }: {
+  /* 이 화면을 지금 보고 있는가. 안 보고 있어도 컴포넌트는 살아 있다 —
+     읽어 둔 CAD 를 지키려는 것이다. 감춰진 동안에는 그리기를 멈춘다. */
+  active: boolean;
+  scans: ScanItem[];
+  coefficientByScan: Record<string, number>;
+  hiddenPointIdsByScan: Record<string, Set<string>>;
+  pointOverridesByScan: Record<string, Record<string, number>>;
+  zeroEditsByScan: Record<string, ZeroEdit[]>;
+  zonesByPart: Record<string, CadRegion[]>;
+  setZonesByPart: (updater: (current: Record<string, CadRegion[]>) => Record<string, CadRegion[]>) => void;
+  onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
+  /* 주석과 공정 구역은 App 이 들고 있는다 — 새로고침해도 남으려면 세션
+     저장소에 들어가야 하고, 그건 App 에 있다. */
+  notesByCad: Record<string, CadNote[]>;
+  setNotesByCad: React.Dispatch<React.SetStateAction<Record<string, CadNote[]>>>;
+  regionsByCad: Record<string, CadRegion[]>;
+  setRegionsByCad: React.Dispatch<React.SetStateAction<Record<string, CadRegion[]>>>;
+}) {
+  /* CAD 를 여러 개 열어 놓고 골라 본다. 좌우 대칭품이나 공정별 형상을
+     번갈아 보려면 파일을 다시 올리게 하면 안 된다 — STEP 파싱이 실측
+     215MB 기준 42~100초다. */
+  const [meshes, setMeshes] = useState<CadMesh[]>([]);
+  const [activeCadId, setActiveCadId] = useState<string>('');
+  const [status, setStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [pending, setPending] = useState<string[]>([]);   // 읽는 중인 파일명
+  /* 몇 초째 읽고 있는지. 실측 113MB STEP 이 **57초** 걸리는데 그동안
+     아무 표시가 없어서 멈춘 것처럼 보였다. 같은 파일을 다시 열면
+     디스크 캐시가 있어 3초다. */
+  const [waited, setWaited] = useState(0);
+  /* 연 파일을 들고 있는다. 서버는 CAD 를 6개까지만 캐시하므로 7번째를
+     열면 첫 파일이 밀려나 "CAD 가 만료됐습니다" 가 뜬다. 그때 조용히
+     다시 올려 주면 사람은 모르고 지나간다(캐시 덕에 3초다). */
+  const fileStore = useRef<Record<string, File>>({});
+  const [error, setError] = useState<string | null>(null);
+  const mesh = useMemo(
+    () => meshes.find((m) => (m.cadId ?? m.summary.name) === activeCadId) ?? null,
+    [meshes, activeCadId]);
+  const keyOf = (item: CadMesh) => item.cadId ?? item.summary.name;
+  /* 한 번 계산한 오버레이는 들고 있는다. CAD 를 바꿔 가며 견줄 때마다
+     실루엣 정합을 다시 돌리면 몇 초씩 멈춘다. */
+  const overlayCache = useRef<Record<string, CadOverlay>>({});
+  /* 홀 핀은 데이텀 볼 때만 필요하다. 기본으로 켜두면 보정량 콜아웃을
+     가린다(실측 67XX6 은 홀이 180개다). */
+  const [showHoles, setShowHoles] = useState(false);
+  const [overlay, setOverlay] = useState<CadOverlay | null>(null);
+  const [overlayScanId, setOverlayScanId] = useState<string>('');
+  const [overlayStatus, setOverlayStatus] =
+    useState<'idle' | 'loading' | 'error'>('idle');
+  const [overlayError, setOverlayError] = useState<string | null>(null);
+  /* 주석·공정 구역의 열쇠는 cadId 가 아니라 **파일 이름**이다. cadId 는
+     파일을 열 때마다 새로 만드는 uuid 라 새로고침하면 짝을 잃는다.
+     스캔을 품번으로 묶는 것과 같은 이유다. */
+  const notesKey = mesh?.summary.name ?? '';
+  /* 지금 CAD 에 보여 줄 구역 = 등록해 둔 표준 구역 + 손으로 그린 것.
+     표준 구역은 좌표로 박혀 있으므로 파일을 다시 열어도 그 자리다. */
+  const zoneKey = partOfCad(mesh);
+  const standardZones = zonesByPart[zoneKey] ?? [];
+  /* 보정 후 형상 — 원본과 견줘 본다. B-Rep 이 아니라 메시를 민 것이라
+     가공용이 아니고 비교용이다. */
+  const [morph, setMorph] = useState<CadMorph | null>(null);
+  const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
+  const [morphState, setMorphState] = useState<'idle' | 'working' | 'error'>('idle');
+  const [morphError, setMorphError] = useState<string | null>(null);
+  /* 보정시트가 적어 둔 단면 위치로 계산하는 제로라인. 71XX2 시트의
+     "H : 300" · "T : 1700" 같은 표기가 부품 좌표(mm)라, 그 평면으로
+     CAD 를 자르면 제로라인이 **추정 없이** 나온다. */
+  const [sectionNotes, setSectionNotes] = useState('');
+  const [sections, setSections] = useState<CadSection[] | null>(null);
+  const [sectionSide, setSectionSide] = useState<'both' | 'lh' | 'rh'>('both');
+  const [sectionError, setSectionError] = useState<string | null>(null);
+  const [sectionState, setSectionState] = useState<'idle' | 'working'>('idle');
+
+  const cutSections = async () => {
+    if (!mesh?.cadId) return;
+    setSectionState('working'); setSectionError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-sections`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cadId: mesh.cadId, notes: sectionNotes, side: sectionSide }),
+      });
+      const data = await response.json() as { sections?: CadSection[]; error?: string };
+      if (!response.ok) throw new Error(data.error || '자르지 못했습니다.');
+      setSections(data.sections ?? []);
+    } catch (err) {
+      setSectionError(String((err as Error).message || err));
+      setSections(null);
+    } finally {
+      setSectionState('idle');
+    }
+  };
+
+  const morphPayload = () => {
+    const spots: Record<string, [number, number, number]> = {};
+    for (const point of overlay?.points ?? []) {
+      if (typeof sheetValues?.values?.[point.id] === 'number') {
+        spots[point.id] = point.position;
+      }
+    }
+    return { cadId: mesh?.cadId, corrections: sheetValues?.values ?? {}, positions: spots };
+  };
+
+  const buildMorph = async () => {
+    if (!mesh?.cadId || !overlay || !sheetValues) {
+      setMorphError('스캔 결과를 먼저 올리세요.'); return;
+    }
+    setMorphState('working'); setMorphError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-morph`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(morphPayload()),
+      });
+      const data = await response.json() as CadMorph & { error?: string };
+      if (!response.ok) throw new Error(data.error || '만들지 못했습니다.');
+      setMorph(data); setMorphMode('both'); setMorphState('idle');
+    } catch (err) {
+      setMorphError(String((err as Error).message || err));
+      setMorphState('error');
+    }
+  };
+
+  /* 보정 후 형상을 **새 CAD 탭으로** 연다.
+   *
+   * 화면에서만 밀어 보여 주면 내보낸 파일이 정말 그 형상인지 알 수 없다.
+   * 실제로 만들어 다시 올리면 원본과 같은 도구(단면·측정·주석·공정 구역)
+   * 를 그대로 쓰고, 탭을 오가며 견줄 수 있고, 화면에 보이는 것이 곧
+   * 내보내는 STL 이 된다. */
+  const openMorphAsCad = async () => {
+    if (!mesh?.cadId) return;
+    setMorphState('working'); setMorphError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/cad-morph-open`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(morphPayload()),
+      });
+      const data = await response.json() as CadMesh & { error?: string };
+      if (!response.ok) throw new Error(data.error || '만들지 못했습니다.');
+      setMeshes((current) => {
+        const rest = current.filter((m) => m.summary.name !== data.summary.name);
+        return [...rest, data];
+      });
+      setActiveCadId(data.cadId ?? data.summary.name);
+      setMorphMode('off');       // 새 탭 자체가 보정 후 형상이다
+      setMorphState('idle');
+    } catch (err) {
+      setMorphError(String((err as Error).message || err));
+      setMorphState('error');
+    }
+  };
+
+  /* CAD 작업자에게 넘길 보정표.
+   *
+   * STEP 을 그대로 고쳐 내보내는 것은 못 한다 — 자유곡면 제어점을
+   * 연속성 지키며 옮기는 건 전용 소프트웨어 영역이고, 면으로 쪼갠
+   * STEP 은 실측 삼각형당 1.6ms · 2.4KB 라 36만 삼각형이면 10분 ·
+   * 852MB 다. 대신 **부품 좌표와 보정량, 공정**을 표로 준다 —
+   * CATIA 에서 그 자리에 그 값을 넣는 것이 실제 작업 방식이다. */
+  const saveCadTable = () => {
+    if (!overlay || !mesh) return;
+    const values = sheetValues?.values ?? {};
+    const rows = [['포인트', 'X(mm)', 'Y(mm)', 'Z(mm)',
+                   '보정량(mm)', '공정', '편차(mm)']];
+    for (const point of overlay.points) {
+      const applied = values[point.id];
+      if (applied === undefined) continue;      // 시트에서 뺀 포인트
+      const spot = point.cad ?? point.position;
+      rows.push([
+        point.id,
+        spot[0].toFixed(3), spot[1].toFixed(3), spot[2].toFixed(3),
+        applied.toFixed(3),
+        applied > 0 ? '용접(덧살)' : applied < 0 ? 'CNC 가공(깎기)' : '-',
+        point.value.toFixed(3),
+      ]);
+    }
+    if (rows.length < 2) {
+      setMorphError('시트에 남은 보정 포인트가 없습니다.');
+      return;
+    }
+    // 엑셀이 한글을 깨뜨리지 않게 BOM 을 붙인다
+    const csv = BOM + rows.map((r) => r.join(',')).join(CRLF);
+    const url = URL.createObjectURL(
+      new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${mesh.summary.name}_CAD보정표.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /* 공정별로 따로 내려받는다.
+     
+     현장에서는 전체 형상보다 **자기 공정 자리만** 있는 편이 낫다 —
+     용접공에게 깎을 자리를 같이 주면 헷갈린다. */
+  const saveMorphStl = async (part: 'after' | 'weld' | 'cut' = 'after') => {
+    if (!mesh?.cadId) return;
+    const response = await fetch(`${API_BASE}/api/cad-morph-stl`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...morphPayload(), part }),
+    });
+    if (!response.ok) {
+      const said = await response.json()
+        .catch(() => null) as { error?: string } | null;
+      setMorphError(said?.error || 'STL 을 만들지 못했습니다.');
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const tail = part === 'weld' ? '덧살(용접)'
+      : part === 'cut' ? '깎기(가공)' : '보정후';
+    link.href = url;
+    link.download = `${mesh.summary.name}_${tail}.stl`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다. */
+  const [shots, setShots] = useState<string[]>([]);
+  const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
+  const [sheetError, setSheetError] = useState<string | null>(null);
+
+  const makeSheet = async () => {
+    const scan = scans.find((s) => s.id === overlayScanId);
+    const analysisId = scan?.result?.analysisId;
+    if (!analysisId || !sheetValues) { setSheetError('스캔을 먼저 고르세요.'); return; }
+    setSheetState('saving'); setSheetError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/sheet-excel`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          analysisId, corrections: sheetValues.values, images: shots,
+          meta: {
+            partNo: scan?.result?.naming?.part_no || scan?.partNo,
+            partName: scan?.result?.naming?.part_name || '',
+            process: scan?.result?.naming?.process || '',
+            controlNo: scan?.result?.naming?.control_no || '',
+            appliedAt: scan?.result?.naming?.applied_at || '',
+            coefficient: sheetValues.coefficient,
+            /* 시트 아래쪽 "① : 하형 용접" 줄에 그대로 들어간다. */
+            processes: (regionsByCad[notesKey] ?? [])
+              .map((region, order) =>
+                `${CIRCLED[order] ?? order + 1} : ${region.die} ${region.work}`),
+          },
+        }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(data.error || '시트를 만들지 못했습니다.');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${scan?.partNo || 'ADC'}_보정시트_3D.xlsx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setSheetState('idle');
+    } catch (err) {
+      setSheetError(String((err as Error).message || err));
+      setSheetState('error');
+    }
+  };
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // 분석이 끝나 analysisId 를 가진 스캔만 3D 로 올릴 수 있다.
+  const analysed = useMemo(
+    () => scans.filter((s) => s.result?.analysisId), [scans]);
+
+  /* CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
+     64XX1 CAD 는 64XX2 스캔과, 71XX1 은 71XX2 와 짝이다(좌우 대칭품이라
+     CAD 가 한쪽만 온다). 백엔드 CAD_TO_SCAN_PART 과 같은 표다. */
+  const suggested = useMemo(
+    () => (mesh ? analysed.find((s) => scanFitsCad(s, mesh)) : undefined),
+    [analysed, mesh]);
+
+  /* 3D 에 얹을 값은 최종 보정시트가 정한다 — 작업자가 고친 값과 숨긴
+     포인트, 보정 계수를 그대로 따른다. 여기서 따로 계산하면 시트와
+     3D 가 어긋난다. 시트의 displayFor 와 같은 식이다. */
+  const sheetValues = useMemo(() => {
+    const scan = scans.find((s) => s.id === overlayScanId);
+    if (!scan?.result) return null;
+    const coefficient = coefficientByScan[scan.id] ?? 1;
+    const overrides = pointOverridesByScan[scan.id] || {};
+    const hidden = hiddenPointIdsByScan[scan.id] || new Set<string>();
+    const values: Record<string, number> = {};
+    for (const point of scan.result.points) {
+      if (hidden.has(point.id)) continue;
+      values[point.id] = overrides[point.id] !== undefined
+        ? overrides[point.id] : -(point.value * coefficient);
+    }
+    return { values, coefficient, hiddenCount: hidden.size,
+             overrideCount: Object.keys(overrides).length };
+  }, [scans, overlayScanId, coefficientByScan,
+      pointOverridesByScan, hiddenPointIdsByScan]);
+
+  /* 품번이 맞는 스캔이 있으면 **고르지 않아도** 바로 얹는다.
+     예전에는 드롭다운의 값만 바꿔 놓고 요청은 안 해서, 짝이 뻔한데도
+     사람이 한 번 더 골라야 결과가 나왔다. */
+  /* CAD 를 바꾸면 **그 CAD 에 맞는 스캔**으로 다시 잡는다.
+     
+     예전에는 고른 스캔이 하나뿐이라 CAD 탭을 옮겨도 그대로 따라갔다.
+     67XX6 스캔을 걸어 둔 채 64XX1 CAD 로 넘어가면 그 스캔을 64XX1 에
+     얹어 버려서 얹힘이 34% 로 떨어지고 "이 부품은 안 된다" 처럼 보였다
+     (71XX1 은 21%). 품번이 다른 스캔을 얹는 것 자체가 틀린 일이다. */
+  useEffect(() => {
+    if (!mesh) return;
+    if (mesh.summary.source_format === 'morph') {
+      // 보정 후 형상 탭 — 얹을 것이 없다
+      setOverlay(null);
+      setOverlayScanId('');
+      return;
+    }
+    const chosen = analysed.find((scan) => scan.id === overlayScanId);
+    const fits = chosen && scanFitsCad(chosen, mesh);
+    if (fits) return;
+    if (suggested) requestOverlay(suggested.id, mesh.cadId);
+    else if (chosen) return;      // 짝이 없으면 사람이 고른 것을 존중한다
+    else setOverlay(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggested, overlayScanId, mesh, analysed]);
+
+  /* 시트에서 제로라인을 고쳐 [3D 에 적용] 을 누르면 다시 얹는다.
+     3D 의 제로라인은 시트가 정하는 것이므로 시트를 따라가야 한다. */
+  const appliedEdits = overlayScanId
+    ? JSON.stringify(zeroEditsByScan[overlayScanId] ?? []) : '';
+  useEffect(() => {
+    if (!overlayScanId || !mesh) return;
+    requestOverlay(overlayScanId, mesh.cadId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedEdits]);
+
+  /* 고른 CAD 가 바뀌면 얹어 둔 스캔 결과도 그 CAD 기준으로 다시 잡는다.
+     캐시에 있으면 즉시 돌아온다. */
+  useEffect(() => {
+    setMorph(null); setMorphMode('off'); setMorphError(null);
+    setSections(null); setSectionError(null);
+    if (overlayScanId) requestOverlay(overlayScanId, mesh?.cadId);
+    else setOverlay(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCadId]);
+
+  /* CAD 마다 따로 들고 있는다 — 부품이 다르면 맞춘 값도 다르다.
+     열쇠는 **파일 이름**이다. cadId 는 파일을 다시 읽을 때마다 새로
+     생겨서(서버 캐시에서 밀려나면 다시 올린다) 맞춰 둔 값이 날아간다 —
+     notesByCad·regionsByCad 와 같은 이유다. */
+  const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
+  const adjustKey = mesh?.summary.name ?? '';
+  const adjust = adjustByCad[adjustKey] ?? NO_ADJUST;
+  const [showAlign, setShowAlign] = useState(false);
+
+  /* 손으로 맞춘 정렬이 바뀌면 다시 얹는다. */
+  const nudge = (next: Partial<FitAdjust>) => {
+    // activeCadId 는 cadId 가 없을 때 파일 이름으로 떨어진다(keyOf).
+    // 서버에 보낼 때는 반드시 진짜 cadId 를 써야 한다.
+    const cadId = mesh?.cadId;
+    if (!cadId || !adjustKey || !overlayScanId) return;
+    const moved = { ...adjust, ...next };
+    setAdjustByCad((current) => ({ ...current, [adjustKey]: moved }));
+    requestOverlay(overlayScanId, cadId, undefined, false, moved);
+  };
+
+  const requestOverlay = (scanId: string, forCadId?: string,
+                          edits?: ZeroEdit[], retried = false,
+                          moved?: FitAdjust) => {
+    const cadId = forCadId ?? mesh?.cadId;
+    setOverlayScanId(scanId);
+    setOverlayError(null);
+    const scan = scans.find((s) => s.id === scanId);
+    const analysisId = scan?.result?.analysisId;
+    if (!cadId || !analysisId) { setOverlay(null); return; }
+    // CAD 를 바꿔 가며 견줄 때 같은 짝을 다시 계산하지 않는다.
+    // 제로라인을 손봤으면 다른 결과이므로 열쇠에 같이 넣는다.
+    const applied = edits ?? zeroEditsByScan[scanId] ?? [];
+    const placed = moved ?? adjustByCad[adjustKey] ?? NO_ADJUST;
+    const stamp = applied.length ? `:${JSON.stringify(applied)}` : '';
+    const sameAsAuto = placed.angle === 0 && placed.dx === 0
+      && placed.dy === 0 && placed.scale === 1;
+    const cacheKey = `${cadId}:${analysisId}${stamp}`
+      + (sameAsAuto ? '' : `:${JSON.stringify(placed)}`);
+    const cached = overlayCache.current[cacheKey];
+    if (cached) { setOverlay(cached); setOverlayStatus('idle'); return; }
+    setOverlay(null);
+    setOverlayStatus('loading');
+    fetch(`${API_BASE}/api/cad-overlay`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cadId, analysisId,
+                             zeroEdits: applied.length ? applied : undefined,
+                             fitAdjust: sameAsAuto ? undefined : placed }),
+    })
+      .then(async (response) => {
+        const data = await response.json() as CadOverlay & { error?: string };
+        if (!response.ok) throw new Error(data.error || '올리지 못했습니다.');
+        return data;
+      })
+      .then((data) => {
+        overlayCache.current[cacheKey] = data;
+        setOverlay(data); setOverlayStatus('idle');
+      })
+      .catch(async (err) => {
+        // 서버 캐시에서 밀려났으면 조용히 다시 올리고 한 번만 더 해 본다
+        const said = String(err.message || err);
+        const name = meshes.find((m) => m.cadId === cadId)?.summary.name;
+        if (said.includes('만료') && name && !retried) {
+          const fresh = await reopenCad(name);
+          if (fresh) { requestOverlay(scanId, fresh, applied, true); return; }
+        }
+        setOverlayError(said);
+        setOverlayStatus('error');
+      });
+  };
+
+  /* 여러 개를 한꺼번에 받아 차례로 읽는다. 동시에 보내면 큰 STEP 두
+     개가 같은 순간 OCCT 를 물어 서버가 몇 배로 느려진다. */
+  const upload = async (files: File[]) => {
+    if (!files.length) return;
+    setStatus('loading'); setError(null);
+    setPending(files.map((f) => f.name));
+    setWaited(0);
+    const started = Date.now();
+    const ticking = window.setInterval(
+      () => setWaited(Math.round((Date.now() - started) / 1000)), 1000);
+    const failed: string[] = [];
+    for (const file of files) {
+      const body = new FormData();
+      body.append('file', file);
+      try {
+        const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body });
+        const data = await response.json() as CadMesh & { error?: string };
+        if (!response.ok) throw new Error(data.error || '읽지 못했습니다.');
+        fileStore.current[data.summary.name] = file;
+        setMeshes((current) => {
+          // 같은 파일을 다시 열면 갈아 끼운다 — 목록이 중복으로 불어나지
+          // 않게. 이름이 같으면 같은 파일로 본다.
+          const rest = current.filter((m) => m.summary.name !== data.summary.name);
+          return [...rest, data];
+        });
+        setActiveCadId(data.cadId ?? data.summary.name);
+      } catch (err) {
+        failed.push(`${file.name} — ${String((err as Error).message || err)}`);
+      } finally {
+        setPending((current) => current.filter((n) => n !== file.name));
+      }
+    }
+    window.clearInterval(ticking);
+    setWaited(0);
+    setError(failed.length ? failed.join(' / ') : null);
+    setStatus(failed.length ? 'error' : 'idle');
+  };
+
+  /* 서버에서 밀려난 CAD 를 조용히 다시 올린다. 새 cadId 를 돌려준다. */
+  const reopenCad = async (name: string): Promise<string | null> => {
+    const file = fileStore.current[name];
+    if (!file) return null;
+    const body = new FormData();
+    body.append('file', file);
+    const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body });
+    const data = await response.json() as CadMesh & { error?: string };
+    if (!response.ok) return null;
+    setMeshes((current) => current.map(
+      (m) => (m.summary.name === data.summary.name ? data : m)));
+    if (data.cadId) setActiveCadId(data.cadId);
+    return data.cadId ?? null;
+  };
+
+  /* 목록에서 뺀다. 서버 캐시는 그대로 두어도 곧 밀려난다. */
+  const closeCad = (key: string) => {
+    setMeshes((current) => {
+      const rest = current.filter((m) => keyOf(m) !== key);
+      if (key === activeCadId) setActiveCadId(rest.length ? keyOf(rest[0]) : '');
+      return rest;
+    });
+  };
+
+  const onPick = (event: ChangeEvent<HTMLInputElement>) => {
+    void upload(Array.from(event.target.files ?? []));
+    event.target.value = '';
+  };
+  const onDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    void upload(Array.from(event.dataTransfer.files ?? []));
+  };
+
+  const summary = mesh?.summary;
+  return <section className="page page--cad" hidden={!active}>
+    <div className="page-heading page-heading--compact">
+      <div>
+        <span className="breadcrumb">ADC · Ajin Die Compensation</span>
+        <h2>3D 데이터</h2>
+        <p>STEP·STL을 읽어 형상과 조립 홀을 확인합니다. 이 PC 안에서만 처리됩니다.</p>
+      </div>
+      <button className="primary-button" onClick={() => inputRef.current?.click()}>
+        3D 파일 열기 <UploadCloud size={17} />
+      </button>
+      <input ref={inputRef} type="file" hidden multiple accept=".step,.stp,.stl,.ply,.obj,.glb,.gltf,.3mf" onChange={onPick} />
+    </div>
+
+    <div className="cad-layout">
+      <div className="card cad-stage" onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
+        {mesh
+          ? <>
+              <div className="viewer-toolbar">
+                <div>
+                  <span className="status status--done"><Check size={13} /> {summary?.source_format.toUpperCase()} 읽기 완료</span>
+                  <b>{summary?.name}</b>
+                </div>
+                {mesh.holes.length > 0 && <button className="tool-button" onClick={() => setShowHoles(!showHoles)}>
+                  {showHoles ? <EyeOff size={14} /> : <Eye size={14} />} 홀 표시 {showHoles ? 'OFF' : 'ON'}
+                </button>}
+              </div>
+              {(meshes.length > 1 || pending.length > 0) && <div className="cad-files">
+                {meshes.map((item) => {
+                  const key = keyOf(item);
+                  return <span key={key}
+                    className={`cad-files__tab${key === activeCadId ? ' cad-files__tab--on' : ''}`}>
+                    <button type="button" onClick={() => setActiveCadId(key)}
+                      title={`${item.summary.name} · 삼각형 ${item.summary.n_faces.toLocaleString()}`}>
+                      <Box size={13} /> {item.summary.name}
+                    </button>
+                    <button type="button" className="cad-files__close"
+                      aria-label={`${item.summary.name} 닫기`}
+                      onClick={() => closeCad(key)}><X size={12} /></button>
+                  </span>;
+                })}
+                {pending.map((name) => <span key={name} className="cad-files__tab cad-files__tab--wait">
+                  <button type="button" disabled><Play size={13} /> {name} 읽는 중…
+                    {waited > 2 && ` ${waited}초`}</button>
+                </span>)}
+                {pending.length > 0 && waited > 8 && (
+                  <span className="cad-files__note">
+                    처음 읽는 STEP 은 오래 걸립니다 — 실측 113MB 가 57초입니다.
+                    같은 파일을 다시 열면 3초입니다.
+                  </span>
+                )}
+              </div>}
+              <div className="cad-viewer">
+                <CadViewer active={active} sections={sections} mesh={mesh} showHoles={showHoles} overlay={overlay}
+                  sheetValues={sheetValues?.values ?? null}
+                  onCorrectionChange={(pointId, value) =>
+                    overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
+                  onCapture={(url) => setShots((current) => [...current, url])}
+                  morph={morph} morphMode={morphMode}
+                  regions={[...standardZones, ...(regionsByCad[notesKey] ?? [])]}
+                  onRegionsChange={(next) => notesKey && setRegionsByCad(
+                    // 표준 구역은 품번에 묶여 있다. 손 그림 저장소에
+                    // 같이 넣으면 파일마다 사본이 생긴다.
+                    (current) => ({ ...current,
+                      [notesKey]: next.filter((r) => !r.standard) }))}
+                  notes={notesByCad[notesKey] ?? []}
+                  onNotesChange={(next) => notesKey && setNotesByCad(
+                    (current) => ({ ...current, [notesKey]: next }))} />
+              </div>
+              {/* 보정시트가 적어 둔 단면 위치로 제로라인을 계산한다.
+                  스캔이 없어도 되고 추정이 없다 — 시트 숫자로 CAD 를 자를 뿐이다. */}
+              <div className="cad-section-bar">
+                <label htmlFor="cad-sections">시트 단면 표기</label>
+                <input id="cad-sections" type="text" value={sectionNotes}
+                  placeholder="예: H : 300   H : 250   T : 1700"
+                  onChange={(event) => setSectionNotes(event.target.value)}
+                  onKeyDown={(event) => { if (event.key === 'Enter') void cutSections(); }} />
+                <select aria-label="좌우" value={sectionSide}
+                  onChange={(event) => setSectionSide(event.target.value as typeof sectionSide)}>
+                  <option value="both">양쪽</option>
+                  <option value="lh">LH</option>
+                  <option value="rh">RH</option>
+                </select>
+                <button type="button" className="tool-button" onClick={cutSections}
+                  disabled={sectionState === 'working' || !sectionNotes.trim()}>
+                  {sectionState === 'working' ? '자르는 중…' : '제로라인 계산'}
+                </button>
+                {sections && sections.length > 0 && <>
+                  <span className="cad-section-bar__ok">
+                    {sections.map((s) => `${s.label}`).join(' · ')} ·
+                    {' '}곡선 {sections.reduce((n, s) => n + s.polylines.length, 0)}개
+                  </span>
+                  <button type="button" className="tool-button"
+                    onClick={() => setSections(null)}>지우기</button>
+                </>}
+                {sections && sections.length === 0 &&
+                  <span className="cad-overlay-bar__err">그 자리에서 잘리지 않았습니다</span>}
+                {sectionError && <span className="cad-overlay-bar__err">{sectionError}</span>}
+                <span className="cad-section-bar__note">
+                  H = 높이(Z) · T = 전후(X) · 시트 숫자로 CAD 를 자르므로 추정이 없습니다
+                </span>
+              </div>
+              <div className="viewer-legend">
+                <span>
+                  {analysed.length > 0
+                    ? '분석한 스캔을 골라 제로라인과 보정량을 형상 위에 올릴 수 있습니다'
+                    : '스캔을 먼저 분석하면 제로라인과 보정량을 여기에 올릴 수 있습니다'}
+                </span>
+                <span>{summary?.n_faces.toLocaleString()} 삼각형</span>
+              </div>
+              {/* 현업 파이프라인이 실패하면 조용히 우리 검출로 넘어간다.
+                  그러면 화면에는 제로라인이 나오긴 하는데 근거가 다른
+                  것이라, 왜 평소와 달라 보이는지 알 길이 없다. 실측
+                  67XX6 에서 이것 때문에 얹힘 99% 가 48% 로 보였다. */}
+              {(() => {
+                const picked = scans.find((s) => s.id === overlayScanId);
+                const failed = picked?.result?.errors?.labZero;
+                if (!failed) return null;
+                return <p className="cad-lab-error">
+                  <b>현업 제로라인 파이프라인이 이 스캔에서 실패했습니다.</b>
+                  {' '}지금 보이는 제로라인은 그 결과가 아니라 우리 자체
+                  검출입니다 — 근거가 다르므로 그대로 쓰지 마세요.
+                  <em>{failed}</em>
+                </p>;
+              })()}
+              {/* 부품 좌표로 등록해 두는 표준 공정 구역.
+                  보정시트는 "① 하형 용접 · ② 상형 심고음" 처럼 구역을
+                  고정된 자리에 표기한다. 같은 부품이면 매번 같은 자리이므로
+                  좌표로 한 번 등록해 두면 그 부품을 열 때마다 저절로 뜬다. */}
+              {mesh && zoneKey && <div className="zone-book">
+                <div className="zone-book__head">
+                  <b>표준 공정 구역 · {zoneKey}</b>
+                  <span>부품 좌표로 등록해 두면 이 부품의 CAD 를 열 때마다
+                    저절로 표시되고 주석이 붙습니다 — 시트의 "① 하형 용접"
+                    표기와 같은 방식입니다.</span>
+                  <button type="button" onClick={() => setZonesByPart((c) => ({
+                    ...c,
+                    [zoneKey]: [...(c[zoneKey] ?? []), {
+                      id: `S-${Date.now().toString(36)}`,
+                      standard: true, die: '하형', work: '용접', note: '',
+                      box: { min: [0, 0, 0], max: [100, 100, 100] },
+                    }],
+                  }))}>구역 추가</button>
+                </div>
+                {standardZones.length === 0
+                  ? <p className="zone-book__empty">
+                      아직 등록된 구역이 없습니다. [구역 추가] 를 누르고
+                      부품 좌표(mm) 범위를 적으세요. 좌표는 홀 목록이나
+                      측정 도구에서 읽을 수 있습니다.
+                    </p>
+                  : <table className="zone-book__table">
+                      <thead><tr>
+                        <th>번호</th><th>금형</th><th>작업</th>
+                        <th colSpan={3}>시작 X · Y · Z (mm)</th>
+                        <th colSpan={3}>끝 X · Y · Z (mm)</th>
+                        <th>메모</th><th /></tr></thead>
+                      <tbody>
+                        {standardZones.map((zone, order) => {
+                          const put = (patch: Partial<CadRegion>) =>
+                            setZonesByPart((c) => ({ ...c,
+                              [zoneKey]: (c[zoneKey] ?? []).map((z) =>
+                                z.id === zone.id ? { ...z, ...patch } : z) }));
+                          const corner = (which: 'min' | 'max', axis: number) =>
+                            <td key={`${which}${axis}`}><input type="number" step="1"
+                              value={zone.box?.[which][axis] ?? 0}
+                              onChange={(e) => {
+                                const box = zone.box ?? { min: [0, 0, 0], max: [0, 0, 0] };
+                                const next = [...box[which]] as [number, number, number];
+                                next[axis] = Number(e.target.value);
+                                put({ box: { ...box, [which]: next } });
+                              }} /></td>;
+                          return <tr key={zone.id}>
+                            <td>{CIRCLED[order] ?? order + 1}</td>
+                            <td><select value={zone.die} onChange={(e) =>
+                              put({ die: e.target.value as CadRegion['die'] })}>
+                              {DIE_CHOICES.map((n) => <option key={n}>{n}</option>)}
+                            </select></td>
+                            <td><select value={zone.work} onChange={(e) =>
+                              put({ work: e.target.value as CadRegion['work'] })}>
+                              {WORK_CHOICES.map((n) => <option key={n}>{n}</option>)}
+                            </select></td>
+                            {[0, 1, 2].map((a) => corner('min', a))}
+                            {[0, 1, 2].map((a) => corner('max', a))}
+                            <td><input type="text" value={zone.note ?? ''}
+                              placeholder="예: 상형 인서트 스틸 이음매(도면 확인)"
+                              onChange={(e) => put({ note: e.target.value })} /></td>
+                            <td><button type="button" onClick={() =>
+                              setZonesByPart((c) => ({ ...c,
+                                [zoneKey]: (c[zoneKey] ?? [])
+                                  .filter((z) => z.id !== zone.id) }))}>지움</button></td>
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>}
+              </div>}
+              {/* 공정별 물량 — 보정량의 부호가 곧 공정이다.
+                  + 살을 붙인다(용접) · - 살을 깎는다(CNC 가공).
+                  두 일은 작업자도 견적도 다르므로 따로 적는다. */}
+              {morph && (morph.work?.length ?? 0) > 0 && (
+                <div className="work-plan">
+                  <div className="work-plan__head">
+                    <b>공정별 물량</b>
+                    <span>보정량이 <b>+</b> 면 살을 붙이고(용접),
+                      <b> −</b> 면 깎습니다(CNC 가공)</span>
+                  </div>
+                  <table className="work-plan__table">
+                    <thead><tr>
+                      <th>공정</th><th>손대는 넓이</th><th>부피</th>
+                      <th>가장 두꺼운 자리</th><th>평균 두께</th>
+                    </tr></thead>
+                    <tbody>
+                      {(morph.work ?? []).map((w) => (
+                        <tr key={w.kind}>
+                          <td><i className={`work-plan__dot work-plan__dot--${w.kind}`} />
+                            {w.kind === 'weld' ? '용접 (덧살)' : 'CNC 가공 (깎기)'}</td>
+                          <td>{(w.area_mm2 / 100).toFixed(1)} cm²</td>
+                          <td>{(w.volume_mm3 / 1000).toFixed(2)} cc</td>
+                          <td>{w.max_mm.toFixed(2)} mm</td>
+                          <td>{w.mean_mm.toFixed(2)} mm</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="work-plan__note">
+                    부피는 삼각형마다 <b>넓이 × 그 자리 이동량</b>을 더한 값입니다.
+                    0.05mm 아래로 얇게 밀린 자리는 뺐습니다 — 보간 꼬리가 넓은
+                    면적에 깔려 부피를 부풀립니다.
+                  </p>
+                </div>
+              )}
+              {overlay && showAlign && <div className="cad-align">
+                <div className="cad-align__head">
+                  <b>정렬 맞추기 — 스캔 그림을 형상 위에서 밀고 돌립니다</b>
+                  <span>스캔에서 읽은 제로라인·보정량이 형상의 엉뚱한 자리에
+                    찍혔을 때 씁니다. 자동 정합은 겉모양만 보므로 스캔에 안
+                    보이는 살이 있으면 조금 어긋납니다. 누를 때마다
+                    <b>얹힘</b>이 다시 계산되니 숫자가 오르는 쪽으로
+                    맞추면 됩니다.</span>
+                </div>
+                <div className="cad-align__rows">
+                  <span className="cad-align__group">
+                    <label>이동</label>
+                    <button type="button" onClick={() => nudge({ dx: adjust.dx - 4 })}>←</button>
+                    <button type="button" onClick={() => nudge({ dx: adjust.dx + 4 })}>→</button>
+                    <button type="button" onClick={() => nudge({ dy: adjust.dy - 4 })}>↑</button>
+                    <button type="button" onClick={() => nudge({ dy: adjust.dy + 4 })}>↓</button>
+                    <i>{adjust.dx.toFixed(0)}, {adjust.dy.toFixed(0)} px</i>
+                  </span>
+                  <span className="cad-align__group">
+                    <label>회전</label>
+                    <button type="button" onClick={() => nudge({ angle: adjust.angle - 1 })}>↺</button>
+                    <button type="button" onClick={() => nudge({ angle: adjust.angle + 1 })}>↻</button>
+                    <i>{adjust.angle.toFixed(0)}°</i>
+                  </span>
+                  <span className="cad-align__group">
+                    <label>크기</label>
+                    <button type="button" onClick={() => nudge({ scale: Math.max(0.5, adjust.scale - 0.02) })}>−</button>
+                    <button type="button" onClick={() => nudge({ scale: Math.min(2, adjust.scale + 0.02) })}>+</button>
+                    <i>{Math.round(adjust.scale * 100)}%</i>
+                  </span>
+                  <button type="button" className="cad-align__reset"
+                    onClick={() => nudge({ ...NO_ADJUST })}>자동으로 되돌리기</button>
+                  <b className={`cad-align__rate${overlay.fit.reliable ? ' is-ok' : ''}`}>
+                    얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
+                    {overlay.fit.reliable ? ' · 표시함' : ' · 기준 60% 미달'}
+                  </b>
+                </div>
+              </div>}
+              {analysed.length > 0 && <div className="cad-overlay-bar">
+                <label htmlFor="cad-overlay-scan">스캔 결과 올리기</label>
+                <select id="cad-overlay-scan" value={overlayScanId}
+                  onChange={(e) => requestOverlay(e.target.value)}>
+                  <option value="">선택 안 함</option>
+                  {analysed.map((scan) => (
+                    <option key={scan.id} value={scan.id}>
+                      {scan.partNo || scan.name}
+                      {suggested?.id === scan.id ? '  (품번 일치)' : ''}
+                    </option>
+                  ))}
+                </select>
+                {overlay && <button type="button"
+                  className={`cad-align__toggle${showAlign ? ' is-on' : ''}`}
+                  onClick={() => setShowAlign((v) => !v)}
+                  title="제로라인·보정량이 형상의 엉뚱한 자리에 찍혔을 때 손으로 맞춥니다">
+                  정렬 맞추기
+                </button>}
+                {overlayStatus === 'loading' && <span className="cad-overlay-bar__note">올리는 중…</span>}
+                {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
+                {overlay && <span className="cad-overlay-bar__note">
+                  {'XYZ'[overlay.fit.axis]}축에서 본 그림으로 맞춤 ·
+                  {/* "겹침 97%" 만 띄우면 거의 완벽한 줄 안다. 그건 볼록
+                      껍질끼리 잰 값이고(구멍·오목한 곳을 메우고 비교),
+                      실측 64XX2 는 껍질 96.9% · 실루엣 42.2% 다.
+                      실제 기준인 얹힘 비율을 앞에 둔다. */}
+                  {' '}형상에 얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
+                  {' '}(윤곽 겹침 {Math.round(overlay.fit.iou * 100)}%) ·
+                  {' '}{overlay.fit.mm_per_px.toFixed(2)} mm/px ·
+                  {' '}제로라인 {overlay.zeroLines.length}개
+                </span>}
+                {/* 제로라인이 비어 있으면 이유를 말해 준다. 대개 품번을
+                    못 잡아서다 — 품번이 컬러바 범위를 고르는 열쇠라
+                    파일명에 품번이 없으면 이 단계가 통째로 빈다. */}
+                {overlay && overlay.zeroLines.length === 0 &&
+                  <span className="cad-overlay-bar__err">
+                    이 스캔에서 제로라인이 나오지 않았습니다 — 분석 작업실에서
+                    품번을 지정하고 다시 분석해 보세요
+                  </span>}
+                {overlay && sheetValues && <>
+                  <button type="button" className="tool-button"
+                    onClick={makeSheet} disabled={sheetState === 'saving'}>
+                    <Download size={14} />
+                    {sheetState === 'saving' ? '만드는 중…'
+                      : `보정시트 만들기${shots.length ? ` (화면 ${shots.length}장)` : ''}`}
+                  </button>
+                  {shots.length > 0 && <button type="button" className="tool-button"
+                    onClick={() => setShots([])}>담은 화면 비우기</button>}
+                  <button type="button" className="tool-button" onClick={buildMorph}
+                    disabled={morphState === 'working'}>
+                    {morphState === 'working' ? '만드는 중…' : '보정 후 형상'}
+                  </button>
+                  {morph && <>
+                    <select aria-label="형상 비교" value={morphMode}
+                      onChange={(event) =>
+                        setMorphMode(event.target.value as typeof morphMode)}>
+                      <option value="off">원본만</option>
+                      <option value="both">겹쳐 보기</option>
+                      <option value="after">보정 후만</option>
+                    </select>
+                    <button type="button" className="tool-button"
+                      onClick={() => saveMorphStl('after')}>STL 저장</button>
+                    <button type="button" className="tool-button"
+                      title="보정 후 형상을 새 탭으로 열어 원본처럼 다룹니다"
+                      disabled={morphState === 'working'}
+                      onClick={openMorphAsCad}>새 탭으로 열기</button>
+                    {overlay && <button type="button" className="tool-button"
+                      title="부품 좌표와 보정량·공정을 표로 내려받습니다 (CATIA 작업용)"
+                      onClick={saveCadTable}>CAD 보정표</button>}
+                    {(morph.work ?? []).map((w) => (
+                      <button key={w.kind} className="tool-button"
+                        title={w.kind === 'weld'
+                          ? '살을 붙일 자리만 담습니다 (용접 지시용)'
+                          : '살을 깎을 자리만 담습니다 (CNC 가공 지시용)'}
+                        onClick={() => saveMorphStl(w.kind)}>
+                        {w.kind === 'weld' ? '덧살만' : '깎기만'} STL
+                      </button>
+                    ))}
+                    <span className="cad-overlay-bar__note">
+                      최대 {morph.stats.max_shift.toFixed(2)}mm ·
+                      {' '}평균 {morph.stats.mean_shift.toFixed(2)}mm ·
+                      {' '}반경 {morph.stats.reach_mm.toFixed(0)}mm ·
+                      {' '}포인트 {morph.points}개
+                    </span>
+                  </>}
+                  {morphError && <span className="cad-overlay-bar__err">{morphError}</span>}
+                  {sheetError && <span className="cad-overlay-bar__err">{sheetError}</span>}
+                </>}
+                {overlay && sheetValues && <span className="cad-overlay-bar__note">
+                  보정시트 기준 · 계수 {sheetValues.coefficient.toFixed(2)}×
+                  {sheetValues.overrideCount > 0
+                    ? ` · 작업자 수정 ${sheetValues.overrideCount}개` : ''}
+                  {sheetValues.hiddenCount > 0
+                    ? ` · 숨긴 포인트 ${sheetValues.hiddenCount}개 제외` : ''}
+                </span>}
+                {overlay && overlay.rejected && overlay.rejected.length > 0 &&
+                  <span className="cad-overlay-bar__err">
+                    판독값 {overlay.rejected.length}개 제외 — 컬러바 범위
+                    ±{overlay.colorbarLimit}mm 를 벗어납니다
+                    ({overlay.rejected.slice(0, 4).map((r) => r.id).join(', ')}
+                    {overlay.rejected.length > 4 ? ' 외' : ''})
+                  </span>}
+              </div>}
+            </>
+          : <div className="cad-drop">
+              {status === 'loading'
+                ? <><Play size={30} /><b>읽는 중…</b><span>큰 파일은 시간이 걸립니다.</span></>
+                : <><Box size={30} /><b>3D 파일을 여기에 놓으세요</b>
+                    <span>STEP · STL · PLY · OBJ · GLB · 3MF · 여러 개를 한 번에 놓아도 됩니다</span>
+                    <small>CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다 — STEP(AP214)으로 내보내 주세요.</small></>}
+            </div>}
+      </div>
+
+      <aside className="inspection-panel">
+        {error && <div className="card cad-error"><b>읽지 못했습니다</b><p>{error}</p></div>}
+        {summary && <>
+          <div className="card plain-summary">
+            <h3>부품 정보</h3>
+            <div className="summary-line"><Check size={16} /><div><b>크기 ({summary.units})</b>
+              <span>{summary.bounds.size.map((v) => v.toFixed(1)).join(' × ')}</span></div></div>
+            <div className="summary-line"><Check size={16} /><div><b>원래 위치 중심</b>
+              <span>{summary.bounds.center.map((v) => v.toFixed(1)).join(', ')}</span></div></div>
+            <div className="summary-line"><Check size={16} /><div><b>메시</b>
+              <span>삼각형 {summary.n_faces.toLocaleString()} · 정점 {summary.n_vertices.toLocaleString()}</span></div></div>
+          </div>
+
+          <div className="card mini-table">
+            <div className="card-title"><h3>조립 홀 (RPS 후보)</h3><span>{mesh.holes.length}개</span></div>
+            {mesh.note && <p className="anchor-panel__hint">{mesh.note}</p>}
+            {mesh.holes.map((hole, index) => <div className="point-list-row" key={index}>
+              <span>ø{hole.diameter.toFixed(1)}</span>
+              <b className="positive">{hole.center.map((v) => v.toFixed(0)).join(', ')}</b>
+              <small>깊이 {hole.height.toFixed(1)}</small>
+              <span />
+            </div>)}
+            {!mesh.holes.length && !mesh.note && <p className="empty-mini">홀을 찾지 못했습니다.</p>}
+          </div>
+
+          {mesh.planes.length > 0 && <div className="card mini-table">
+            <div className="card-title"><h3>기준면 후보</h3><span>{mesh.counts.planes}개</span></div>
+            <p className="anchor-panel__hint">넓은 평면 순입니다. 어느 면이 실제 기준면인지는 도면에 따라 사람이 지정합니다.</p>
+            {mesh.planes.slice(0, 6).map((plane, index) => <div className="point-list-row" key={index}>
+              <span>#{index + 1}</span>
+              <b className="positive">{(plane.area / 100).toFixed(0)} cm²</b>
+              <small>법선 {plane.normal.map((v) => v.toFixed(2)).join(', ')}</small>
+              <span />
+            </div>)}
+          </div>}
+        </>}
+      </aside>
+    </div>
+  </section>;
+}
+
+
 export default function Home() {
   const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
   const [sheetTitleFontSizesByScan, setSheetTitleFontSizesByScan] = useState<Record<string, SheetTitleFontSizes>>({});
+  /* ── 3D 시각화가 쓰는 상태 ────────────────────────────────
+     보정 계수는 시트에만 있으면 3D 표시가 시트와 어긋난다. 3D 주석과
+     공정 구역은 **CAD 파일 이름**을 열쇠로 쓴다(cadId 는 열 때마다
+     새로 생겨 새로고침을 못 넘긴다). 표준 공정 구역은 **품번**에
+     묶는다 — 파일이 바뀌어도 부품이 같으면 같은 자리다. */
+  const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({});
+  const [notesByCad, setNotesByCad] = useState<Record<string, CadNote[]>>({});
+  const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
+  const [zeroEditsByScan] = useState<Record<string, ZeroEdit[]>>({});
+  const [zonesByPart, setZonesByPart] = useState<Record<string, CadRegion[]>>({});
   /* 작업자 이름은 보정 이력에 남기는 용도라 브라우저에 저장해 다음에도 다시 입력하지 않게 한다. */
   const [worker, setWorker] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem('adc-worker-name') || ''));
   useEffect(() => { if (typeof window !== 'undefined') window.localStorage.setItem('adc-worker-name', worker); }, [worker]);
@@ -1864,6 +3169,16 @@ export default function Home() {
     if (!response.ok) throw new Error('정렬을 저장하지 못했습니다.');
   };
   const openResults = (id: string) => { setActiveId(id); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const selectView = (next: View) => { if (next === 'workspace' || hasResult) setView(next); };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeyPointsOnly={showOnlyKeyPoints} onAllPointsToggle={setAllPointsVisible} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}</div></main>;
+  const selectView = (next: View) => { if (next === 'workspace' || next === 'files' || next === 'cad' || hasResult) setView(next); };
+  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}><Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} /><div className="app-main"><Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} />{view === 'workspace' && <Workspace scans={scans} setScans={setScans} onOpenResults={openResults} backendOnline={backendOnline} />}{view === 'results' && completedScan?.result && <Results scan={completedScan} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}{view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onKeyPointsOnly={showOnlyKeyPoints} onAllPointsToggle={setAllPointsVisible} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} />}{view === 'files' && <FileOrganizerPage />}{<CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan}
+        hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan}
+        onOverrideChange={(scanId, id, value) => setPointOverridesByScan((current) => {
+          const next = { ...(current[scanId] || {}) };
+          if (value === null) delete next[id]; else next[id] = value;
+          return { ...current, [scanId]: next };
+        })}
+        notesByCad={notesByCad} setNotesByCad={setNotesByCad}
+        regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad}
+        zeroEditsByScan={zeroEditsByScan}
+        zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />}</div></main>;
 }
