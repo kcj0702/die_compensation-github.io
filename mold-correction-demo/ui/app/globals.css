@@ -239,6 +239,67 @@ button { cursor: pointer; }
 .cad-overlay-bar__note{color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
 .cad-overlay-bar__err{color:#bd4650;font-size:8.5px}
 .cad-error p{margin:5px 0 0;color:#95626a;font-size:9px;line-height:1.5}
+.cad-files{display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:9px 16px;border-top:1px solid #e6ebf0;background:#fafbfc}
+.cad-files__tab{display:inline-flex;align-items:center;gap:2px;border:1px solid #d3dae1;border-radius:7px;background:#fff;overflow:hidden}
+.cad-files__tab button{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border:0;background:none;color:#5d6c80;font-size:9px;font-weight:600;cursor:pointer}
+.cad-files__tab--on{border-color:#6fb4e8;background:#eaf4fc}.cad-files__tab--on button{color:#2b6ca8}
+.cad-files__tab--wait{border-style:dashed;background:#f5f7f9}.cad-files__tab--wait button{color:#9099a5;cursor:default}
+.cad-files__close{width:22px;padding:0!important;color:#a4adb8!important;border-left:1px solid #e6ebf0!important;border-radius:0!important}
+.cad-files__close:hover{color:#bd4650!important;background:#fdf5f5!important}
+.cad-files__note{flex-basis:100%;color:#8b95a2;font-size:8.5px;line-height:1.5}
+.cad-section-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid #e6ebf0;background:#fafbfc}
+.cad-section-bar label{color:#5d6c80;font-size:9px;font-weight:600;letter-spacing:.02em}
+.cad-section-bar input[type=text]{width:220px;padding:5px 9px;border:1px solid #d3dae1;border-radius:6px;background:#fff;color:#3d4c60;font-size:9px;font-family:inherit}
+.cad-section-bar select{padding:5px 9px;border:1px solid #d3dae1;border-radius:6px;background:#fff;color:#3d4c60;font-size:9px;font-family:inherit;cursor:pointer}
+.cad-section-bar__ok{color:#178a75;font-size:8.5px;font-weight:600}
+.cad-section-bar__note{color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
+.cad-lab-error{margin:0 16px;padding:11px 14px;border:1px solid #f0c9c9;border-radius:9px;background:#fdf5f5;color:#95626a;font-size:9px;line-height:1.6}
+.cad-lab-error b{color:#bd4650;font-size:9px;font-weight:750}
+.cad-lab-error em{display:block;margin-top:3px;color:#a97880;font-style:normal;font-size:8.5px}
+.zone-book{margin:16px;padding-top:16px;border-top:1px solid #edf0f3}
+.zone-book__head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin-bottom:11px}
+.zone-book__head b{flex:0 0 auto;color:#28384d;font-size:12px}
+.zone-book__head span{flex:1;min-width:220px;color:#8b95a2;font-size:9px;line-height:1.55}
+.zone-book__head button{height:28px;padding:0 11px;border:1px solid var(--line);border-radius:6px;color:#4e5d70;background:#fff;font-size:9px;font-weight:700;cursor:pointer;white-space:nowrap}
+.zone-book__head button:hover{border-color:#b6c0ca}
+.zone-book__empty{margin:0;padding:14px;border:1.5px dashed #d3dae1;border-radius:9px;color:#8b95a2;background:#fafbfc;font-size:9px;line-height:1.6;text-align:center}
+.zone-book__table{width:100%;border-collapse:collapse;font-size:9px}
+.zone-book__table th{padding:6px 8px;border-bottom:1px solid #e6ebf0;color:#8b95a2;font-size:8px;font-weight:700;letter-spacing:.02em;text-align:left;white-space:nowrap}
+.zone-book__table td{padding:5px 8px;border-bottom:1px solid #f0f2f5;color:#3d4c60;vertical-align:middle}
+.zone-book__table tbody tr:last-child td{border-bottom:0}
+.zone-book__table input,.zone-book__table select{width:100%;padding:3px 5px;border:1px solid #e0e5ea;border-radius:4px;background:#fff;color:#3d4c60;font-size:9px;font-family:inherit}
+.zone-book__table input[type=number]{width:58px;font-variant-numeric:tabular-nums}
+.zone-book__table button{padding:3px 8px;border:1px solid var(--line);border-radius:5px;color:#95626a;background:#fff;font-size:8.5px;cursor:pointer;white-space:nowrap}
+.work-plan{margin:16px;padding-top:16px;border-top:1px solid #edf0f3}
+.work-plan__head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-bottom:11px}
+.work-plan__head b{color:#28384d;font-size:12px}
+.work-plan__head span{color:#8b95a2;font-size:9px}
+.work-plan__head span b{color:#3d4c60;font-size:9px}
+.work-plan__table{width:100%;border-collapse:collapse;font-size:9px}
+.work-plan__table th{padding:6px 8px;border-bottom:1px solid #e6ebf0;color:#8b95a2;font-size:8px;font-weight:700;letter-spacing:.02em;text-align:left}
+.work-plan__table td{padding:7px 8px;border-bottom:1px solid #f0f2f5;color:#3d4c60;font-variant-numeric:tabular-nums}
+.work-plan__table td:first-child{display:flex;align-items:center;gap:7px;font-variant-numeric:initial}
+.work-plan__table tbody tr:last-child td{border-bottom:0}
+.work-plan__dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.work-plan__dot--weld{background:#da5b2e}
+.work-plan__dot--cut{background:#2476ab}
+.work-plan__note{margin:11px 0 0;color:#8b95a2;font-size:8.5px;line-height:1.6}
+.work-plan__note b{color:#5d6c80;font-weight:700}
+.cad-align{margin:16px;padding-top:16px;border-top:1px solid #edf0f3}
+.cad-align__head{display:flex;flex-direction:column;gap:6px;margin-bottom:12px}
+.cad-align__head b{color:#28384d;font-size:12px}
+.cad-align__head span{color:#8b95a2;font-size:9px;line-height:1.55}
+.cad-align__head span b{color:#5d6c80;font-weight:700}
+.cad-align__rows{display:flex;flex-wrap:wrap;align-items:center;gap:14px}
+.cad-align__group{display:inline-flex;align-items:center;gap:5px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:#fafbfc}
+.cad-align__group label{color:#8b95a2;font-size:8px;font-weight:700;letter-spacing:.02em}
+.cad-align__group button{width:24px;height:24px;display:grid;place-items:center;padding:0;border:1px solid #d3dae1;border-radius:5px;color:#5d6c80;background:#fff;font-size:11px;cursor:pointer}
+.cad-align__group button:hover{border-color:#b6c0ca}
+.cad-align__group i{min-width:52px;color:#3d4c60;font-size:9px;font-style:normal;font-variant-numeric:tabular-nums;text-align:center}
+.cad-align__reset{height:36px;padding:0 12px;border:1px solid var(--line);border-radius:7px;color:#4e5d70;background:#fff;font-size:9px;font-weight:700;cursor:pointer}
+.cad-align__reset:hover{border-color:#b6c0ca}
+.cad-align__rate{margin-left:auto;padding:6px 11px;border-radius:7px;color:#95626a;background:#fdf5f5;font-size:9px;font-weight:750;font-variant-numeric:tabular-nums}
+.cad-align__rate.is-ok{color:#107863;background:#eaf7f3}
 @media(max-width:900px){.cad-layout{grid-template-columns:1fr}}
 .anchor-layer{z-index:8}
 .anchor-point{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;padding:0;border:0;background:none;cursor:pointer}
