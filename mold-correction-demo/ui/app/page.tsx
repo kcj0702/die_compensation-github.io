@@ -113,10 +113,11 @@ type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
 type FileDatabaseStatus = { configured: boolean; label: string; connected: boolean | null; catalogCount: number; operationCount: number; version?: string; error?: string };
 type FileOrganizerStatus = { sourceRoot: string; destinationRoot: string; sourceAvailable: boolean; destinationAvailable: boolean; database: FileDatabaseStatus };
 type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
-type FolderAxis = 'family' | 'category' | 'product';
+type FolderAxis = 'item' | 'vehicle' | 'category' | 'detail';
 type FolderAxisOption = { id: FolderAxis; label: string };
-type FolderMigration = { moved: number; skipped: number; errors: string[] };
-type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]; migration?: FolderMigration; error?: string };
+type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]; error?: string };
+const FOLDER_AXES: FolderAxis[] = ['item', 'vehicle', 'category', 'detail'];
+const FOLDER_AXIS_LABELS: Record<FolderAxis, string> = { item: '품번', vehicle: '차종', category: '카테고리', detail: '세부 하위폴더' };
 type OrganizerPathsResponse = { sourceRoot: string; destinationRoot: string; sourceLocked: boolean; destinationLocked: boolean };
 type SheetTitleField = 'heading' | 'managementLabel' | 'managementNo' | 'partNameLabel' | 'partName' | 'processLabel' | 'process' | 'partNoLabel' | 'partNo' | 'materialLabel' | 'material' | 'appliedDateLabel' | 'appliedDate';
 type SheetTitleValues = Record<SheetTitleField, string>;
@@ -1330,19 +1331,33 @@ function FileOrganizerPage() {
   const [showDatabase, setShowDatabase] = useState(false);
   const [databaseUrl, setDatabaseUrl] = useState('');
   const [showFolderOrder, setShowFolderOrder] = useState(false);
-  const [folderOrder, setFolderOrder] = useState<FolderAxis[]>(['family', 'category', 'product']);
+  const [folderOrder, setFolderOrder] = useState<FolderAxis[]>(FOLDER_AXES);
   const [axisOptions, setAxisOptions] = useState<FolderAxisOption[]>([]);
   const [savingOrder, setSavingOrder] = useState(false);
 
-  const axisLabel = (axis: FolderAxis) => axisOptions.find((option) => option.id === axis)?.label || axis;
+  const axisLabel = (axis: FolderAxis) => axisOptions.find((option) => option.id === axis)?.label || FOLDER_AXIS_LABELS[axis];
+
+  /* 구버전 백엔드가 'product' 같은 옛 축 이름을 돌려주면 화면이 빈 칸을 그리게 되므로,
+     네 축이 한 번씩 다 들어온 응답만 받아들이고 아니면 기본 순서로 되돌린다. */
+  const normalizeFolderOrder = (received: unknown): FolderAxis[] => {
+    const axes = Array.isArray(received) ? received as FolderAxis[] : [];
+    const valid = axes.length === FOLDER_AXES.length
+      && FOLDER_AXES.every((axis) => axes.includes(axis));
+    return valid ? axes : FOLDER_AXES;
+  };
 
   const loadFolderOrder = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`);
       const data = await response.json() as FolderOrderResponse;
       if (!response.ok) throw new Error(data.error || '폴더 순서를 불러오지 못했습니다.');
-      setFolderOrder(data.folderOrder);
-      setAxisOptions(data.axes);
+      setFolderOrder(normalizeFolderOrder(data.folderOrder));
+      const validOptions = Array.isArray(data.axes)
+        ? data.axes.filter((option) => FOLDER_AXES.includes(option.id))
+        : [];
+      setAxisOptions(validOptions.length === FOLDER_AXES.length
+        ? validOptions
+        : FOLDER_AXES.map((id) => ({ id, label: FOLDER_AXIS_LABELS[id] })));
     } catch { /* 상태 카드/기본 순서로 충분히 안내되므로 조용히 넘어간다. */ }
   }, []);
 
@@ -1525,21 +1540,21 @@ function FileOrganizerPage() {
   };
 
   const saveFolderOrder = async () => {
-    if (!window.confirm('실제 정리 대상 폴더 안의 폴더들을 새 순서로 지금 바로 옮깁니다. 계속할까요?')) return;
+    if (!window.confirm('실제 정리 대상 폴더 안의 파일들을 새 순서로 지금 바로 옮깁니다. 계속할까요?')) return;
     setSavingOrder(true);
     try {
       const response = await fetch(`${API_BASE}/api/file-organizer/folder-order`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderOrder: folderOrder }),
+        body: JSON.stringify({ folderOrder }),
       });
-      const data = await response.json() as FolderOrderResponse;
+      const data = await response.json() as FolderOrderResponse & { migration?: { moved: number; skipped: number; errors: string[] } };
       if (!response.ok) throw new Error(data.error || '폴더 순서를 저장하지 못했습니다.');
-      setFolderOrder(data.folderOrder);
+      setFolderOrder(normalizeFolderOrder(data.folderOrder));
       const migration = data.migration;
       const summary = migration
         ? migration.moved > 0
-          ? `폴더 ${migration.moved}개를 새 구조로 옮겼습니다${migration.errors.length ? ` · 오류 ${migration.errors.length}건` : ''}.`
-          : '이미 이 순서였습니다 — 옮길 폴더가 없습니다.'
+          ? `파일 ${migration.moved}개를 새 구조로 옮겼습니다${migration.errors.length ? ` · 오류 ${migration.errors.length}건` : ''}.`
+          : '모든 파일이 이미 제자리입니다 — 옮길 파일이 없습니다.'
         : '폴더 순서를 저장했습니다.';
       setNotice({ tone: migration?.errors.length ? 'error' : 'success', text: summary });
       setShowFolderOrder(false);
@@ -1551,15 +1566,16 @@ function FileOrganizerPage() {
 
   const db = status?.database;
   const examplePath = folderOrder.map((axis) => {
-    if (axis === 'family') return '64XX2';
-    if (axis === 'category') return '01. 3D제품데이터';
-    return 'JD PNL DASH 64XX2-DR000';
+    if (axis === 'item') return '67312';
+    if (axis === 'vehicle') return 'JM';
+    if (axis === 'category') return '02. 금형도면';
+    return '01. 구조도';
   }).join(' / ');
   return <section className="page page--file-organizer">
-    <div className="page-heading"><div><h2>품번 태그로 파일을 자동 정리하세요</h2><p>파일명을 분석해 품번 계열, 자료유형, 상세 품번 폴더를 확인한 뒤 로컬 또는 NAS로 복사·이동합니다.</p></div><div className="file-heading-actions"><button type="button" className="file-order-pill" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> {folderOrder.map(axisLabel).join(' → ')}</button><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
+    <div className="page-heading"><div><h2>품번 태그로 파일을 자동 정리하세요</h2><p>파일명을 분석해 품번을 첫 폴더로 두고, 차종·카테고리·세부 하위폴더 순서로 로컬 또는 NAS에 복사·이동합니다.</p></div><div className="file-heading-actions"><button type="button" className="file-order-pill" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> {folderOrder.map(axisLabel).join(' → ')}</button><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
     {notice && <div className={`file-organizer-notice ${notice.tone}`}>{notice.tone === 'success' ? <CheckCircle2 size={16} /> : notice.tone === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}<span>{notice.text}</span><button onClick={() => setNotice(null)} aria-label="알림 닫기"><X size={14} /></button></div>}
     {showFolderOrder && <div className="card file-order-settings">
-      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>자료유형과 차종·상세품번, 두 축의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 폴더도 세부 하위 구조를 보존한 채 새 순서로 옮겨집니다.</small></span></div>
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>품번·차종·카테고리·세부 하위폴더의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 파일도 새 순서로 옮겨집니다.</small></span></div>
       <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
       <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
       <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>

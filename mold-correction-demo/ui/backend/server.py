@@ -2072,14 +2072,11 @@ async def file_organizer_folder_order(request: Request) -> JSONResponse:
         order = payload.get("folderOrder")
         if not is_valid_folder_order(order):
             raise ValueError(
-                "folderOrder는 차종·상세품번과 자료유형을 반드시 포함하고, "
-                + ", ".join(AXES)
-                + " 값을 겹치지 않게 사용해야 합니다."
+                "folderOrder는 품번, 차종, 카테고리, 세부 하위폴더를 "
+                "각각 한 번씩 포함해야 합니다."
             )
-        previous_order = await run_in_threadpool(_active_folder_order)
         migration = await run_in_threadpool(
-            migrate_folder_structure, FOLDER_ROOT, FILE_ORGANIZER_RULES,
-            previous_order, order,
+            migrate_folder_structure, FOLDER_ROOT, FILE_ORGANIZER_RULES, order,
         )
         await run_in_threadpool(save_folder_order, FILE_ORGANIZER_DIR, order)
         return JSONResponse(
@@ -2218,7 +2215,9 @@ app = Starlette(
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/file-organizer/status", file_organizer_status, methods=["GET"]),
-        Route("/api/file-organizer/scan", file_organizer_scan, methods=["POST"]),
+        # 원본 폴더를 읽어 분류 결과만 돌려주는 조회다(바꾸는 것이 없다) — 화면도
+        # GET 으로 부른다. POST 로 열어 두면 "원본 스캔" 버튼이 405 를 받는다.
+        Route("/api/file-organizer/scan", file_organizer_scan, methods=["GET"]),
         Route("/api/file-organizer/upload", file_organizer_upload, methods=["POST"]),
         Route("/api/file-organizer/discard", file_organizer_discard, methods=["POST"]),
         Route("/api/file-organizer/execute", file_organizer_execute, methods=["POST"]),

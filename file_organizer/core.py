@@ -1,4 +1,4 @@
-"""파일명 태그를 읽어 품번 계열/자료유형 폴더로 자동 분류하고 실행하는 엔진.
+"""파일명 태그를 읽어 품번/차종/카테고리 폴더로 자동 분류하고 실행하는 엔진.
 
 분류 규칙은 ``rules.json`` 에 있고, 이 모듈은 그 규칙을 파일명에 적용하는 로직만
 담당한다. 회사 NAS 경로나 카테고리 키워드가 바뀌어도 이 파일은 건드릴 필요가
@@ -29,65 +29,40 @@ _PROCESS_RE = re.compile(r"OP\s?-?\d{2,3}", re.IGNORECASE)
 _DATE_TOKEN_RE = re.compile(r"^\d{6}$")
 
 
-def _decode_product_segment(segment: str) -> dict[str, str]:
-    """차종/상세품번 축 폴더 한 칸에서 차종·품명·품번·공정을 이름 모양으로
-    뽑아낸다(위치가 아니라 모양으로 구분해야 축에 없는 칸이 섞여 있어도
-    안전하다). 예전 방식으로 품명과 품번이 "PNL CTR FLR 65XX2-DR000"처럼
-    한 칸에 뭉쳐 있어도 품번 패턴만 뽑아내고 나머지는 품명으로 살린다."""
-    text = segment.strip()
-    if _PROCESS_RE.fullmatch(text):
-        return {"process": text}
-    if re.fullmatch(r"[A-Za-z]{1,4}", text):
-        return {"customer": text}
-    if _FAMILY_ONLY_RE.fullmatch(text) and not _DATE_TOKEN_RE.match(text):
-        return {"item_no": text}
-    match = _ITEM_NO_RE.search(text)
-    if match is None:
-        return {"product_name": text}
-    if match.group(0) == text:
-        return {"item_no": text}
-    before = text[: match.start()].strip(" _-")
-    after = text[match.end():].strip(" _-")
-    remainder = " ".join(part for part in (before, after) if part)
-    result = {"item_no": match.group(0)}
-    if remainder:
-        result["product_name"] = remainder
-    return result
-
-
 def _normalize(text: str) -> str:
     return re.sub(r"[\s_\-]+", "", text).strip().lower()
 
 
-# 폴더 계층을 이루는 세 축. 순서(folder_order)를 바꾸면 아래 세 이름의 순열로
-# 폴더 경로를 다시 조립한다 — "품번 계열/자료유형/차종" 이든 "차종/자료유형/품번 계열"
-# 이든 이 세 축을 어떤 순서로 쌓을지의 문제일 뿐이라, 축 자체는 그대로 두고
-# classify() 안에서 순서만 따라가면 된다.
-AXIS_FAMILY = "family"
+# 고객사 기준 폴더 구조. 전체 품번을 첫 단계에 두어 차종을 몰라도 원하는
+# 품번의 모든 자료를 바로 찾을 수 있게 한다. 세부 하위폴더는 카테고리별
+# 규칙(구조도/패턴도/완성도/보정이력/OP 등)이 만드는 마지막 단계다.
+AXIS_ITEM = "item"
+AXIS_VEHICLE = "vehicle"
 AXIS_CATEGORY = "category"
-AXIS_PRODUCT = "product"
-AXES: tuple[str, ...] = (AXIS_FAMILY, AXIS_CATEGORY, AXIS_PRODUCT)
+AXIS_DETAIL = "detail"
+AXES: tuple[str, ...] = (AXIS_ITEM, AXIS_VEHICLE, AXIS_CATEGORY, AXIS_DETAIL)
 AXIS_LABELS: dict[str, str] = {
-    AXIS_FAMILY: "품번 계열",
-    AXIS_CATEGORY: "자료유형(카테고리)",
-    AXIS_PRODUCT: "차종·상세품번",
+    AXIS_ITEM: "품번",
+    AXIS_VEHICLE: "차종",
+    AXIS_CATEGORY: "카테고리",
+    AXIS_DETAIL: "세부 하위폴더",
 }
-DEFAULT_FOLDER_ORDER: tuple[str, ...] = (AXIS_FAMILY, AXIS_CATEGORY, AXIS_PRODUCT)
+DEFAULT_FOLDER_ORDER: tuple[str, ...] = AXES
 _FOLDER_ORDER_FILENAME = ".folder_order.json"
+# 파일명에서 차종을 못 읽었을 때 쓰는 자리. 이름을 여기 하나로 두어야
+# 분류가 만든 폴더를 순서 변경(migrate_folder_structure)도 알아본다.
+UNKNOWN_VEHICLE_FOLDER = "_차종미확인"
+# 빈 폴더를 형상관리에 남기기 위한 표시 파일. 사용자가 넣은 자료가 아니다.
+PLACEHOLDER_NAMES = {".gitkeep"}
 
 
 def is_valid_folder_order(order: Any) -> bool:
-    """folder_order 는 품번 계열/카테고리/차종 세 축 중 겹치지 않게 고른 목록이다.
-
-    차종·상세품번과 자료유형 축은 파일의 실제 소속을 구분하므로 항상 있어야 한다.
-    품번 계열 축만 품번 자체와 중복될 수 있어 선택적으로 뺄 수 있다."""
+    """네 폴더 축을 빠짐없이 한 번씩 사용한 순열인지 확인한다."""
     return (
         isinstance(order, list)
-        and 1 <= len(order) <= len(AXES)
-        and len(set(order)) == len(order)
-        and all(axis in AXES for axis in order)
-        and AXIS_PRODUCT in order
-        and AXIS_CATEGORY in order
+        and len(order) == len(AXES)
+        and len(set(order)) == len(AXES)
+        and set(order) == set(AXES)
     )
 
 
@@ -101,15 +76,16 @@ def load_folder_order(base_dir: Path, default_order: list[str] | None = None) ->
             data = None
         if is_valid_folder_order(data):
             return data
-    return list(default_order) if default_order else list(DEFAULT_FOLDER_ORDER)
+    if default_order and is_valid_folder_order(default_order):
+        return list(default_order)
+    return list(DEFAULT_FOLDER_ORDER)
 
 
 def save_folder_order(base_dir: Path, order: list[str]) -> None:
     if not is_valid_folder_order(order):
         raise ValueError(
-            "folder_order는 product와 category를 반드시 포함하고, "
-            + ", ".join(AXES)
-            + " 값을 겹치지 않게 사용해야 합니다."
+            "folder_order는 품번, 차종, 카테고리, 세부 하위폴더를 "
+            "각각 한 번씩 포함해야 합니다."
         )
     base_dir.mkdir(parents=True, exist_ok=True)
     (base_dir / _FOLDER_ORDER_FILENAME).write_text(
@@ -127,25 +103,23 @@ class FolderMigrationResult:
 def migrate_folder_structure(
     folder_root: Path,
     rules: dict[str, Any],
-    previous_order: list[str],
     new_order: list[str],
 ) -> FolderMigrationResult:
-    """자료유형 단위로 실제 폴더를 새 축 순서로 재배치한다.
+    """파일을 임시 보관한 뒤 네 축의 새 순서로 안전하게 재배치한다.
 
-    예전 구현은 가장 아래의 빈 폴더를 한 건으로 취급했다. OP10 같은 표준 하위
-    폴더가 생긴 뒤에는 그 이름까지 차종/품명으로 오해해 루트에 폴더가 계속
-    누적될 수 있었다. 여기서는 정확한 자료유형 폴더와 품번 폴더를 먼저 찾고,
-    그 둘 사이의 내용 전체를 하나의 묶음으로 임시 보관한 다음 새 경로에 합친다.
-    따라서 구조도/패턴도/OP 하위 트리는 이동 중에도 그대로 유지된다.
+    경로에서 품번·차종·카테고리를 이름 규칙으로 찾아내므로 세부 하위폴더가
+    카테고리 앞이나 뒤 어느 위치에 있어도 나머지 경로를 그대로 보존한다.
+    이미 제자리인 파일은 건드리지 않으므로, 순서를 그대로 두고 다시 저장하면
+    이름 규칙만 어긋난 폴더(상세코드까지 갈라진 품번 폴더 등)를 정리하는
+    용도로도 쓸 수 있다.
     """
-    if previous_order == new_order or not folder_root.is_dir():
+    if not folder_root.is_dir():
         return FolderMigrationResult(moved=0, skipped=0, errors=[])
-
-    if not is_valid_folder_order(previous_order) or not is_valid_folder_order(new_order):
+    if not is_valid_folder_order(new_order):
         return FolderMigrationResult(
             moved=0,
             skipped=0,
-            errors=["자료유형과 차종·상세품번 축이 포함된 폴더 순서만 이동할 수 있습니다."],
+            errors=["네 폴더 항목이 모두 포함된 순서만 적용할 수 있습니다."],
         )
 
     category_names = {
@@ -153,187 +127,116 @@ def migrate_folder_structure(
         for category in rules.get("categories", [])
         if category.get("key") and category.get("label")
     }
+    # 분류가 만든 '_차종미확인' 폴더도 차종 칸으로 본다 — 그러지 않으면 차종을
+    # 못 읽은 파일만 옛 자리에 남아 두 구조가 섞인다.
     customers = {str(value).casefold() for value in rules.get("customers", [])}
+    customers.add(UNKNOWN_VEHICLE_FOLDER.casefold())
+    # 빈 폴더 표시(.gitkeep)는 무시하지 않고 구조를 따라 같이 옮긴다 — 그러지
+    # 않으면 옛 자리의 빈 폴더가 지워지지 않아 두 구조가 섞인다. 다만 사용자가
+    # 옮겼다고 셀 파일은 아니므로 moved 수에는 넣지 않는다.
+    ignored_names = {
+        str(value).casefold() for value in rules.get("ignored_names", [])
+    } - PLACEHOLDER_NAMES
 
-    # 옛 순서에 품번 계열 축이 따로 있었다면, 이름 전체가 "64XX2"처럼 계열
-    # 코드 하나뿐인 폴더는 그 축의 껍데기일 뿐 품번 폴더가 아니다 — 그때만
-    # 품번으로 인정하지 않는다. "JD PNL DASH 64XX2"처럼 차종·품명과 합쳐진
-    # 이름은 축이 남아있어도 실제 품번 폴더이므로 계속 인식해야 한다 —
-    # 안 그러면 그 폴더가 옮길 대상에서 통째로 빠져 자기 축만 남고
-    # 나머지(차종·품명)가 안 옮겨지는 사고가 난다.
-    family_axis_was_separate = AXIS_FAMILY in previous_order
+    def _is_vehicle(part: str) -> bool:
+        """차종 폴더로 볼 이름인지 판단한다.
 
-    def _item_no_from_name(name: str) -> str:
-        match = _ITEM_NO_RE.search(name)
+        분류기는 ``rules.json`` 에 없는 새 차종("XM" 등)도 스스로 만들므로,
+        등록된 목록에만 의존하면 그렇게 만들어진 폴더가 순서 변경에서 통째로
+        빠진다. 등록된 차종을 먼저 찾고, 없으면 차종처럼 생긴 영문 토큰을 쓴다
+        (카테고리·세부 폴더 이름은 모두 숫자 접두사나 OP 번호가 붙어 걸리지 않는다).
+        """
+        return bool(re.fullmatch(r"[A-Za-z]{2,8}", part))
+
+    def _item_value(part: str) -> str:
+        """폴더 한 칸에서 품번 폴더 이름을 뽑는다.
+
+        앞자리 계열 코드('64XX2')가 같으면 같은 품번으로 보므로 상세 코드
+        ('-DR000')는 떼어 낸다 — 그래야 같은 제품의 자료가 한 폴더에 모인다.
+        """
+        match = _ITEM_NO_RE.fullmatch(part)
         if match:
-            return f"{match.group(1)}-{match.group(2)}"
-        if family_axis_was_separate and _FAMILY_ONLY_RE.fullmatch(name):
-            return ""
-        # 새 명명 규칙은 "JD PNL DASH 64XX2" 처럼 차종·품명·계열을 한 폴더 이름에
-        # 공백으로 이어붙이므로, 계열 코드가 이름 전체가 아니라 일부(보통 맨 끝)일
-        # 수도 있다 — 그래서 뒤에서부터 찾아 날짜 등 다른 숫자와 헷갈리지 않는다.
-        for family_match in reversed(list(_FAMILY_ONLY_RE.finditer(name))):
-            token = family_match.group(1)
-            if not _DATE_TOKEN_RE.match(token):
-                return token
+            return match.group(1)
+        if _FAMILY_ONLY_RE.fullmatch(part) and not _DATE_TOKEN_RE.match(part):
+            return part
         return ""
 
-    def _product_values(item_dir: Path, category_dir: Path) -> dict[str, str] | None:
-        parts = item_dir.relative_to(folder_root).parts
+    records: list[tuple[Path, dict[str, list[str]]]] = []
+    skipped = 0
+    for source in folder_root.rglob("*"):
+        if not source.is_file() or source.name.casefold() in ignored_names:
+            continue
+        relative_parts = list(source.relative_to(folder_root).parts)
+        folder_parts = relative_parts[:-1]
         item_index = next(
-            (index for index, part in enumerate(parts) if _item_no_from_name(part)),
+            (index for index, part in enumerate(folder_parts) if _item_value(part)),
             -1,
         )
-        if item_index < 0:
-            return None
-        item_no = _item_no_from_name(parts[item_index])
-        family = item_no.split("-", 1)[0]
-        before_item = list(parts[:item_index])
-        customer = next(
-            (part for part in before_item if part.casefold() in customers),
-            "",
+        category_index = next(
+            (index for index, part in enumerate(folder_parts) if part in category_names),
+            -1,
         )
-        ignored = {family.casefold(), category_dir.name.casefold()}
-        if customer:
-            ignored.add(customer.casefold())
-        product_parts = [
-            part for part in before_item
-            if part.casefold() not in ignored
-            and part not in category_names
-            and not _PROCESS_RE.fullmatch(part)
-        ]
-        if not customer and not product_parts:
-            # "JD PNL DASH 64XX2-DR000" 처럼 차종·품명·계열이 폴더 하나에 공백으로
-            # 합쳐진 새 명명 규칙 — 그 폴더 이름 자체에서 이미 알아낸 품번/계열
-            # 토큰만 정확히 빼고 나머지로 차종·품명을 되살린다(토큰 하나만 놓고
-            # 다시 _item_no_from_name 을 부르면, 계열 코드 단독 토큰이 "품번 계열
-            # 축의 껍데기"로 오인되어 못 걸러진다 — 위에서 이미 확정한 item_no/
-            # family 값과 직접 비교해야 정확하다). 위쪽 경로에 차종/품명이 이미
-            # 별도 폴더로 있었다면(구버전 구조) 거긴 손대지 않는다.
-            exclude = {item_no.casefold(), family.casefold()}
-            remainder = [token for token in parts[item_index].split() if token.casefold() not in exclude]
-            if remainder and remainder[0].casefold() in customers:
-                customer = remainder[0]
-                remainder = remainder[1:]
-            product_parts = remainder
-        return {
-            "customer": customer,
-            "product_name": " ".join(product_parts),
-            "item_no": item_no,
-            "family": family,
-        }
-
-    def _unwrap_family_layer(path: Path, family: str) -> Path:
-        """옛 순서에서 품번 계열이 카테고리/품번 폴더 바로 밑에 중첩되어 있었다면
-        그 껍데기 폴더 안까지 들어간다. 그대로 두면 새 순서에 품번 계열 축이
-        빠졌을 때 그 폴더 이름만 빈 채로 계속 남는다."""
-        if not family:
-            return path
-        try:
-            children = list(path.iterdir())
-        except OSError:
-            return path
-        if len(children) == 1 and children[0].is_dir() and children[0].name.casefold() == family.casefold():
-            return _unwrap_family_layer(children[0], family)
-        return path
-
-    records: list[tuple[Path, str, dict[str, str]]] = []
-    category_dirs = sorted(
-        (
-            path for path in folder_root.rglob("*")
-            if path.is_dir() and path.name in category_names
-        ),
-        key=lambda path: len(path.parts),
-    )
-    for category_dir in category_dirs:
-        ancestors = list(category_dir.relative_to(folder_root).parents)
-        item_ancestor = next(
-            (
-                folder_root / ancestor
-                for ancestor in ancestors
-                if ancestor != Path(".") and _item_no_from_name(ancestor.name)
-            ),
-            None,
+        vehicle_index = next(
+            (index for index, part in enumerate(folder_parts) if part.casefold() in customers),
+            -1,
         )
-        if item_ancestor is not None:
-            values = _product_values(item_ancestor, category_dir)
-            if values:
-                source = _unwrap_family_layer(category_dir, values["family"])
-                records.append((source, category_dir.name, values))
+        if vehicle_index < 0:
+            vehicle_index = next(
+                (
+                    index for index, part in enumerate(folder_parts)
+                    if index != item_index and index != category_index and _is_vehicle(part)
+                ),
+                -1,
+            )
+        if min(item_index, category_index, vehicle_index) < 0:
+            skipped += 1
             continue
+        used = {item_index, category_index, vehicle_index}
+        detail_parts = [part for index, part in enumerate(folder_parts) if index not in used]
+        records.append(
+            (
+                source,
+                {
+                    AXIS_ITEM: [_item_value(folder_parts[item_index])],
+                    AXIS_VEHICLE: [folder_parts[vehicle_index]],
+                    AXIS_CATEGORY: [folder_parts[category_index]],
+                    AXIS_DETAIL: detail_parts,
+                },
+            )
+        )
 
-        item_dirs = [
-            path for path in category_dir.rglob("*")
-            if path.is_dir() and _item_no_from_name(path.name)
+    pending: list[tuple[Path, Path]] = []
+    for source, axis_parts in records:
+        destination_parts = [
+            part
+            for axis in new_order
+            for part in axis_parts[axis]
         ]
-        for item_dir in item_dirs:
-            values = _product_values(item_dir, category_dir)
-            if values:
-                source = _unwrap_family_layer(item_dir, values["family"])
-                records.append((source, category_dir.name, values))
+        destination = folder_root.joinpath(*destination_parts, source.name)
+        if destination != source:
+            pending.append((source, destination))
 
-    if not records:
-        return FolderMigrationResult(moved=0, skipped=0, errors=[])
+    if not pending:
+        return FolderMigrationResult(moved=0, skipped=skipped, errors=[])
 
+    # 옮길 파일을 먼저 임시 폴더로 빼 둔다 — 어떤 파일의 새 자리가 다른 파일의
+    # 옛 자리인 경우에도 서로 덮어쓰지 않게 하기 위해서다.
     staging_root = folder_root / f".folder-migration-{uuid.uuid4().hex}"
     staging_root.mkdir(parents=True)
-    moved = 0
-    skipped = 0
+    staged: list[tuple[Path, Path]] = []
     errors: list[str] = []
-
-    def _merge_path(source: Path, destination: Path) -> None:
-        if source.is_dir():
-            destination.mkdir(parents=True, exist_ok=True)
-            for child in list(source.iterdir()):
-                _merge_path(child, destination / child.name)
-            source.rmdir()
-            return
-        if destination.exists():
-            if source.name == ".gitkeep":
-                source.unlink()
-                return
-            index = 1
-            while destination.with_name(
-                f"{destination.stem} ({index}){destination.suffix}"
-            ).exists():
-                index += 1
-            destination = destination.with_name(
-                f"{destination.stem} ({index}){destination.suffix}"
-            )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(destination))
-
-    staged: list[tuple[Path, Path, Path]] = []
-    for index, (source_root, category_name, values) in enumerate(records):
-        destination_parts: list[str] = []
-        for axis in new_order:
-            if axis == AXIS_FAMILY:
-                destination_parts.append(values["family"])
-            elif axis == AXIS_CATEGORY:
-                destination_parts.append(category_name)
-            elif axis == AXIS_PRODUCT:
-                # 차종 폴더 안에 품명 폴더, 그 안에 품번(계열) 폴더 — classify() 의
-                # 새 폴더 생성 규칙과 동일하게 각각 별도 하위 폴더로 중첩한다.
-                destination_parts.extend(
-                    part for part in (
-                        values["customer"], values["product_name"], values["family"]
-                    ) if part
-                )
-        destination_root = folder_root.joinpath(*destination_parts)
-        stage = staging_root / str(index)
-        stage.mkdir()
+    for index, (source, destination) in enumerate(pending):
+        stage = staging_root / f"{index}{source.suffix}"
         try:
-            for child in list(source_root.iterdir()):
-                _merge_path(child, stage / child.name)
-            staged.append((stage, destination_root, source_root))
+            shutil.move(str(source), str(stage))
+            staged.append((stage, destination))
         except OSError as exc:
-            skipped += 1
-            errors.append(f"{source_root.relative_to(folder_root)}: {exc}")
+            errors.append(f"{source.relative_to(folder_root)}: {exc}")
 
     for directory in sorted(
         (
             path for path in folder_root.rglob("*")
-            if path.is_dir() and staging_root not in path.parents and path != staging_root
+            if path.is_dir() and path != staging_root and staging_root not in path.parents
         ),
         key=lambda path: len(path.parts),
         reverse=True,
@@ -343,22 +246,22 @@ def migrate_folder_structure(
         except OSError:
             pass
 
-    for stage, destination_root, source_root in staged:
+    moved = 0
+    for stage, destination in staged:
         try:
-            destination_root.mkdir(parents=True, exist_ok=True)
-            for child in list(stage.iterdir()):
-                _merge_path(child, destination_root / child.name)
-            stage.rmdir()
-            if source_root.resolve() != destination_root.resolve():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if destination.exists():
+                destination = _next_available_path(destination)
+            shutil.move(str(stage), str(destination))
+            if destination.name.casefold() not in PLACEHOLDER_NAMES:
                 moved += 1
         except OSError as exc:
-            errors.append(f"{destination_root.relative_to(folder_root)}: {exc}")
-
+            errors.append(f"{destination.relative_to(folder_root)}: {exc}")
     try:
         staging_root.rmdir()
     except OSError:
-        errors.append(f"임시 이동 폴더를 정리하지 못했습니다: {staging_root.name}")
-
+        if staging_root.exists():
+            errors.append(f"임시 이동 폴더를 정리하지 못했습니다: {staging_root.name}")
     return FolderMigrationResult(moved=moved, skipped=skipped, errors=errors)
 
 
@@ -482,10 +385,13 @@ class FilenameClassifier:
         return "", "", "", -1
 
     def _customer_from_prefix(self, prefix: str) -> str:
-        token = prefix.split()[-1] if prefix.split() else prefix
-        token = token.strip(" _-")
-        if token and len(token) <= 8 and re.fullmatch(r"[0-9A-Za-z]+", token):
-            return token.upper()
+        tokens = re.findall(r"[0-9A-Za-z]+", prefix)
+        for token in reversed(tokens):
+            if token.casefold() in self._customers:
+                return token.upper()
+        for token in reversed(tokens):
+            if 2 <= len(token) <= 8 and re.fullmatch(r"[A-Za-z]+", token):
+                return token.upper()
         return ""
 
     def _detect_customer_match(self, stem: str) -> re.Match | None:
@@ -559,20 +465,19 @@ class FilenameClassifier:
                         return category, "extension", extension
         return None, "", ""
 
-    def _append_detail_target(
+    def _detail_target_parts(
         self,
-        target_dir: Path | None,
         *,
         filename: str,
         category: _Category | None,
         process: str,
-    ) -> tuple[Path | None, str]:
-        """엑셀의 세부 구분(구조도/패턴도/완성도/보정이력/OP)을 최종 경로에 붙인다."""
-        if target_dir is None or category is None:
-            return target_dir, ""
+    ) -> tuple[list[str], str]:
+        """카테고리 규칙에서 세부 하위폴더 경로 조각을 만든다."""
+        if category is None:
+            return [], ""
         rules = self._detail_rules.get(category.key, [])
         if not isinstance(rules, list):
-            return target_dir, ""
+            return [], ""
         normalized_name = _normalize(filename)
         selected: dict[str, Any] | None = None
         default_rule: dict[str, Any] | None = None
@@ -592,50 +497,45 @@ class FilenameClassifier:
             )
             selected = default_rule
         if selected is None:
-            return target_dir, ""
+            return [], ""
 
         folder = str(selected.get("folder", "")).strip()
         if folder == "{process}":
             if not process:
-                return target_dir, ""
+                return [], ""
             parts = [process]
         else:
             parts = [folder] if folder else []
             if selected.get("use_process") and process:
                 parts.append(process)
         if not parts:
-            return target_dir, ""
-        return target_dir.joinpath(*parts), "/".join(parts)
+            return [], ""
+        return parts, "/".join(parts)
 
-    def _find_by_item_no(self, parent: Path, item_no: str, family: str = "", max_depth: int = 4) -> Path | None:
-        """품번이 포함된 폴더를 찾는다. 차종/품명/품번/공정처럼 몇 단계로
-        묶여 있어도(예: "JD/PNL CTR FLR/65XX2-DR000/OP10") 그 안까지 들여다
-        본다. 얕은 단계부터 확인해 가장 가까운 일치를 우선한다.
+    def _vehicle_folder_name(self, parent: Path, customer: str) -> tuple[str, str]:
+        """차종 폴더 이름과 그 근거를 돌려준다.
 
-        새로 만드는 폴더는 상세 코드 없이 계열만 쓰므로("JD PNL DASH 64XX2"),
-        전체 품번이 안 걸리면 계열만으로도 찾는다 — 안 그러면 같은 제품의
-        서로 다른 파일마다 매번 새 폴더가 생긴다."""
-        if not parent.is_dir():
-            return None
-        needle = item_no.replace("_", "-").lower()
-        family_needle = family.lower() if family else ""
-        frontier = [parent]
-        for _ in range(max_depth):
-            next_frontier: list[Path] = []
-            for directory in frontier:
-                try:
-                    entries = [entry for entry in directory.iterdir() if entry.is_dir()]
-                except OSError:
-                    continue
-                for entry in entries:
-                    normalized = entry.name.replace("_", "-").lower()
-                    if needle in normalized or (family_needle and family_needle in normalized):
-                        return entry
-                next_frontier.extend(entries)
-            if not next_frontier:
-                break
-            frontier = next_frontier
-        return None
+        파일명에서 차종을 읽었으면 그대로 쓴다. 못 읽었을 때만, 차종 칸이 놓일
+        자리(``parent``)에 이미 폴더가 딱 하나 있으면 그것을 쓴다 — 같은 품번의
+        다른 파일이 만들어 둔 차종 폴더일 가능성이 높다. 후보가 여럿이면 고르지
+        않는다(엉뚱한 차종에 섞이는 것보다 미확인 폴더가 낫다).
+        """
+        if customer.strip():
+            return customer.strip(), ""
+        category_names = {entry.folder_name for entry in self._categories}
+        try:
+            candidates = [
+                entry.name for entry in parent.iterdir()
+                if entry.is_dir() and entry.name not in category_names
+            ] if parent.is_dir() else []
+        except OSError:
+            candidates = []
+        if len(candidates) == 1:
+            return candidates[0], f"기존 차종 폴더 '{candidates[0]}'를 사용합니다"
+        return (
+            UNKNOWN_VEHICLE_FOLDER,
+            f"차종을 읽지 못해 '{UNKNOWN_VEHICLE_FOLDER}' 폴더를 사용합니다",
+        )
 
     def _resolve_target(
         self,
@@ -644,77 +544,45 @@ class FilenameClassifier:
         item_no: str,
         category: _Category | None,
         customer: str,
-        product_name: str,
-        process: str,
+        detail_parts: list[str],
     ) -> tuple[Path | None, str, list[str]]:
-        """folder_order 를 따라가며 대상 폴더를 조립한다.
+        """선택된 네 축의 순서대로 대상 경로를 만든다.
 
-        폴더 구조를 자유롭게(품번→카테고리→차종, 차종→카테고리→품번 등) 바꿀 수
-        있어야 하므로 세 축을 순서대로 밟되, 각 축의 폴더 이름은 이미 알고 있는
-        값(계열명, "01. 자료유형")으로 만들거나 — 차종/상세품번 축만은 정확한
-        폴더명을 모르므로 기존 폴더 중 품번이 포함된 것을 찾고, 없으면 새로
-        만들 이름을 제안한다.
-
-        어느 축이든 해당 폴더가 아직 없으면 새로 만들 대상으로 제안한다 —
-        "JDZ" 처럼 아직 없던 차종이 와도 그 폴더까지 자동으로 만들어지도록.
-        차종/상세품번 축은 정식 품번 패턴(계열+상세코드)이 파일명에서 실제로
-        읽혔을 때만 새 폴더를 제안하므로(다른 축으로 못 건너뛴 상태에서만
-        여기까지 온다), 날짜 등을 품번으로 잘못 읽어 엉뚱한 폴더가 생기는
-        사고는 여전히 막힌다.
+        품번 폴더는 계열 코드까지만 쓴다("64XX2-DR000"이 아니라 "64XX2") —
+        앞자리가 같으면 같은 품번이라, 상세 코드까지 폴더를 가르면 같은 제품의
+        자료가 흩어진다. 차종 폴더에는 엑셀의 차종 값만 쓴다(예: ``JM``).
+        품명은 파일 태그와 카탈로그에 보존하되, 고객사가 지정한 네 단계 밖의
+        폴더를 추가하지 않는다. 어느 축이 몇 번째로 오는지는 화면에서 정한
+        순서만 따르므로, 기존 폴더를 찾는 것도 그 순서대로 내려가며 확인한다.
         """
-        current = self._folder_root
-        matched_product_folder = ""
+        if not item_no:
+            return None, "", ["품번이 없어 폴더 구조를 만들 수 없습니다"]
+        if category is None:
+            return None, "", ["카테고리가 없어 폴더 구조를 만들 수 없습니다"]
+
         reasons: list[str] = []
-        descended = False
-
+        matched_product_folder = ""
+        axis_parts: dict[str, list[str]] = {
+            AXIS_ITEM: [family or item_no],
+            AXIS_VEHICLE: [],  # 차종 칸에 도착했을 때 그 자리를 보고 정한다.
+            AXIS_CATEGORY: [category.folder_name],
+            AXIS_DETAIL: detail_parts,
+        }
+        current = self._folder_root
         for axis in self._folder_order:
-            candidate: Path | None = None
-            if axis == AXIS_FAMILY:
-                if not family:
-                    continue
-                candidate = current / family
-            elif axis == AXIS_CATEGORY:
-                if category is None:
-                    continue
-                candidate = current / category.folder_name
-            elif axis == AXIS_PRODUCT:
-                if item_no:
-                    match = self._find_by_item_no(current, item_no, family)
-                    if match is not None:
-                        matched_product_folder = match.name
-                        current = match
-                        reasons.append(f"기존 폴더 '{match.name}'과 품번 일치")
-                        descended = True
-                        continue
-                    if item_no == family:
-                        # 계열 코드만 애매하게 읽힌 경우, 기존 폴더가 없으면
-                        # 새로 만들지 않는다 — 잘못 읽은 숫자로 엉뚱한 폴더가
-                        # 생기는 사고를 막기 위해서다.
-                        continue
-                elif not customer and not product_name:
-                    # 품번은 물론 차종·품명조차 못 읽었으면 이 축 자체를
-                    # 건너뛴다 — 지어낼 근거가 아무것도 없다.
-                    continue
-                detailed_category = category is not None and category.key in self._detail_rules
-                # 차종 폴더 안에 품명 폴더, 그 안에 품번(계열) 폴더 — 각각 별도
-                # 하위 폴더로 중첩한다(기존 JD/MD/ND/SD 폴더와 같은 방식).
-                # 품번을 모르면 그 칸은 비운다 — 없는 값을 지어내지 않는다.
-                segments = [part for part in (customer, product_name, family) if part]
-                if process and not detailed_category:
-                    segments.append(process)
-                if not segments:
-                    continue
-                candidate = current.joinpath(*segments)
-
-            if candidate is None:
-                continue
-            if not candidate.is_dir():
-                reasons.append(f"'{candidate.name}' 폴더가 없어 새로 만듭니다")
-            current = candidate
-            descended = True
-
-        if not descended:
-            return None, "", reasons
+            if axis == AXIS_VEHICLE:
+                vehicle_name, vehicle_reason = self._vehicle_folder_name(current, customer)
+                axis_parts[AXIS_VEHICLE] = [vehicle_name]
+                if vehicle_reason:
+                    reasons.append(vehicle_reason)
+            for part in axis_parts[axis]:
+                candidate = current / part
+                if not candidate.is_dir():
+                    reasons.append(f"{AXIS_LABELS[axis]} 폴더 '{part}'를 새로 만듭니다")
+                elif axis == AXIS_ITEM:
+                    matched_product_folder = candidate.name
+                    reasons.append(f"기존 품번 폴더 '{candidate.name}'와 일치")
+                current = candidate
         return current, matched_product_folder, reasons
 
     def classify(self, path: Path) -> Classification:
@@ -770,15 +638,14 @@ class FilenameClassifier:
         else:
             reasons.append("자료유형 키워드/확장자를 인식하지 못했습니다")
 
-        target_dir, matched_product_folder, target_reasons = self._resolve_target(
-            family=family, item_no=item_no, category=category,
-            customer=customer, product_name=product_name, process=process,
-        )
-        target_dir, detail_path = self._append_detail_target(
-            target_dir,
+        detail_parts, detail_path = self._detail_target_parts(
             filename=filename,
             category=category,
             process=process,
+        )
+        target_dir, matched_product_folder, target_reasons = self._resolve_target(
+            family=family, item_no=item_no, category=category,
+            customer=customer, detail_parts=detail_parts,
         )
         if target_dir is not None:
             if matched_product_folder:
