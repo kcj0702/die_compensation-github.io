@@ -60,6 +60,9 @@ _load_local_environment(UI_DIR / ".env")
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
 sys.path.insert(0, str(FILE_ORGANIZER_DIR))
+# cad_routes 는 이 파일 옆에 있다. 서버는 파일 경로로 띄우지만 시험은
+# 모듈로 읽어 들여서, 이 폴더를 넣어 두지 않으면 시험에서만 못 찾는다.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from label_detector import (  # noqa: E402
     build_blue_annotation_mask, build_scan_mask, detect_labels,
@@ -102,6 +105,7 @@ from sheet_export import (  # noqa: E402
     stack_workbooks,
 )
 from cad_import.mesh_io import is_mesh_file, load_mesh, to_web_mesh  # noqa: E402
+import cad_routes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
@@ -800,6 +804,26 @@ def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
     return image
 
 
+
+def _zero_line_pixels(lines) -> list:
+    """제로라인에서 픽셀 폴리라인만 꺼낸다 — 3D 가 표면에 얹을 대상.
+
+    하이브리드 엔진은 dict 를, 예전 경로는 to_dict() 를 가진 객체를 준다.
+    분석이 통째로 실패하면 이름 자체가 없을 수도 있다.
+    """
+    out: list = []
+    for index, line in enumerate(lines or []):
+        raw = line if isinstance(line, dict) else (
+            line.to_dict() if hasattr(line, "to_dict") else None)
+        if not raw:
+            continue
+        points = raw.get("points") or raw.get("polyline") or []
+        if len(points) >= 2:
+            out.append({"line_id": raw.get("line_id", index + 1),
+                        "points": [[float(p[0]), float(p[1])] for p in points]})
+    return out
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
@@ -1063,8 +1087,25 @@ def analyze_image(
     else:
         value_mode = "판독 결과 없음"
 
+    # 3D 가 쓸 수 있게 맡겨 둔다.
+    #
+    # 3D 는 분석을 다시 하지 않는다 — 스캔을 CAD 표면에 얹으려면 부품
+    # 마스크와 보정 포인트가 필요한데, 그걸 다시 계산하면 화면에 보이는
+    # 값과 갈라진다. 아이디로 가리켜 같은 결과를 쓴다.
+    analysis_id = cad_routes.remember_analysis({
+        "part_mask": (zero_output.part_mask if zero_output is not None
+                      else np.zeros(image.shape[:2], np.uint8)),
+        "values": zero_output.values if zero_output is not None else None,
+        "deviation_points": points,
+        # zero_lines 는 하이브리드면 dict, 아니면 객체다. 둘 다에서
+        # 픽셀 폴리라인만 꺼낸다.
+        "zero_lines": _zero_line_pixels(locals().get("zero_lines")),
+        "part_no": part_number,
+    })
+
     return {
         "source": {"name": filename, "width": width, "height": height},
+        "analysisId": analysis_id,
         "partNumber": part_number,
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
         "productImage": (
@@ -2177,30 +2218,9 @@ async def file_organizer_reveal(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-def _load_cad_mesh(path: Path, name: str) -> dict[str, Any]:
-    if not is_mesh_file(path):
-        raise ValueError("현재 UI CAD 뷰어는 STL, PLY, OBJ, GLB, 3MF 형식을 지원합니다. STEP 지원은 별도 OCCT 설치가 필요합니다.")
-    return {**to_web_mesh(load_mesh(path), name=name, source_format=path.suffix.lower().lstrip(".")), "holes": [], "planes": [], "counts": {"cylinders": 0, "holes": 0, "planes": 0}}
-
-
-async def cad(request: Request) -> JSONResponse:
-    """Read a local mesh upload and return a compact Three.js payload."""
-    try:
-        form = await request.form()
-        uploaded = form.get("file")
-        if uploaded is None or not getattr(uploaded, "filename", ""):
-            raise ValueError("CAD 파일을 선택하세요.")
-        suffix = Path(uploaded.filename).suffix.lower()
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-            temp_path = Path(handle.name)
-            handle.write(await uploaded.read())
-        try:
-            payload = await run_in_threadpool(_load_cad_mesh, temp_path, uploaded.filename)
-        finally:
-            temp_path.unlink(missing_ok=True)
-        return JSONResponse(payload)
-    except (OSError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
+# 3D 는 cad_routes 가 맡는다 — STEP 의 조립 홀·기준면까지 읽고, 스캔을
+# 표면에 얹고, 보정 후 형상을 만든다. 예전 여기 있던 _load_cad_mesh 는
+# STL 계열만 읽어 홀·기준면이 늘 비어 있었다.
 
 
 app = Starlette(
@@ -2216,7 +2236,7 @@ app = Starlette(
         Route("/api/sheet", sheet, methods=["POST"]),
         Route("/api/products", products, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
-        Route("/api/cad", cad, methods=["POST"]),
+        *cad_routes.ROUTES,
         Route("/api/file-organizer/status", file_organizer_status, methods=["GET"]),
         Route("/api/file-organizer/scan", file_organizer_scan, methods=["POST"]),
         Route("/api/file-organizer/upload", file_organizer_upload, methods=["POST"]),

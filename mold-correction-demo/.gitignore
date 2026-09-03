@@ -43,3 +43,9 @@ label_removal/output/*
 ui/backend/file_staging/
 ui/backend/file_operation_logs/
 ui/.env
+
+# 3D 시각화 실행 중 생기는 캐시 (CAD 파싱 결과, 판독 라벨, 제로라인)
+cad_import/_parsed/
+ui/backend/.label_cache.json
+zero_line_detection/.lab_cache/
+zero_line_detection/.adaptive_cache/
