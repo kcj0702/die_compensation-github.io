@@ -767,3 +767,6 @@ button { cursor: pointer; }
    위에 얹는 조작부는 어두운 반투명이라 흰 바탕에서도 그대로 읽힌다. */
 .cad-viewer:has(.cad-viewer__stage.is-light){background:#fff}
 .cad-viewer__stage.is-light{background:#fff}
+/* 부품 색 고르개 */
+.cad-viewer__tint{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
+.cad-viewer__tint input{width:20px;height:18px;padding:0;border:0;border-radius:3px;background:none;cursor:pointer}

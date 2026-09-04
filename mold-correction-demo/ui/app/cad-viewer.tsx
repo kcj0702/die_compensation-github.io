@@ -437,6 +437,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const [light, setLight] = useState(true);
   const lightRef = useRef(true);
   lightRef.current = light;
+  /* 부품 색을 손으로 정한 값. STEP 이 색을 안 들고 있거나(면 대부분이
+     색 없음) CATIA 에서 보던 것과 다를 때 쓴다 — 실측 67XX6 은 파랑
+     #0080FF 이 팔레트에 등록만 돼 있고 어느 면에도 안 칠해져 있었다. */
+  const [partTint, setPartTint] = useState<string | null>(null);
+  const partTintRef = useRef<string | null>(null);
+  partTintRef.current = partTint;
   /* 화면에 그릴 좌표축 방향(카메라 기준). 카메라가 움직일 때마다 갱신한다. */
   const [axisView, setAxisView] = useState<[number, number, number][]>(
     [[1, 0, 0], [0, -1, 0], [0, 0, 1]]);
@@ -679,7 +685,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 환경맵을 넣은 지금도 판금은 완전한 거울이 아니므로 0.25 정도가
     // 실제 강판에 가깝고 곡면 음영이 훨씬 잘 읽힌다.
     // 색 순서: 히트맵을 칠할 때는 정점색 -> 아니면 CATIA 색 -> 기본색.
-    const catia = (!painted && mesh.colour) ? new THREE.Color(mesh.colour) : null;
+    // 손으로 정한 색이 먼저, 없으면 CATIA 가 STEP 에 넣어 둔 색.
+    const chosen = partTintRef.current ?? mesh.colour;
+    const catia = (!painted && chosen) ? new THREE.Color(chosen) : null;
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : (catia ?? SURFACE),
       vertexColors: painted,
@@ -1136,19 +1144,26 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 흰 바탕에서는 아래쪽 반사광을 밝게 준다. 어두운 배경에 맞춰
     // 놓은 짙은 바닥색(0x1e293b)을 그대로 쓰면 판 아랫면이 새까맣게
     // 죽어 흰 바탕에서 얼룩처럼 보인다.
+    /* 흰 바탕이라고 전체를 밝히면 안 된다.
+     *
+     * 처음에 흰 배경으로 바꾸면서 반구광을 0.3 에서 0.55 로 올리고 주광을
+     * 0.85 에서 0.7 로 낮췄더니 부품이 납작해 보였다 — 사방에서 고르게
+     * 비추면 면과 면을 가르는 그늘이 사라진다. 흰 바탕에서 형태를 세우는
+     * 것은 밝기가 아니라 **밝은 면과 그늘의 차이**다. 그래서 반구광은
+     * 어두운 배경 때와 같게 두고 주광을 오히려 더 세게 준다. */
     const pale = lightRef.current;
     scene.add(new THREE.HemisphereLight(
-      0xdbeafe, pale ? 0xbfc9d4 : 0x1e293b, pale ? 0.55 : 0.3));
-    const key = new THREE.DirectionalLight(0xffffff, pale ? 0.7 : 0.85);
+      0xdbeafe, pale ? 0xa8b4c0 : 0x1e293b, 0.3));
+    const key = new THREE.DirectionalLight(0xffffff, pale ? 1.05 : 0.85);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
     scene.add(key);
-    const fill = new THREE.DirectionalLight(0x93c5fd, 0.3);
+    const fill = new THREE.DirectionalLight(0x93c5fd, pale ? 0.22 : 0.3);
     fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
     scene.add(fill);
     // 흰 바탕에서는 뒤에서 치는 림이 윤곽을 오히려 지운다(흰 위에 흰).
-    // 대신 아래에서 살짝 받쳐 바닥면을 띄운다.
+    // 대신 아래에서 살짝 받쳐 바닥면이 새까맣게 죽지 않게만 한다.
     const rim = new THREE.DirectionalLight(
-      pale ? 0xd8e2ec : 0xf8fafc, pale ? 0.25 : 0.4);
+      pale ? 0xd8e2ec : 0xf8fafc, pale ? 0.2 : 0.4);
     rim.position.set(-0.4, pale ? -0.9 : 0.3, -1.4).multiplyScalar(radius * 3);
     scene.add(rim);
 
@@ -1656,7 +1671,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       mount.removeChild(renderer.domElement);
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode, sections, exaggeration, ceiling, light]);
+      morph, morphMode, sections, exaggeration, ceiling, light, partTint]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -2196,6 +2211,22 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           : '흰 배경으로 바꿉니다 (시트에 실을 그림용)'}>
         {light ? '흰 바탕' : '검은 바탕'}
       </button>
+      {/* 부품 색. 기본은 CATIA 가 STEP 에 넣어 둔 색이고, 파일이 색을
+          안 들고 있거나 CATIA 에서 보던 것과 다르면 손으로 정한다. */}
+      <label className="cad-viewer__tint"
+        title={mesh.colour
+          ? `STEP 에 적힌 색 ${mesh.colour}${mesh.palette && mesh.palette.length > 1
+              ? ` (이 부품에 쓰인 색 ${mesh.palette.length}가지)` : ''}`
+          : '이 STEP 에는 색이 없습니다 — 손으로 정하세요'}>
+        <input type="color" aria-label="부품 색"
+          value={partTint ?? mesh.colour ?? '#8FA3B4'}
+          onChange={(event) => setPartTint(event.target.value)} />
+        색
+      </label>
+      {partTint && (
+        <button type="button" onClick={() => setPartTint(null)}
+          title="CATIA 가 STEP 에 넣어 둔 색으로 되돌립니다">되돌리기</button>
+      )}
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장
       </button>

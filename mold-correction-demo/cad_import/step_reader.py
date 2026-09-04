@@ -99,6 +99,32 @@ def load_step(path: str | Path):
     return shape
 
 
+def _to_hex(tone) -> str:
+    """OCCT 색을 화면에 쓸 sRGB hex 로 바꾼다.
+
+    [왜 그냥 못 쓰나 — 색이 어둡게 나왔다]
+    OCCT 의 Quantity_Color 는 **선형 RGB** 를 들고 있고 STEP 파일은 sRGB 로
+    적혀 있다. 읽을 때 OCCT 가 sRGB -> 선형으로 바꿔 두므로, Red() 를 그대로
+    255 배 하면 파일에 적힌 색보다 어두운 값이 나온다. 실측 67XX6 에서 —
+
+        파일에 적힌 색      그냥 쓴 값     되돌린 값
+        #FF8000 (주황)      #FF3700        #FF8000
+        #E800E8 (자홍)      #CE00CE        #E800E8
+        #C1C4C0 (회색)      #888D86        #C1C4C0
+        #969B95 (회색)      #4E544D        #969B95
+
+    선형 -> sRGB 로 되돌려야 CATIA 에서 보던 색과 같아진다.
+    """
+    def back(v: float) -> float:
+        v = max(0.0, min(1.0, float(v)))
+        return v * 12.92 if v <= 0.0031308 else 1.055 * (v ** (1 / 2.4)) - 0.055
+
+    return "#{:02X}{:02X}{:02X}".format(
+        int(round(back(tone.Red()) * 255)),
+        int(round(back(tone.Green()) * 255)),
+        int(round(back(tone.Blue()) * 255)))
+
+
 def load_step_coloured(path: str | Path):
     """STEP 을 한 번만 읽어 형상과 CATIA 면 색을 함께 준다.
 
@@ -152,10 +178,7 @@ def load_step_coloured(path: str | Path):
         for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
                      XCAFDoc_ColorType.XCAFDoc_ColorGen):
             if colours.GetColor(face, kind, tone):
-                got = "#{:02X}{:02X}{:02X}".format(
-                    int(round(tone.Red() * 255)),
-                    int(round(tone.Green() * 255)),
-                    int(round(tone.Blue() * 255)))
+                got = _to_hex(tone)
                 spread[got] = spread.get(got, 0.0) + _face_area(face)
                 break
         walker.Next()
@@ -169,10 +192,15 @@ def load_step_coloured(path: str | Path):
 def face_colours(path: str | Path) -> dict:
     """STEP 에 CATIA 가 넣어 둔 면 색만 읽는다(형상은 버린다).
 
-    [실측 — 카티아 파일 세 개]
-        64XX1-DR000_HDCT1860   #00FF00  (넓이 2,919,400mm^2)
-        67XX6-DR050_HDCT1750   여섯 색 — #4E544D · #171A17 · #888D86 등
-        71XX1-DR000_HDCT0458   #FFFFFF  (넓이 740,821mm^2)
+    [실측 — 카티아 파일 세 개, sRGB 로 되돌린 값]
+        64XX1-DR000_HDCT1860   #00FF00
+        67XX6-DR050_HDCT1750   #969B95 · #E800E8 · #555A55 · #C1C4C0 · #FF8000
+        71XX1-DR000_HDCT0458   #FFFFFF
+
+    67XX6 은 팔레트에 파랑 #0080FF 이 등록돼 있지만 **어느 면에도 칠해져
+    있지 않다**(면 6,899개는 아예 색이 없다). CATIA 에서 파랗게 보인다면
+    그 색은 CATPart 쪽에 있고 STEP 으로 나오지 않은 것이라, 화면에서
+    손으로 정하는 수밖에 없다.
 
     64XX1 의 #00FF00 은 COLOUR_RGB 가 아니라 DRAUGHTING_PRE_DEFINED_COLOUR
     ('green') 에서 온다. 파일을 글자로 훑어 COLOUR_RGB 만 찾으면 엉뚱하게
@@ -610,8 +638,9 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 4      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 5      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
                        # 4: CATIA 면 색(colour)을 함께 담는다
+                       # 5: 그 색을 선형에서 sRGB 로 되돌린다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
