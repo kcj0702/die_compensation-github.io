@@ -48,6 +48,11 @@ import trimesh
 DEFAULT_MAX_FACES = 400_000
 
 MESH_SUFFIXES = {".stl", ".ply", ".obj", ".off", ".glb", ".gltf", ".3mf"}
+STEP_SUFFIXES = {".step", ".stp"}
+# CATIA COM 을 통해 로컬에서 변환하는 확장자. 실제 로드는 STEP 캐시를 통해.
+CATIA_SUFFIXES = {".catpart", ".catproduct"}
+# 이 모듈이 직접 열 수 있는 모든 확장자.
+SUPPORTED_SUFFIXES = MESH_SUFFIXES | STEP_SUFFIXES | CATIA_SUFFIXES
 
 
 @dataclass
@@ -101,6 +106,52 @@ def load_mesh(path: str | Path) -> trimesh.Trimesh:
     return loaded
 
 
+def load_any(path: str | Path, *, cache_dir: str | Path | None = None) -> trimesh.Trimesh:
+    """확장자에 맞는 리더로 삼각망을 돌려준다.
+
+    STEP 은 OCCT 로 열어 tessellate 한 뒤 trimesh 로 감싸고, .CATPart 는
+    CATIA COM 으로 STEP 을 뽑아 캐시한 뒤 그 STEP 경로로 재귀 호출한다.
+    나머지는 기존 load_mesh 그대로. 필요한 옵셔널 의존성(OCCT, pywin32)
+    이 없으면 각 브랜치가 명확한 오류를 던져 상위가 원인을 안내한다.
+
+    Args:
+        cache_dir: CATIA→STEP 변환 캐시가 쓰일 폴더. 지정하지 않으면 원본
+            옆 `.cache/` 를 쓴다. 원본이 외부(회사 공용) 폴더라 쓰기 권한이
+            없거나 저장소 밖으로 캐시를 새어 나가게 하기 싫을 때 지정한다.
+    """
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in MESH_SUFFIXES:
+        return load_mesh(path)
+    if suffix in STEP_SUFFIXES:
+        # OCCT 테셀레이션은 크기에 따라 15~30초 걸린다. 같은 STEP 을 매번
+        # 다시 잘게 나누지 않도록, 결과를 STL 로 캐시해 두고 다음번에는
+        # 곧바로 STL 을 읽는다. STEP 이 새로 저장되면 mtime 비교로 재실행.
+        cache_root = Path(cache_dir) if cache_dir is not None else path.parent / ".cache"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        cached_stl = cache_root / f"{path.stem}__from_step.stl"
+        if cached_stl.is_file() and cached_stl.stat().st_mtime >= path.stat().st_mtime:
+            return load_mesh(cached_stl)
+        from .step_reader import load_step, tessellate
+        vertices, faces = tessellate(load_step(path))
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        try:
+            mesh.export(str(cached_stl))
+        except Exception:
+            # 캐시 저장이 실패해도 이번 분석은 계속 진행 — 다음번에도 그냥
+            # STEP 을 다시 잘게 나눌 뿐, 결과는 같다.
+            pass
+        return mesh
+    if suffix in CATIA_SUFFIXES:
+        from .catia_convert import convert_to_mesh
+        target_cache = Path(cache_dir) if cache_dir is not None else path.parent / ".cache"
+        # STL 우선, STEP/IGES fallback — 결과 확장자가 그에 따라 달라지므로
+        # 실제 반환 경로를 다시 load_any 로 넘겨 각 브랜치가 처리하게 한다.
+        converted = convert_to_mesh(path, target_cache)
+        return load_any(converted, cache_dir=cache_dir)
+    raise ValueError(f"지원하지 않는 형식입니다: {path.suffix}")
+
+
 def mesh_bounds(mesh: trimesh.Trimesh) -> MeshBounds:
     lo, hi = np.asarray(mesh.bounds, dtype=float)
     return MeshBounds(
@@ -109,6 +160,76 @@ def mesh_bounds(mesh: trimesh.Trimesh) -> MeshBounds:
         size=[round(float(v), 3) for v in (hi - lo)],
         center=[round(float(v), 3) for v in (lo + hi) / 2.0],
     )
+
+
+def split_symmetric_pair(
+    vertices: np.ndarray, faces: np.ndarray,
+    gap_ratio_threshold: float = 0.15, min_side_fraction: float = 0.15,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """LH/RH 대칭쌍처럼 한 CATPart 안에 부품 두 개가 같이 들어 있으면 둘로 쪼갠다.
+
+    [왜 필요한가 — 실측 71XX2]
+    현업 CATPart 는 부품 하나가 아니라 좌우 대칭쌍을 한 파일에 담아 두는
+    경우가 있다. 스캔은 그중 한쪽만 찍은 것이라, 통짜 mesh 로
+    `overlay.fit_view` 를 돌리면 "둘을 합친 실루엣" 과 "부품 하나짜리
+    스캔" 을 맞추려다 엉뚱한 축이나 방향으로 수렴한다.
+
+    실측 71XX2 CATPart 에서 축별 정점 좌표를 정렬해 가장 큰 빈틈을 재면
+    Y 축에서 전체 범위의 80.8% 가 빈 공간이었고, 그 틈을 기준으로 정점이
+    44181 / 44194 개로 거의 정확히 반으로 갈렸다 — 흔한 STEP 테셀레이션
+    잡음(면 경계 이음매)과 달리, 이건 "몸통 두 개가 멀리 떨어져 있다" 는
+    분명한 신호다. `trimesh.split()` 은 이 경우 못 쓴다 — STEP 이 면마다
+    따로 테셀레이션돼서 연결성 기준으로 쪼개면 수만 개의 가짜 조각이
+    나온다(실측: 76,000+). 그래서 정점 좌표의 축별 최대 간격만 본다.
+
+    Returns:
+        틈이 안 보이면(=부품 하나) 원본 그대로 담긴 리스트 길이 1.
+        틈이 보이면(=둘) 각 절반의 (vertices, faces) 리스트 길이 2 —
+        정점 인덱스는 각 절반 안에서 0 부터 다시 매긴 것이라 원본 faces
+        인덱스와 안 맞는다.
+    """
+    v = np.asarray(vertices, dtype=np.float64)
+    best_axis = -1
+    best_gap_ratio = 0.0
+    best_split_value = 0.0
+    for axis in range(3):
+        vals = np.sort(v[:, axis])
+        total_extent = vals[-1] - vals[0]
+        if total_extent <= 0:
+            continue
+        gaps = np.diff(vals)
+        idx = int(np.argmax(gaps))
+        gap_ratio = float(gaps[idx]) / total_extent
+        left_fraction = (idx + 1) / len(vals)
+        right_fraction = 1.0 - left_fraction
+        if (gap_ratio > best_gap_ratio and gap_ratio >= gap_ratio_threshold
+                and left_fraction >= min_side_fraction and right_fraction >= min_side_fraction):
+            best_axis = axis
+            best_gap_ratio = gap_ratio
+            best_split_value = float((vals[idx] + vals[idx + 1]) / 2.0)
+
+    if best_axis < 0:
+        return [(vertices, faces)]
+
+    faces_arr = np.asarray(faces, dtype=np.int64)
+    vertex_side = v[:, best_axis] > best_split_value  # True = 오른쪽(위) 절반
+
+    parts: list[tuple[np.ndarray, np.ndarray]] = []
+    for side in (False, True):
+        keep_vertex = vertex_side == side
+        # 삼각형 세 꼭짓점이 전부 같은 절반에 있어야 그 절반의 면으로 인정한다.
+        # 갭이 이만큼 크면(15%+) 갭을 가로지르는 면은 사실상 없다.
+        keep_face = keep_vertex[faces_arr].all(axis=1)
+        if not keep_face.any():
+            continue
+        old_indices = np.nonzero(keep_vertex)[0]
+        remap = np.full(len(v), -1, dtype=np.int64)
+        remap[old_indices] = np.arange(len(old_indices))
+        part_vertices = v[old_indices]
+        part_faces = remap[faces_arr[keep_face]]
+        parts.append((part_vertices, part_faces))
+
+    return parts if len(parts) == 2 else [(vertices, faces)]
 
 
 def simplify_for_display(
@@ -173,8 +294,8 @@ def to_web_mesh(
 
 
 __all__ = [
-    "DEFAULT_MAX_FACES", "MESH_SUFFIXES",
+    "DEFAULT_MAX_FACES", "MESH_SUFFIXES", "STEP_SUFFIXES", "SUPPORTED_SUFFIXES",
     "MeshBounds", "MeshSummary",
-    "is_mesh_file", "load_mesh", "mesh_bounds",
-    "simplify_for_display", "to_web_mesh",
+    "is_mesh_file", "load_mesh", "load_any", "mesh_bounds",
+    "simplify_for_display", "split_symmetric_pair", "to_web_mesh",
 ]

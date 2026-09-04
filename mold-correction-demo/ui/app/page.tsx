@@ -65,6 +65,10 @@ type AnalysisResult = {
   alignmentOverlay: string | null;
   zeroOverlay: string | null;
   zeroMask: string | null;
+  /* 백엔드가 스캔 좌표(픽셀)로 보낸 제로 폴리라인. 하이브리드 엔진과 폴백 엔진의 스키마가
+     달라 최소 공통항인 points 만 신뢰한다. 이 벡터가 있으면 제품데이터 위에도 alignment 로
+     좌표를 옮겨 오버레이할 수 있다 — 미리 렌더된 zeroOverlay 는 스캔 좌표계라 불가능. */
+  zeroLines?: { points: [number, number][] }[];
   zeroAnchors: ZeroAnchor[];
   advanceLine: AdvanceLine | null;
   zeroLineCandidates: ZeroLineCandidate[];
@@ -1000,7 +1004,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     const isEditing = editingId === point.id;
     const editable = Boolean(onOverrideChange);
     const labelStyle = position ? { left: `${position.x - layerSize.width * point.x / 100}px`, top: `${position.y - layerSize.height * point.y / 100}px`, fontFamily: labelFontFamily || undefined } : undefined;
-    const labelClasses = ['measure-point__label'];
+    const labelClasses = ['measure-point__label', display >= 0 ? 'measure-point__label--plus' : 'measure-point__label--minus'];
     if (editable) labelClasses.push('measure-point__label--editable');
     if (isOverridden) labelClasses.push('measure-point__label--overridden');
     if (isEditing) labelClasses.push('measure-point__label--editing');
@@ -1015,10 +1019,36 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
   })}</div>;
 }
 
-function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, onLayoutsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void }) {
+/* 시트에 얹는 제로라인 오버레이. lines 는 프레임(정면도 또는 detail 크롭이 표시하는 이미지 전체)
+   에서 % 좌표로 이미 변환되어 온다. region 이 주어지면 그 크롭 영역 안으로 좌표를 다시 옮긴다.
+   SVG viewBox 를 0-100 으로 고정해 부모의 절대 크기와 무관하게 % 좌표를 그대로 쓴다. */
+function ZeroLineOverlay({ lines, region }: { lines: [number, number][][]; region?: DetailRegion }) {
+  const transformed = region
+    ? lines
+        .map((line) => line.map(([x, y]) => [(x - region.x) / region.w * 100, (y - region.y) / region.h * 100] as [number, number]))
+        .filter((line) => line.length >= 2 && line.some(([x, y]) => x >= -5 && x <= 105 && y >= -5 && y <= 105))
+    : lines.filter((line) => line.length >= 2);
+  if (!transformed.length) return null;
+  const points = transformed.map((line) => line.map(([x, y]) => `${x},${y}`).join(' '));
+  return <svg className="zero-line-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 15, overflow: 'hidden' }}>
+    {/* 부품 재질색(초록·파랑 등)과 겹치면 안 보인다는 피드백 — "분석 결과" 화면의
+        래스터 제로라인과 같은 빨강(#dc1414, zero_polyline.draw_zero_polylines 기본값)
+        을 쓰고, 흰 테두리(halo)를 먼저 굵게 깐 뒤 그 위에 얹어 어떤 배경에서도
+        확실히 도드라지게 한다. */}
+    {points.map((pts, idx) => <polyline key={`halo-${idx}`} points={pts} fill="none" stroke="#ffffff" strokeWidth={4.5} strokeLinejoin="round" strokeLinecap="round" strokeOpacity={0.95} vectorEffect="non-scaling-stroke" />)}
+    {points.map((pts, idx) => <polyline key={`line-${idx}`} points={pts} fill="none" stroke="#dc1414" strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />)}
+  </svg>;
+}
+
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, onLayoutsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], showZero = false }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; showZero?: boolean }) {
   /* 정렬 합성 이미지는 스캔 원본과 크기가 다를 수 있어 프레임 치수를 직접 받는다. */
   const sourceAspect = frameWidth / frameHeight;
-  const initialFrontSize = fitAspectSize(sourceAspect, 62, 64);
+  /* 시트 폭·높이 상한을 62/64 -> 42/44 로 낮췄다. 50/52 로 한 번 줄여
+     봤지만 여전히 "화면에 꽉 찬다" 는 피드백이 있었다 — CATIA 캡처는
+     실제 촬영 PNG 보다 부품이 프레임을 더 꽉 채우게 나오는 경향이 있어
+     (여백 보정은 catia_capture._isolate_part 에서 별도로 함), 시트
+     박스 자체도 더 작게 잡아야 화면에서 여유 있게 보인다. */
+  const initialFrontSize = fitAspectSize(sourceAspect, 42, 44);
   const [regions, setRegions] = useState<DetailRegion[]>([]);
   /* 엑셀 내보내기가 Detail 영역을 알아야 해서 위로 올려 준다. */
   useEffect(() => { onRegionsChange?.(regions); }, [regions, onRegionsChange]);
@@ -1076,8 +1106,8 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange,
         else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
       };
       return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
-        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} /></div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}</div>
-          : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}</div>
+          : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
             onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onRemoveAddedPoint(added.id); }}
@@ -1749,8 +1779,10 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const productReady = Boolean(result.productImage && alignment);
   const [useProduct, setUseProduct] = useState(true);
   const onProduct = productReady && useProduct;
-  /* 제로라인 오버레이는 스캔 좌표계에 그려진 이미지라 제품데이터 위에는 얹을 수 없다. */
-  const zeroReady = Boolean(result.zeroOverlay) && !onProduct;
+  /* 미리 렌더된 zeroOverlay 는 스캔 좌표계 래스터라 제품데이터 위에는 못 얹지만,
+     벡터 폴리라인(result.zeroLines) 이 있으면 alignment 로 좌표를 옮겨 SVG 로 그려 준다. */
+  const hasZeroVector = Boolean(result.zeroLines && result.zeroLines.length);
+  const zeroReady = hasZeroVector || (Boolean(result.zeroOverlay) && !onProduct);
   const frameWidth = onProduct ? alignment!.productSize[0] : result.source.width;
   const frameHeight = onProduct ? alignment!.productSize[1] : result.source.height;
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
@@ -1889,6 +1921,34 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     if (point.xProduct === undefined || point.yProduct === undefined) return [];
     return [{ ...point, x: point.xProduct, y: point.yProduct }];
   });
+  /* 제로 폴리라인도 포인트와 같은 규칙으로 프레임 % 로 옮긴다. 스캔 원본은 픽셀 좌표라
+     [scanW, scanH] 로 나눠 %, 제품데이터는 alignment 행렬로 옮긴 뒤 [productW, productH] 로 % 를 낸다.
+     알림: 여기서 알고 있는 alignment 는 shear=0 (b=c=0) 인 축정렬 아핀이라 add point 와 같은 형태를 쓴다. */
+  const sheetZeroLines = useMemo<[number, number][][]>(() => {
+    if (!showZero || !hasZeroVector) return [];
+    const scanW = result.source.width;
+    const scanH = result.source.height;
+    if (onProduct && alignment) {
+      const [a, , tx, , d, ty] = alignment.matrix;
+      const [productW, productH] = alignment.productSize;
+      return (result.zeroLines || [])
+        .map((line) => (line.points || [])
+          .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+          .map(([xPx, yPx]) => {
+            const productXPct = (a * xPx + tx) / productW * 100;
+            const productYPct = (d * yPx + ty) / productH * 100;
+            return [productXPct, productYPct] as [number, number];
+          })
+          /* 제품데이터 밖으로 나간 세그먼트는 잘라내고 유효 부분만 남긴다. */
+          .filter(([xPct, yPct]) => xPct >= -1 && xPct <= 101 && yPct >= -1 && yPct <= 101))
+        .filter((line) => line.length >= 2);
+    }
+    return (result.zeroLines || [])
+      .map((line) => (line.points || [])
+        .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+        .map(([xPx, yPx]) => [xPx / scanW * 100, yPx / scanH * 100] as [number, number]))
+      .filter((line) => line.length >= 2);
+  }, [showZero, hasZeroVector, result.zeroLines, result.source.width, result.source.height, onProduct, alignment]);
   const visiblePointIds = new Set(sheetPoints.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
   const createAnnotation = (annotation: Annotation) => setAnnotations((current) => [...current, annotation]);
   const commitAnnotation = (annotation: Annotation) => setAnnotations((current) => current.map((item) => item.id === annotation.id ? annotation : item));
@@ -2186,14 +2246,16 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     const results = await Promise.all(Object.keys(pointOverrides).map((id) => applyCorrection(id, null, 'reset_all')));
     if (results.length > 0 && results.every(Boolean)) onClearAllOverrides();
   };
-  /* 보정시트에 들어가는 그림 — 정렬된 제품데이터가 있으면 그쪽을 우선한다. */
+  /* 보정시트에 들어가는 그림 — 정렬된 제품데이터가 있으면 그쪽을 우선한다.
+     스캔 모드에서 zeroOverlay(래스터)만 있고 벡터가 없으면 종전대로 오버레이를 그림 자체에 굽는다.
+     벡터가 있으면 굳이 굽지 않고 깨끗한 이미지를 쓰고, 위에 SVG 폴리라인으로 얹는다. */
   const baseImage = onProduct
     ? result.productImage!
-    : showZero && result.zeroOverlay ? result.zeroOverlay : result.cleanImage || scan.url;
+    : showZero && result.zeroOverlay && !hasZeroVector ? result.zeroOverlay : result.cleanImage || scan.url;
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={onProduct ? '제로라인은 스캔 좌표계 이미지라 제품데이터 위에는 겹칠 수 없습니다' : ''}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => setZeroPanel((current) => !current)} disabled={!editableZeroLineCount(result)}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => setZeroPanel((current) => !current)} disabled={!editableZeroLineCount(result)}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
       {zeroPanel && <div className="zero-edit"><div className="zero-edit__head"><b>제로라인 수정</b><span>적용하면 3D 오버레이가 같은 위치로 다시 계산됩니다.</span></div>
         {Array.from({ length: editableZeroLineCount(result) }, (_, index) => {
@@ -2203,7 +2265,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
         })}
         <div className="zero-edit__foot"><button className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>전부 되돌리기</button>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>아직 3D에 적용하지 않았습니다.</em>}</div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} showZero={showZero} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
