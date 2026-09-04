@@ -103,7 +103,7 @@ export type CadMesh = {
   palette?: string[];
   /* 색이 같은 삼각형 구간 [색, 시작삼각형, 개수]. CATIA 는 한 부품을
      여러 색으로 칠한다 — 실측 71XX1 은 회색 몸통에 아랫부분만 분홍이다. */
-  colourGroups?: [string, number, number][];
+  colourGroups?: [string, number, number, boolean?][];
   note?: string;
 };
 
@@ -448,6 +448,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      한 부품 색을 바꿨을 때 세 부품이 다 바뀐다. 열쇠는 파일 이름이다 —
      cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다(주석·구역과 같은
      방식이다). */
+  const [paintNote, setPaintNote] = useState('');
   const [tintByCad, setTintByCad] = useState<Record<string, string>>({});
   const tintKey = mesh.summary.name;
   const partTint = tintByCad[tintKey] ?? null;
@@ -751,9 +752,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     if (bands) {
       // 구간마다 같은 설정에 색만 바꾼 재질을 붙인다.
       const base = surface.material as THREE.MeshStandardMaterial;
-      const coats = bands.map(([tone]) => {
+      /* 겹친 껍질을 어떻게 가르나.
+       *
+       * 실측 71XX1 은 부품 전체를 덮는 회색 껍질 위에 색칠한 껍질이
+       * **0.1mm 안으로 겹쳐** 있다(분홍 삼각형 중심 3,861개 중 98%).
+       * 그냥 그리면 깊이 싸움이 나고 회색이 이겨 색이 하나도 안 보인다 —
+       * 화면이 온통 회색으로 나오던 것이 이것이다.
+       *
+       * 직접 칠한 껍질을 카메라 쪽으로 살짝 당겨 늘 이기게 한다. 실제
+       * 자리를 옮기는 것이 아니라 깊이만 비켜 주는 것이라 형상은 그대로다. */
+      const coats = bands.map(([tone, , , direct]) => {
         const coat = base.clone();
         coat.color = new THREE.Color(tone);
+        if (direct) {
+          coat.polygonOffset = true;
+          coat.polygonOffsetFactor = -2;
+          coat.polygonOffsetUnits = -2;
+        }
         return coat;
       });
       geometry.clearGroups();
@@ -766,6 +781,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 허락하지만 타입 정의가 좁아 여기서만 넓혀 준다.
       (surface as unknown as { material: THREE.Material[] }).material = coats;
     }
+    /* 색이 왜 이렇게 나오는지 화면에서 바로 알 수 있게 적어 둔다.
+       "5가지" 라고 떠도 실제로 안 칠해지는 경우가 있어서, 재질이 몇 개
+       붙었는지와 안 붙었으면 그 까닭을 함께 남긴다. */
+    setPaintNote(bands
+      ? `색 ${bands.length}개 적용`
+      : painted ? '편차색 표시 중'
+      : partTintRef.current ? '내가 정한 색'
+      : groups.length <= 1 ? `구간 ${groups.length}개`
+      : `구간이 면을 다 못 덮음 ${covered}/${whole}`);
 
     // 겹쳐 볼 때는 원본을 반투명 뼈대로 남긴다
     if (morph && morphMode === 'after') surface.visible = false;
@@ -2432,6 +2456,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         onClick={() => { setZoning((v) => !v); setMeasuring(false); setNoting(false); }}>
         공정 구역 {regions?.length ? regions.length : ''}
       </button>}
+      {paintNote && <span className="cad-viewer__stat">{paintNote}</span>}
       <span className="cad-viewer__stat">
         삼각형 {mesh.summary.n_faces.toLocaleString()} · {holeLabel}
         {mesh.counts?.cylinders

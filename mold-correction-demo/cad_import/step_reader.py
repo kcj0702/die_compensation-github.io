@@ -217,7 +217,16 @@ def load_step_coloured(path: str | Path):
 
     shell_tone: dict = {}
 
-    def colour_of(face) -> str | None:
+    def colour_of(face):
+        """(색, 껍질에 **직접** 칠해진 것인가) 를 준다.
+
+        솔리드 색은 "칠하지 않은 자리" 를 메우는 값일 뿐이다. 그런데 실측
+        71XX1 을 재 보니 그 회색 껍질이 부품 전체를 덮고 있고, 색이 칠해진
+        껍질(분홍 등)이 **그 위에 0.1mm 안으로 겹쳐** 있다 — 분홍 삼각형
+        중심 3,861개 중 98%가 회색 표면에서 0.1mm 안이었다. 그대로 그리면
+        깊이 싸움이 나고 회색이 이겨 색이 하나도 안 보인다. 어느 쪽이
+        진짜 칠해진 색인지 알려 줘야 화면이 그것을 앞으로 당길 수 있다.
+        """
         # 껍질 색이 있으면 그것이 CATIA 가 보여 주는 색이다.
         try:
             index = parents.FindIndex(face)
@@ -233,14 +242,14 @@ def load_step_coloured(path: str | Path):
                 if key not in shell_tone:
                     shell_tone[key] = tone_of(shell)
                 if shell_tone[key]:
-                    return shell_tone[key]
-        return solid_tone or tone_of(face)
+                    return shell_tone[key], True
+        return (solid_tone or tone_of(face)), False
 
     spread: dict = {}
     walker = TopExp_Explorer(bundle, TopAbs_ShapeEnum.TopAbs_FACE)
     while walker.More():
         face = TopoDS.Face_s(walker.Current())
-        got = colour_of(face)
+        got, _painted = colour_of(face)
         if got:
             spread[got] = spread.get(got, 0.0) + _face_area(face)
         walker.Next()
@@ -336,14 +345,17 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION,
     groups: list = []
     start = 0
     shift = 0
-    for tone in order:
+    # 직접 칠한 껍질을 **나중에** 쌓는다. 겹쳐 있을 때 화면이 앞으로
+    # 당기기 쉽게 순서를 맞춰 둔다.
+    for tone in sorted(order, key=lambda t: bool(t[1]) if isinstance(t, tuple) else False):
         bucket = buckets[tone]
         if not bucket["v"]:
             continue
         faces_here = np.vstack(bucket["f"]) + shift
         all_v.append(np.vstack(bucket["v"]))
         all_f.append(faces_here)
-        groups.append((tone, start, len(faces_here)))
+        hex_tone, direct = tone if isinstance(tone, tuple) else (tone, False)
+        groups.append((hex_tone, start, len(faces_here), direct))
         start += len(faces_here)
         shift += bucket["n"]
 
@@ -734,10 +746,11 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 6      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 7      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
                        # 4: CATIA 면 색(colour)을 함께 담는다
                        # 5: 그 색을 선형에서 sRGB 로 되돌린다
                        # 6: 껍질 단위 색과 삼각형 구간을 담는다
+                       # 7: 구간마다 직접 칠한 색인지 표시한다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
@@ -826,7 +839,8 @@ def read_step_full(
         },
         "colour": colour,
         # 색이 같은 삼각형 구간. three.js 의 geometry group 과 그대로 맞는다.
-        "colour_groups": [[t, int(a), int(n)] for t, a, n in groups if t],
+        "colour_groups": [[t, int(a), int(n), bool(d)]
+                          for t, a, n, d in groups if t],
     }
     if cached is not None:
         try:
