@@ -591,7 +591,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 안 생기고, 두께가 없다시피 해서 앞뒤 면이 서로를 가려 얼룩진다
     // (shadow acne). 형상이 깨져 보이던 원인이다.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.8;
+    /* 흰 바탕에서는 노출을 낮춰야 색이 산다.
+     *
+     * 어두운 배경에 맞춘 0.8 을 흰 바탕에 그대로 쓰면, CATIA 색이 밝은
+     * 회색(#C1C4C0, 0.76)이라 주광·반구광·환경 반사가 겹쳐 1 을 넘고
+     * 하얗게 타 버린다 — 부품이 배경과 구분이 안 되고, 옆에 칠해진
+     * 분홍·초록도 흰색으로 날아간다. 배경이 밝은 만큼 노출을 내린다. */
+    renderer.toneMappingExposure = lightRef.current ? 0.58 : 0.8;
     mount.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
@@ -714,16 +720,22 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      *
      * 히트맵을 칠할 때나 손으로 색을 정했을 때는 구간을 쓰지 않는다 —
      * 그때는 온 부품이 한 색이어야 뜻이 맞는다. */
+    const groups = mesh.colourGroups ?? [];
+    // 구간이 삼각형을 모두 덮는지 본다. 빠진 삼각형이 있으면 그 자리는
+    // 재질이 없어 **아예 안 그려진다** — 색 하나로 칠하는 편이 낫다.
+    const covered = groups.reduce((sum, [, , count]) => sum + count, 0);
+    const whole = (mesh.indices?.length ?? 0) / 3;
     const bands = (!painted && !partTintRef.current
-                   && (mesh.colourGroups?.length ?? 0) > 1)
-      ? mesh.colourGroups! : null;
+                   && groups.length > 1 && whole > 0 && covered === whole)
+      ? groups : null;
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : (catia ?? SURFACE),
       vertexColors: painted,
       metalness: painted ? 0.05 : 0.15,
       roughness: painted ? 0.85 : 0.62,
       // 환경맵을 세게 주면 판넬이 하얗게 번진다. 형태는 주광이 만든다.
-      envMapIntensity: painted ? 0.25 : 0.45,
+      // 환경 반사를 세게 주면 밝은 CATIA 색이 흰 바탕에서 날아간다.
+      envMapIntensity: painted ? 0.25 : (lightRef.current ? 0.22 : 0.45),
       side: THREE.DoubleSide, flatShading: false,
       // 자르지 않을 때는 평면을 **달지 않는다.**
       //
@@ -1206,7 +1218,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const pale = lightRef.current;
     scene.add(new THREE.HemisphereLight(
       0xdbeafe, pale ? 0xa8b4c0 : 0x1e293b, 0.3));
-    const key = new THREE.DirectionalLight(0xffffff, pale ? 1.05 : 0.85);
+    const key = new THREE.DirectionalLight(0xffffff, pale ? 0.9 : 0.85);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
     scene.add(key);
     const fill = new THREE.DirectionalLight(0x93c5fd, pale ? 0.22 : 0.3);
