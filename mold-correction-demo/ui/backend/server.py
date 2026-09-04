@@ -37,6 +37,7 @@ DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
 # its own folder must precede the project root on sys.path.
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from label_detector import (  # noqa: E402
     build_blue_annotation_mask, build_scan_mask, detect_labels,
@@ -62,6 +63,7 @@ from sheet_export import (  # noqa: E402
     SheetAnnotation, SheetPoint, SheetView, TitleBlock, build_sheet, crop_view,
     stack_workbooks,
 )
+import cad_routes  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
@@ -525,6 +527,24 @@ def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
     return image
 
 
+def _zero_line_pixels(lines: Any) -> list[dict[str, Any]]:
+    """Normalize either engine's zero-line values for the CAD overlay cache."""
+    result: list[dict[str, Any]] = []
+    for index, line in enumerate(lines or []):
+        raw = line if isinstance(line, dict) else (
+            line.to_dict() if hasattr(line, "to_dict") else None
+        )
+        if not raw:
+            continue
+        points = raw.get("points") or raw.get("polyline") or []
+        if len(points) >= 2:
+            result.append({
+                "line_id": raw.get("line_id", index + 1),
+                "points": [[float(point[0]), float(point[1])] for point in points],
+            })
+    return result
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
@@ -777,8 +797,21 @@ def analyze_image(
     else:
         value_mode = "판독 결과 없음"
 
+    analysis_id = cad_routes.remember_analysis({
+        "part_mask": (
+            zero_output.part_mask
+            if zero_output is not None
+            else np.zeros(image.shape[:2], np.uint8)
+        ),
+        "values": zero_output.values if zero_output is not None else None,
+        "deviation_points": points,
+        "zero_lines": _zero_line_pixels(zero_lines),
+        "part_no": part_number,
+    })
+
     return {
         "source": {"name": filename, "width": width, "height": height},
+        "analysisId": analysis_id,
         "partNumber": part_number,
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
         "productImage": (
@@ -1446,6 +1479,7 @@ app = Starlette(
         Route("/api/sheet", sheet, methods=["POST"]),
         Route("/api/products", products, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
+        *cad_routes.ROUTES,
     ]
 )
 app.add_middleware(
