@@ -191,3 +191,46 @@ def test_떨어져_있는_같은_축_홀은_따로_센다() -> None:
     assert len(holes) == 2, f"떨어진 두 홀을 하나로 봤다: {len(holes)}개"
     for hole in holes:
         assert hole.height < 10.0, f"빈 구간까지 높이에 넣었다: {hole.height}"
+
+
+def test_색을_판_두께_건너까지_옮긴다():
+    """CATIA 가 칠한 껍질은 판의 한쪽 면에만 얹혀 있다.
+
+    실측 71XX1 은 분홍 껍질이 회색 솔리드 표면과 0.1mm 안으로 겹치는데,
+    그 솔리드는 닫힌 껍데기라 반대쪽 면이 따로 있다. 그대로 두면 한쪽에서만
+    분홍이고 돌리면 회색이 나온다.
+    """
+    import numpy as np
+    from cad_import.step_reader import spread_through_thickness
+
+    # 두께 2mm 판 흉내 — 앞면 두 장(칠함) 과 뒷면 두 장(안 칠함).
+    vertices = np.array([
+        [0, 0, 0], [10, 0, 0], [0, 10, 0], [10, 10, 0],       # 앞면
+        [0, 0, 2], [10, 0, 2], [0, 10, 2], [10, 10, 2],       # 뒷면
+        [0, 0, 90], [10, 0, 90], [0, 10, 90],                 # 멀리 떨어진 것
+    ], dtype=float)
+    faces = np.array([
+        [4, 5, 6], [5, 7, 6],      # 뒷면 — 기본색
+        [8, 9, 10],                # 멀리 — 기본색, 그대로 남아야 한다
+        [0, 1, 2], [1, 3, 2],      # 앞면 — 분홍
+    ])
+    groups = [("#C1C4C0", 0, 3, False), ("#FF99CC", 3, 2, True)]
+
+    out_faces, out_groups = spread_through_thickness(vertices, faces, groups)
+    assert len(out_faces) == len(faces)
+    got = {tone: count for tone, _start, count, _direct in out_groups}
+    # 뒷면 두 장이 분홍을 따라온다. 멀리 있는 한 장은 그대로다.
+    assert got["#FF99CC"] == 4
+    assert got["#C1C4C0"] == 1
+
+
+def test_칠한_색이_없으면_그대로_둔다():
+    import numpy as np
+    from cad_import.step_reader import spread_through_thickness
+
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+    faces = np.array([[0, 1, 2]])
+    groups = [("#C1C4C0", 0, 1, False)]
+    out_faces, out_groups = spread_through_thickness(vertices, faces, groups)
+    assert out_groups == groups
+    assert np.array_equal(out_faces, faces)

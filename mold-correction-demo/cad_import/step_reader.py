@@ -365,6 +365,66 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION,
     return vertices, faces, groups
 
 
+def spread_through_thickness(vertices, faces, groups, reach: float = 3.0):
+    """색을 판 두께 건너까지 옮긴다.
+
+    [왜 필요한가 — 한쪽 면만 칠해져 있다]
+    CATIA 가 칠한 껍질은 판의 **한쪽 면**에만 얹혀 있다. 실측 71XX1 은
+    분홍 껍질이 회색 솔리드 표면과 0.1mm 안으로 겹치는데, 그 회색 솔리드는
+    닫힌 껍데기라 반대쪽 면이 따로 있다. 그래서 한쪽에서 보면 분홍인데
+    돌리면 회색이 나온다 — 사람이 보기에는 "색이 반대쪽에 칠해졌다".
+
+    부품 하나는 한 가지 색이라고 보는 게 사람의 눈이다. 그래서 칠하지
+    않은(솔리드 색을 물려받은) 삼각형이 칠해진 삼각형 **바로 뒤**에 있으면
+    그 색을 따라가게 한다. 판재 두께 안쪽만 본다 — 실측 패널이 1.2~2.3mm
+    라 3mm 면 앞뒤를 잇고 옆 리브까지 번지지는 않는다.
+
+    Args:
+        groups: [(색, 시작삼각형, 개수, 직접칠함), ...]
+
+    Returns:
+        (faces, groups) — 색이 같은 삼각형끼리 다시 묶은 것.
+    """
+    from scipy.spatial import cKDTree
+
+    painted = [g for g in groups if g[3]]
+    plain = [g for g in groups if not g[3]]
+    if not painted or not plain:
+        return faces, groups
+
+    tone_of = np.empty(len(faces), dtype=object)
+    for tone, start, count, _direct in groups:
+        tone_of[start:start + count] = tone
+
+    middle = vertices[faces].mean(axis=1)
+    lit = np.concatenate([np.arange(s, s + c) for _t, s, c, _d in painted])
+    dim = np.concatenate([np.arange(s, s + c) for _t, s, c, _d in plain])
+
+    tree = cKDTree(middle[lit])
+    gap, who = tree.query(middle[dim], distance_upper_bound=reach)
+    near = np.isfinite(gap)
+    tone_of[dim[near]] = tone_of[lit[who[near]]]
+
+    # 색이 같은 삼각형끼리 다시 모은다.
+    order: list = []
+    seen: dict = {}
+    for tone, _s, _c, direct in groups:
+        if tone not in seen:
+            seen[tone] = direct
+            order.append(tone)
+    keep: list = []
+    made: list = []
+    start = 0
+    for tone in order:
+        picked = np.flatnonzero(tone_of == tone)
+        if not len(picked):
+            continue
+        keep.append(faces[picked])
+        made.append((tone, start, len(picked), seen[tone]))
+        start += len(picked)
+    return np.vstack(keep), made
+
+
 def _face_props(face) -> tuple:
     """면의 넓이와 무게중심을 함께 준다.
 
@@ -746,11 +806,12 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 7      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 8      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
                        # 4: CATIA 면 색(colour)을 함께 담는다
                        # 5: 그 색을 선형에서 sRGB 로 되돌린다
                        # 6: 껍질 단위 색과 삼각형 구간을 담는다
                        # 7: 구간마다 직접 칠한 색인지 표시한다
+                       # 8: 색을 판 두께 건너까지 옮긴다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
@@ -817,6 +878,8 @@ def read_step_full(
         shape, colour = load_step_coloured(path)
         vertices, faces, groups = tessellate(
             shape, deflection, colour_of=colour.pop("of_face"))
+        # 칠한 색을 판 두께 건너까지 옮긴다 — 안 그러면 한쪽에서만 색이 보인다.
+        faces, groups = spread_through_thickness(vertices, faces, groups)
     except Exception:
         shape, colour = load_step(path), None
         vertices, faces = tessellate(shape, deflection)
@@ -857,6 +920,6 @@ __all__ = [
     "STEP_SUFFIXES", "DEFAULT_DEFLECTION",
     "Cylinder", "PlaneFace",
     "is_step_file", "load_step", "load_step_coloured", "tessellate",
-    "face_colours",
+    "face_colours", "spread_through_thickness",
     "find_cylinders", "find_planes", "read_step_full",
 ]
