@@ -1591,6 +1591,33 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [overlayStatus, setOverlayStatus] =
     useState<'idle' | 'loading' | 'error'>('idle');
   const [overlayError, setOverlayError] = useState<string | null>(null);
+  /* 검사 원본(PolyWorks 워크스페이스) 경로.
+     파일을 올리게 하지 않는다 — 실측 워크스페이스가 1.9GB 고 폴더가
+     통째로 딸려 있어 브라우저로 올릴 물건이 아니다. 어차피 이 PC 안에서만
+     도는 게 전제라 경로를 받아 백엔드가 직접 읽는다. */
+  const [workPath, setWorkPath] = useState('');
+  const [workState, setWorkState] = useState<'idle' | 'reading'>('idle');
+
+  const openWorkspace = async () => {
+    if (!mesh?.cadId || !workPath.trim()) return;
+    setWorkState('reading'); setOverlayError(null);
+    try {
+      const response = await fetch(`${API_BASE}/api/scan-workspace`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cadId: mesh.cadId, path: workPath.trim() }),
+      });
+      const data = await response.json() as CadOverlay & { error?: string };
+      if (!response.ok || data.error) {
+        throw new Error(data.error || '검사 원본을 읽지 못했습니다.');
+      }
+      setOverlay(data);
+      setOverlayStatus('idle');
+    } catch (err) {
+      setOverlayError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWorkState('idle');
+    }
+  };
   /* 주석·공정 구역의 열쇠는 cadId 가 아니라 **파일 이름**이다. cadId 는
      파일을 열 때마다 새로 만드는 uuid 라 새로고침하면 짝을 잃는다.
      스캔을 품번으로 묶는 것과 같은 이유다. */
@@ -2101,6 +2128,35 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
               </div>
               {/* 보정시트가 적어 둔 단면 위치로 제로라인을 계산한다.
                   스캔이 없어도 되고 추정이 없다 — 시트 숫자로 CAD 를 자를 뿐이다. */}
+              {/* 검사 원본에서 보정 포인트를 그대로 가져온다.
+                  PNG 를 읽어 값을 알아내고 실루엣으로 얹는 길과 달리
+                  추정이 하나도 없다 — 워크스페이스에 부품 좌표로 들어
+                  있는 것을 그대로 쓴다. */}
+              <div className="cad-section-bar">
+                <label htmlFor="cad-workspace">검사 원본 (.pwk)</label>
+                <input id="cad-workspace" type="text" value={workPath}
+                  placeholder="예: C:\Users\...\3D스캔 AX과제.pwk"
+                  onChange={(event) => setWorkPath(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void openWorkspace();
+                  }} />
+                <button type="button" className="tool-button"
+                  onClick={openWorkspace}
+                  disabled={workState === 'reading' || !workPath.trim()}>
+                  {workState === 'reading' ? '읽는 중…' : '포인트 가져오기'}
+                </button>
+                {overlay?.source === 'workspace' && (
+                  <span className="cad-section-bar__ok">
+                    포인트 {overlay.points.length}개
+                    {overlay.surfaceGap
+                      ? ` · 표면까지 중앙 ${overlay.surfaceGap.median.toFixed(2)}mm`
+                      : ''}
+                  </span>
+                )}
+                <span className="cad-section-bar__note">
+                  판독도 정합도 하지 않습니다 — 검사 원본의 부품 좌표를 그대로 씁니다
+                </span>
+              </div>
               <div className="cad-section-bar">
                 <label htmlFor="cad-sections">시트 단면 표기</label>
                 <input id="cad-sections" type="text" value={sectionNotes}
@@ -2292,9 +2348,15 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   </span>
                   <button type="button" className="cad-align__reset"
                     onClick={() => nudge({ ...NO_ADJUST })}>자동으로 되돌리기</button>
+                  {/* 검사 원본에서 온 포인트는 맞춘 것이 아니다 —
+                      얹힘 대신 표면까지 실제 거리를 적는다. */}
                   <b className={`cad-align__rate${overlay.fit.reliable ? ' is-ok' : ''}`}>
-                    얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
-                    {overlay.fit.reliable ? ' · 표시함' : ' · 기준 60% 미달'}
+                    {overlay.source === 'workspace'
+                      ? (overlay.surfaceGap
+                          ? `표면까지 ${overlay.surfaceGap.median.toFixed(2)}mm · 정합 없음`
+                          : '검사 원본 좌표 · 정합 없음')
+                      : <>얹힘 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}%
+                          {overlay.fit.reliable ? ' · 표시함' : ' · 기준 60% 미달'}</>}
                   </b>
                 </div>
               </div>}

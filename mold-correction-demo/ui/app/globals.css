@@ -761,3 +761,5 @@ button { cursor: pointer; }
 .zone-book__table input[type=text]{width:100%;min-width:16ch;padding:3px 5px;border:1px solid #d3dbe3;border-radius:4px;font-size:10.5px}
 .zone-book__table select{padding:3px 4px;border:1px solid #d3dbe3;border-radius:4px;font-size:10.5px}
 .zone-book__table button{padding:2px 8px;border:1px solid #d9b4b4;border-radius:4px;background:#fff;color:#a3323f;font-size:10px;cursor:pointer}
+/* 검사 원본에서 그대로 가져왔을 때는 경고가 아니라 알림이다 */
+.cad-viewer__warn--ok{border-color:rgba(90,200,140,.45);background:rgba(12,44,30,.86);color:#a9e6c4}

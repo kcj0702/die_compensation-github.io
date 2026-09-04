@@ -1222,6 +1222,87 @@ def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
                      json.dumps(fit_adjust or {}, sort_keys=True)])
 
 
+def scan_workspace_for(cad_id: str, path: str) -> dict[str, Any]:
+    """검사 원본(PolyWorks 워크스페이스)에서 보정 포인트를 그대로 가져온다.
+
+    [왜 정합을 하지 않나]
+    PNG 경로는 그림에서 값을 읽고, 실루엣을 맞춰 CAD 에 얹는다. 그
+    얹힘이 정합률이었다. 워크스페이스에는 검사 포인트가 **부품 좌표로**
+    들어 있어 맞출 것이 없다. 실측으로 확인했다 — 64XX2 의 포인트 79개를
+    64XX1-DR000_HDCT1860 표면까지 재니 중앙 0.49mm · 최대 1.04mm 이고,
+    남는 0.5mm 는 STEP 삼각망의 현 오차다(편차 크기와 상관이 +0.02 로
+    없다). 그래서 자리를 옮기지 않고 그대로 쓴다.
+
+    파일은 올리지 않고 경로로 읽는다. 실측 워크스페이스가 1.9GB 라
+    브라우저로 올릴 물건이 아니고, 어차피 이 PC 안에서만 도는 게 이
+    프로젝트의 전제다.
+
+    Returns:
+        cad-overlay 와 같은 모양. 화면이 그대로 쓸 수 있게 맞춘다.
+        다만 정합을 하지 않았으므로 fit 대신 source 로 알린다.
+    """
+    from cad_import import polyworks
+
+    cad_entry = _cad_cache.get(cad_id)
+    if cad_entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+
+    spot = Path(path.strip().strip('"'))
+    if not spot.exists():
+        raise ValueError(f"그 자리에 파일이 없습니다: {spot}")
+
+    found = polyworks.inspection_points(spot)
+    if not found:
+        raise ValueError("검사 포인트를 찾지 못했습니다. PolyWorks 워크스페이스가 맞나요?")
+
+    offset = np.asarray(cad_entry["offset"], dtype=float)
+    points: list = []
+    for order, item in enumerate(found):
+        if item.deviation is None:
+            continue
+        cad_spot = np.asarray(item.position, dtype=float)
+        points.append({
+            "id": item.name or f"pt {order + 1}",
+            "position": [round(float(v), 3) for v in (cad_spot - offset)],
+            "cad": [round(float(v), 3) for v in cad_spot],
+            "value": round(float(item.deviation), 3),
+        })
+
+    # 얼마나 잘 앉았는지는 재서 알려 준다 — 믿고 쓰라고만 하지 않는다.
+    away = None
+    try:
+        import trimesh
+
+        mesh = cad_entry["mesh"]
+        probe = np.asarray([p["cad"] for p in points], dtype=float)
+        _, gap, _ = trimesh.proximity.closest_point(mesh, probe)
+        away = {"median": round(float(np.median(gap)), 3),
+                "max": round(float(np.max(gap)), 3)}
+    except Exception:
+        away = None                       # 못 재도 포인트는 쓸 수 있다
+
+    # 화면은 fit 을 그냥 참조한다. 정합을 안 했다고 없애면 터지므로
+    # 자리는 채우되 **지표는 지어내지 않는다** — hit_rate·iou 를 비워
+    # 두고, 얼마나 잘 앉았는지는 surfaceGap 으로 따로 알린다.
+    #
+    # axis 는 라벨을 어느 평면에 세울지 정하는 데만 쓴다. 판금은 가장
+    # 얇은 축이 곧 판을 마주 보는 방향이라 그걸 고른다.
+    span = np.asarray(cad_entry["mesh"].bounds[1]) - np.asarray(
+        cad_entry["mesh"].bounds[0])
+    thin = int(np.argmin(span))
+
+    return {
+        "source": "workspace",
+        "sourceName": spot.name,
+        "points": points,
+        "zeroLines": [],                  # 워크스페이스는 제로라인을 주지 않는다
+        "rejected": [], "mended": [],
+        "surfaceGap": away,
+        "fit": {"axis": thin, "sign": 1, "flip_u": False, "flip_v": False,
+                "mm_per_px": 0.0, "iou": 0.0, "reliable": True},
+    }
+
+
 def _mend_decimal(value: float, limit: float,
                   slack: float = 2.0) -> float | None:
     """판독에서 날아간 소수점을 되살린다. 못 살리면 None.
@@ -1945,6 +2026,21 @@ async def cad_sections(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+async def scan_workspace(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            scan_workspace_for,
+            str(body.get("cadId") or ""),
+            str(body.get("path") or ""),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_overlay(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -2127,6 +2223,7 @@ app = Starlette(
         Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/scan-workspace", scan_workspace, methods=["POST"]),
         Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
         Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),

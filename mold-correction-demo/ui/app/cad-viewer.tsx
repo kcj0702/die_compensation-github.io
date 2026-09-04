@@ -75,6 +75,12 @@ export type CadOverlay = {
   /* 소수점이 날아간 판독을 되살린 것. 실측 64XX2 에서 6 · 80 · -10 이
      각각 0.6 · 0.8 · -1.0 이었다. 조용히 고치면 안 되므로 화면에 알린다. */
   mended?: { id: string; was: number; value: number }[];
+  /* 어디서 온 포인트인가. 'workspace' 면 검사 원본(PolyWorks)에서 부품
+     좌표로 그대로 가져온 것이라 정합을 하지 않았다 — 얹힘 대신
+     surfaceGap(표면까지 실제 거리)을 봐야 한다. */
+  source?: 'scan' | 'workspace';
+  sourceName?: string;
+  surfaceGap?: { median: number; max: number } | null;
   colorbarLimit?: number | null;
 };
 
@@ -2459,7 +2465,22 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       </div>
     )}
 
-    {overlay && !overlay.fit.reliable && (
+    {/* 검사 원본에서 온 포인트는 맞춘 것이 아니라 부품 좌표 그대로다.
+        얹힘을 말하는 것이 뜻이 없으므로 표면까지 실제 거리를 보인다. */}
+    {overlay?.source === 'workspace' && (
+      <p className="cad-viewer__warn cad-viewer__warn--ok">
+        검사 원본에서 보정 포인트 {overlay.points.length}개를 그대로
+        가져왔습니다{overlay.sourceName ? ` (${overlay.sourceName})` : ''} —
+        판독도 정합도 하지 않았습니다.
+        {overlay.surfaceGap && <> 형상 표면까지 중앙{' '}
+          <b>{overlay.surfaceGap.median.toFixed(2)}mm</b> ·
+          최대 {overlay.surfaceGap.max.toFixed(2)}mm 로 앉았습니다.</>}
+        {' '}제로라인은 검사 원본에 없으므로 스캔 분석이나 시트 단면
+        표기로 따로 얻어야 합니다.
+      </p>
+    )}
+
+    {overlay && overlay.source !== 'workspace' && !overlay.fit.reliable && (
       <p className="cad-viewer__warn">
         스캔 위의 점 중 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}% 만
         형상에 얹혔습니다 (기준 60%). 제로라인·보정량을 그리지
