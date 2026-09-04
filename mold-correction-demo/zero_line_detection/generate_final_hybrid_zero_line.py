@@ -26,9 +26,12 @@ import numpy as np
 
 
 HERE = Path(__file__).resolve().parent
-DEMO_ROOT = HERE.parents[1]
+DEMO_ROOT = HERE.parent
+EXPERIMENT_DIR = DEMO_ROOT / "experiments" / "zero_line_area_edge_preview"
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+if str(EXPERIMENT_DIR) not in sys.path:
+    sys.path.insert(0, str(EXPERIMENT_DIR))
 if str(DEMO_ROOT) not in sys.path:
     sys.path.insert(0, str(DEMO_ROOT))
 
@@ -37,8 +40,8 @@ import generate_correction_only_3pct_preview as correction  # noqa: E402
 import case2_route_adapter as case2_adapter  # noqa: E402
 
 
-DEFAULT_CORRECTION_DIR = HERE / "results_correction_only_2pct"
-DEFAULT_OUTPUT_DIR = HERE / "results_final_hybrid_zero_line"
+DEFAULT_CORRECTION_DIR = EXPERIMENT_DIR / "results_correction_only_2pct"
+DEFAULT_OUTPUT_DIR = EXPERIMENT_DIR / "results_final_hybrid_zero_line"
 DEFAULT_RAW_INPUT_DIR = DEMO_ROOT / "label_removal" / "input"
 FINAL_LINE_WIDTH_PX = 4
 FINAL_LINE_RGB = (255, 235, 0)

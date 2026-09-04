@@ -81,7 +81,7 @@ def _detect_from_review_inputs(
     pixels.
     """
     import generate_adaptive_zero_line_preview as kdt
-    import generate_final_hybrid_zero_line as hybrid
+    from zero_line_detection import generate_final_hybrid_zero_line as hybrid
 
     spec = _matching_review_spec(filename)
     if spec is None:
@@ -160,7 +160,7 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
         import case2_route_adapter as case2  # loaded from EXPERIMENT_DIR
-        import generate_final_hybrid_zero_line as hybrid
+        from zero_line_detection import generate_final_hybrid_zero_line as hybrid
         import generate_adaptive_zero_line_preview as kdt
 
         # UI에서도 검토 엔진과 같은 ±0.6 mm 보정영역 기준을 사용한다.

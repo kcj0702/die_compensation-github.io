@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,12 +12,10 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-HYBRID_DIR = ROOT / "experiments" / "zero_line_area_edge_preview"
-if str(HYBRID_DIR) not in sys.path:
-    sys.path.insert(0, str(HYBRID_DIR))
+HYBRID_PATH = ROOT / "zero_line_detection" / "generate_final_hybrid_zero_line.py"
 SPEC = importlib.util.spec_from_file_location(
     "final_hybrid_zero_line",
-    HYBRID_DIR / "generate_final_hybrid_zero_line.py",
+    HYBRID_PATH,
 )
 assert SPEC is not None and SPEC.loader is not None
 hybrid = importlib.util.module_from_spec(SPEC)
