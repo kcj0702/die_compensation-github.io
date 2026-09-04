@@ -572,6 +572,91 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
                 (destination_root / source.name).exists(), "정리 폴더 루트에 남으면 안 된다"
             )
 
+    def _classify_names(self, root, names, order=None):
+        classifier = backend_server.FilenameClassifier(
+            backend_server.FILE_ORGANIZER_RULES,
+            root,
+            order or ["vehicle", "category", "item", "detail"],
+        )
+        results = backend_server.classify_batch(classifier, [Path(n) for n in names])
+        return dict(zip(names, results))
+
+    def test_missing_item_no_is_borrowed_from_the_same_product_in_the_batch(self) -> None:
+        """품번이 빠진 파일은 같은 제품 파일의 품번을 참고해 태깅한다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            donor = "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip"
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(root, [donor, receiver])
+
+            borrowed = found[receiver]
+            self.assertEqual(borrowed.item_no, "67312-DZ000")
+            self.assertEqual(borrowed.family, "67312")
+            self.assertIsNotNone(borrowed.target_dir)
+            self.assertEqual(
+                borrowed.target_dir.relative_to(root).parts,
+                ("JM", "03. 문서", "67312", "01. 성형해석"),
+            )
+            self.assertTrue(
+                any(donor in reason for reason in borrowed.reasons),
+                "어느 파일에서 참고했는지 근거에 남아야 한다",
+            )
+            # 파일명에 품번이 적힌 쪽은 그대로다.
+            self.assertEqual(found[donor].item_no, "67312-DZ000")
+
+    def test_borrowed_item_no_scores_lower_than_one_read_from_the_filename(self) -> None:
+        """빌린 품번은 파일명에 적힌 품번보다 약한 근거이므로 신뢰도가 낮다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            donor = "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip"
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(root, [donor, receiver])
+            self.assertLess(found[receiver].confidence, found[donor].confidence)
+
+    def test_item_no_is_not_borrowed_when_the_same_product_has_two_item_numbers(self) -> None:
+        """같은 제품에 품번이 둘이면 지어내지 않고 미분류로 둔다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                [
+                    "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip",
+                    "JM_67313-DZ000_DASH LWR_OP30_패턴도_260825.zip",
+                    receiver,
+                ],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+            self.assertIsNone(found[receiver].target_dir)
+
+    def test_item_no_is_not_borrowed_across_different_vehicles(self) -> None:
+        """차종이 다르면 품번을 물려받지 않는다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                ["XM_71612-DZ000_DASH LWR_OP20_완성도_260825.zip", receiver],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+            self.assertIsNone(found[receiver].target_dir)
+
+    def test_item_no_is_not_borrowed_across_different_product_names(self) -> None:
+        """품명이 다르면 같은 차종이어도 물려받지 않는다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                ["JM_67312-DZ000_PNL HOOD INR_OP20_완성도_260825.zip", receiver],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+
     def test_source_path_outside_allowed_roots_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

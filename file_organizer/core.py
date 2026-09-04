@@ -274,6 +274,16 @@ def migrate_folder_structure(
 
 
 @dataclass(frozen=True)
+class ItemHint:
+    """품번이 적히지 않은 파일에 다른 파일의 품번을 물려줄 때 쓰는 근거."""
+
+    item_no: str
+    family: str
+    customer: str
+    source_name: str
+
+
+@dataclass(frozen=True)
 class Classification:
     customer: str
     item_no: str
@@ -593,7 +603,7 @@ class FilenameClassifier:
                 current = candidate
         return current, matched_product_folder, reasons
 
-    def classify(self, path: Path) -> Classification:
+    def classify(self, path: Path, *, item_hint: "ItemHint | None" = None) -> Classification:
         filename = path.name
         stem = path.stem
         reasons: list[str] = []
@@ -630,9 +640,28 @@ class FilenameClassifier:
             if customer_match:
                 customer = customer_match.group(0).upper()
 
-        if item_no:
+        # 품명·차종은 읽혔는데 품번만 빠진 파일은, 같은 제품의 다른 파일이
+        # 품번을 달고 있으면 그것을 빌려 쓴다. 빌릴 후보를 고르는 일은
+        # 배치 전체를 볼 수 있는 classify_batch 가 맡고, 여기서는 받은
+        # 근거를 적용만 한다. 파일명 자체에 품번이 있으면 손대지 않는다.
+        borrowed_from = ""
+        if not item_no and item_hint is not None:
+            item_no = item_hint.item_no
+            family = item_hint.family
+            borrowed_from = item_hint.source_name
+            if not customer:
+                customer = item_hint.customer
+
+        if item_no and not borrowed_from:
             score += 45
             reasons.append(f"파일명에서 품번 '{item_no}' 인식")
+        elif borrowed_from:
+            # 파일명에 적힌 품번보다는 약한 근거이므로 점수를 낮게 준다.
+            score += 30
+            reasons.append(
+                f"품번이 적혀 있지 않아 같은 제품 파일 '{borrowed_from}'의 "
+                f"품번 '{item_no}'을 참고했습니다"
+            )
         else:
             reasons.append("파일명에서 품번 패턴을 찾지 못했습니다 — 품번 폴더 없이 분류합니다")
 
@@ -683,9 +712,66 @@ class FilenameClassifier:
         )
 
 
+def _collect_item_hints(
+    paths: list[Path], classifications: list[Classification]
+) -> dict[int, ItemHint]:
+    """품번이 적힌 파일에서 "(차종, 품명) -> 품번" 표를 만들어, 품번만 빠진
+    같은 제품 파일에 물려줄 근거를 고른다.
+
+    같은 열쇠에 서로 다른 품번이 둘 이상 걸리면 어느 쪽인지 알 수 없으므로
+    비워 둔다 — 잘못된 품번 폴더로 보내느니 미분류로 남기는 편이 낫다.
+    차종을 못 읽은 파일은 품명만으로 한 번 더 찾아본다. 차종을 읽은 파일은
+    그러지 않는다 — 다른 차종의 품번을 가져오게 되기 때문이다.
+    """
+    by_vehicle_and_product: dict[tuple[str, str], dict[str, ItemHint]] = {}
+    by_product: dict[str, dict[str, ItemHint]] = {}
+    for path, result in zip(paths, classifications):
+        if not result.item_no or not result.product_name:
+            continue
+        product_key = _normalize(result.product_name)
+        hint = ItemHint(
+            item_no=result.item_no,
+            family=result.family,
+            customer=result.customer,
+            source_name=path.name,
+        )
+        by_vehicle_and_product.setdefault(
+            (result.customer.casefold(), product_key), {}
+        ).setdefault(result.item_no, hint)
+        by_product.setdefault(product_key, {}).setdefault(result.item_no, hint)
+
+    hints: dict[int, ItemHint] = {}
+    for index, result in enumerate(classifications):
+        if result.item_no or not result.product_name:
+            continue
+        product_key = _normalize(result.product_name)
+        if result.customer:
+            candidates = by_vehicle_and_product.get(
+                (result.customer.casefold(), product_key), {}
+            )
+        else:
+            candidates = by_product.get(product_key, {})
+        if len(candidates) == 1:
+            hints[index] = next(iter(candidates.values()))
+    return hints
+
+
 def classify_batch(classifier: FilenameClassifier, paths: list[Path]) -> list[Classification]:
-    """같은 classifier 하나로 여러 파일을 분류한다."""
-    return [classifier.classify(path) for path in paths]
+    """같은 classifier 하나로 여러 파일을 분류한다.
+
+    한 번 훑어 파일명만으로 분류한 뒤, 품번이 빠진 파일에는 같은 제품의 다른
+    파일에서 읽은 품번을 물려주고 그 파일만 다시 분류한다. 그래서 한 배치에
+    "JM_67312-DZ000_DASH LWR_OP20_완성도"와 "JM DASH LWR 성형해석 리포트"가
+    같이 있으면 뒤엣것도 67312 품번 폴더로 들어간다.
+    """
+    first_pass = [classifier.classify(path) for path in paths]
+    hints = _collect_item_hints(paths, first_pass)
+    if not hints:
+        return first_pass
+    return [
+        classifier.classify(path, item_hint=hints[index]) if index in hints else result
+        for index, (path, result) in enumerate(zip(paths, first_pass))
+    ]
 
 
 def _next_available_path(path: Path) -> Path:
