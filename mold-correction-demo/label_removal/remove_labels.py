@@ -269,9 +269,15 @@ def detect_exact_hsv_leader_lines(
     image: np.ndarray,
     label_boxes: list[tuple[int, int, int, int]],
     scan_mask: np.ndarray,
+    *,
+    return_point_boxes: bool = False,
 ) -> tuple[
     np.ndarray,
     list[tuple[int, int, int, tuple[int, int, int]]],
+] | tuple[
+    np.ndarray,
+    list[tuple[int, int, int, tuple[int, int, int]]],
+    list[tuple[int, int, int, int]],
 ]:
     """Trace label leaders from their exact HSV center color for labels_white."""
     height, width = image.shape[:2]
@@ -312,6 +318,7 @@ def detect_exact_hsv_leader_lines(
     )
     selected_center = np.zeros_like(thin_center)
     point_specs: list[tuple[int, int, int, tuple[int, int, int]]] = []
+    point_boxes: list[tuple[int, int, int, int]] = []
     point_radius = max(3, int(round(min(height, width) * 0.004)))
 
     for component in range(1, count):
@@ -320,7 +327,8 @@ def detect_exact_hsv_leader_lines(
         component_y = int(stats[component, cv2.CC_STAT_TOP])
         box_width = int(stats[component, cv2.CC_STAT_WIDTH])
         box_height = int(stats[component, cv2.CC_STAT_HEIGHT])
-        if area < 5 or max(box_width, box_height) < 6:
+        component_span = max(box_width, box_height)
+        if area < 5 or component_span < 3:
             continue
 
         component_labels = labels[
@@ -387,7 +395,7 @@ def detect_exact_hsv_leader_lines(
         )
         center_x = point_x
         center_y = point_y
-        if np.any(nearby):
+        if component_span >= 6 and np.any(nearby):
             direction_x = point_x - float(np.mean(xs[nearby]))
             direction_y = point_y - float(np.mean(ys[nearby]))
             direction_length = float(np.hypot(direction_x, direction_y))
@@ -406,6 +414,7 @@ def detect_exact_hsv_leader_lines(
         point_specs.append(
             (center_x, center_y, point_radius + 1, point_color)
         )
+        point_boxes.append(associated_box)
 
     # Anti-aliased leader edges are a blend of pure blue and the underlying
     # scan color, so their HSV hue is not always close to 120. Include only
@@ -425,6 +434,8 @@ def detect_exact_hsv_leader_lines(
         iterations=1,
     )
     line_mask = cv2.bitwise_and(center_neighborhood, blended_blue_edge)
+    if return_point_boxes:
+        return line_mask, point_specs, point_boxes
     return line_mask, point_specs
 
 
@@ -538,13 +549,54 @@ def build_measurement_point_mask(
     """Build compact masks around the non-blue point at each leader endpoint."""
     height, width = image.shape[:2]
     label_boxes = detect_label_boxes(image)
-    _, point_specs = detect_exact_hsv_leader_lines(
-        image, label_boxes, scan_mask
+    _, point_specs, point_boxes = detect_exact_hsv_leader_lines(
+        image, label_boxes, scan_mask, return_point_boxes=True
     )
 
     point_mask = np.zeros((height, width), dtype=np.uint8)
     for x, y, radius, _ in point_specs:
         cv2.circle(point_mask, (x, y), radius, 255, thickness=-1)
+
+    # Some labels placed directly beside a hole have no usable exact-blue
+    # component at all. Supplement only boxes that received no exact point;
+    # short 3-5 px exact-blue components are handled by the tracer above.
+    try:
+        from label_detector import detect_labels as detect_deviation_labels
+    except ImportError:  # package import used by standalone/test execution
+        from deviation_extraction.label_detector import (
+            detect_labels as detect_deviation_labels,
+        )
+
+    for candidate in detect_deviation_labels(image):
+        if candidate.point_xy is None:
+            continue
+        x, y, box_width, box_height = candidate.box
+        candidate_box = (x, y, x + box_width, y + box_height)
+        candidate_area = max(1, box_width * box_height)
+        has_exact_point = False
+        for point_box in point_boxes:
+            ix0 = max(candidate_box[0], point_box[0])
+            iy0 = max(candidate_box[1], point_box[1])
+            ix1 = min(candidate_box[2], point_box[2])
+            iy1 = min(candidate_box[3], point_box[3])
+            intersection = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            point_area = max(
+                1, (point_box[2] - point_box[0]) * (point_box[3] - point_box[1])
+            )
+            overlap = intersection / float(
+                candidate_area + point_area - intersection
+            )
+            if overlap >= 0.75:
+                has_exact_point = True
+                break
+        if not has_exact_point:
+            cv2.circle(
+                point_mask,
+                candidate.point_xy,
+                max(3, int(round(min(height, width) * 0.004))) + 1,
+                255,
+                thickness=-1,
+            )
     return cv2.bitwise_and(point_mask, scan_mask)
 
 

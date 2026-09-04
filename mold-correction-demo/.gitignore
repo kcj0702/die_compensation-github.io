@@ -22,6 +22,16 @@ __pycache__/
 AJ_ENV/
 .pytest_cache/
 
+# Local backups created while separating review work from commit-ready code
+.local_archive/
+
+# Keep the zero-line review source visible while excluding generated previews
+experiments/*
+!experiments/zero_line_area_edge_preview/
+experiments/zero_line_area_edge_preview/results*/
+experiments/zero_line_area_edge_preview/__pycache__/
+experiments/zero_line_area_edge_preview/*.zip
+
 # Company scan inputs and generated label-removal results
 label_removal/input/*
 label_removal/output/*
@@ -33,9 +43,5 @@ label_removal/output/*
 ui/backend/file_staging/
 ui/backend/file_operation_logs/
 ui/.env
-
-# 3D 시각화 실행 중 생기는 캐시 (CAD 파싱 결과, 판독 라벨, 제로라인)
-cad_import/_parsed/
 ui/backend/.label_cache.json
-zero_line_detection/.lab_cache/
-zero_line_detection/.adaptive_cache/
+cad_import/_parsed/

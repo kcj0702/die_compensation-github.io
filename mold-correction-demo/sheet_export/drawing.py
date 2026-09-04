@@ -36,7 +36,8 @@ def emu(pixels: float) -> int:
 # --- shape bodies (no anchor wrapper; safe to nest inside a group) --------
 
 def _text_box_body(
-    shape_id: int, text: str, x: float, y: float, width: float, height: float
+    shape_id: int, text: str, x: float, y: float, width: float, height: float,
+    font_family: str | None = None,
 ) -> str:
     """Bordered white text box body. `txBox="1"` is what makes Excel treat it
     as editable text on double-click.
@@ -47,6 +48,11 @@ def _text_box_body(
     once protection is enabled, so writing every attribute as ``0`` is what
     turns the label into an exception.
     """
+    typeface = escape(font_family) if font_family else ""
+    font_xml = (
+        f'<a:latin typeface="{typeface}"/><a:ea typeface="{typeface}"/>'
+        if typeface else ""
+    )
     return (
         f'<sp macro="" textlink="">'
         f'<nvSpPr>'
@@ -67,7 +73,7 @@ def _text_box_body(
         f'<a:bodyPr vertOverflow="clip" horzOverflow="clip" wrap="none"'
         f' lIns="9000" tIns="4500" rIns="9000" bIns="4500" anchor="ctr"/>'
         f'<a:lstStyle/><a:p><a:pPr algn="ctr"/>'
-        f'<a:r><a:rPr lang="ko-KR" sz="{config.LABEL_FONT_SIZE}" b="1"/>'
+        f'<a:r><a:rPr lang="ko-KR" sz="{config.LABEL_FONT_SIZE}" b="1">{font_xml}</a:rPr>'
         f'<a:t>{escape(text)}</a:t></a:r></a:p>'
         f'</txBody></sp>'
     )
@@ -154,6 +160,7 @@ def _dot_body(shape_id: int, cx: float, cy: float, radius: float) -> str:
 def text_box(
     shape_id: int, text: str, x: float, y: float,
     width: float | None = None, height: float | None = None,
+    font_family: str | None = None,
 ) -> str:
     """Standalone text box anchor for a label.
 
@@ -163,7 +170,7 @@ def text_box(
     """
     width = config.LABEL_WIDTH if width is None else width
     height = config.LABEL_HEIGHT if height is None else height
-    body = _text_box_body(shape_id, text, x, y, width, height)
+    body = _text_box_body(shape_id, text, x, y, width, height, font_family)
     return (
         f'<absoluteAnchor>'
         f'<pos x="{emu(x)}" y="{emu(y)}"/>'

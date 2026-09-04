@@ -253,6 +253,57 @@ class BuildSheetTest(unittest.TestCase):
         self.assertEqual(sheet[config.TITLE_CELLS["part_no"]].value, "64XX2-DR000")
         self.assertEqual(sheet[config.TITLE_CELLS["applied_date"]].value, "2026-08-30")
 
+    def test_title_block_style_and_page_break_view_are_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "sheet.xlsx"
+            build_sheet(
+                [SheetView(image=_image(), points=[])],
+                TitleBlock(part_no="67XX6", part_name="JD_67XX6-DR000"),
+                output=output,
+            )
+            sheet = openpyxl.load_workbook(output).active
+
+        self.assertEqual(sheet["A1"].value, "보정 적용 내용")
+        self.assertEqual(sheet["J1"].value, "관리 NO")
+        self.assertEqual(sheet["U1"].value, "PART NAME")
+        self.assertEqual(sheet["J3"].value, "공정")
+        self.assertEqual(sheet["U3"].value, "PART NO")
+        self.assertEqual(sheet["J5"].value, "원소재")
+        self.assertEqual(sheet["U5"].value, "적용일자")
+        self.assertEqual(sheet["A1"].font.name, "휴먼옛체")
+        self.assertEqual(sheet["J1"].font.name, "돋움")
+        self.assertEqual(sheet["Y1"].font.name, "맑은 고딕")
+        self.assertEqual(sheet["Y3"].font.color.rgb, "FFFF0000")
+        self.assertEqual(sheet.sheet_view.view, "pageBreakPreview")
+        self.assertEqual(sheet.sheet_view.zoomScale, config.PAGE_BREAK_PREVIEW_ZOOM)
+        self.assertFalse(sheet.sheet_view.showGridLines)
+        self.assertEqual(str(sheet.print_area), "'00'!$A$1:$AD$40")
+        self.assertEqual(sheet.page_setup.orientation, "landscape")
+        self.assertEqual(sheet.page_setup.fitToWidth, 1)
+        self.assertEqual(sheet.page_setup.fitToHeight, 0)
+        self.assertTrue(any(item.id == config.PRINT_PAGE_ROWS for item in sheet.row_breaks.brk))
+
+    def test_custom_title_fonts_cover_heading_labels_and_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "sheet.xlsx"
+            build_sheet(
+                [SheetView(image=_image(), points=[])],
+                TitleBlock(), output=output,
+                title_fonts={
+                    "heading": "굴림",
+                    "management_label": "바탕",
+                    "management_no": "Arial",
+                },
+                title_font_sizes={"heading": 21, "management_label": 9},
+            )
+            sheet = openpyxl.load_workbook(output).active
+
+        self.assertEqual(sheet["A1"].font.name, "굴림")
+        self.assertEqual(sheet["A1"].font.sz, 21)
+        self.assertEqual(sheet["J1"].font.name, "바탕")
+        self.assertEqual(sheet["J1"].font.sz, 9)
+        self.assertEqual(sheet["M1"].font.name, "Arial")
+
     def test_detail_views_add_their_own_picture_and_caption(self) -> None:
         points = _points(5)
         front = SheetView(image=_image(), points=points)

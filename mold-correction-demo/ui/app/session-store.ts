@@ -40,6 +40,7 @@ export type SessionSnapshot = {
        손으로 그린 구역(byCad)과 달리 **품번**에 묶는다 — 파일이 바뀌어도
        부품이 같으면 같은 자리다. */
     zones?: unknown[];
+    zeroEdits?: unknown[];
   }>;
   /* 3D 주석과 공정 구역 — CAD **파일 이름**으로 묶는다.
      cadId 는 파일을 열 때마다 새로 만드는 uuid 라 새로고침을 못 넘긴다.

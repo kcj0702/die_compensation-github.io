@@ -1,7 +1,7 @@
 """UI adapter for the agreed hybrid zero-line engine.
 
 Case 1 keeps the in-house area decision.  Case 2 runs the preserved original
-Park Junhyeok route selector as one in-memory pipeline.  Keeping this adapter
+route selector as one in-memory pipeline.  Keeping this adapter
 here lets the UI use one engine without copying either implementation.
 """
 
@@ -80,6 +80,7 @@ def _detect_from_review_inputs(
     in-memory path.  A size mismatch also must not apply a mask at wrong
     pixels.
     """
+    import generate_adaptive_zero_line_preview as kdt
     import generate_final_hybrid_zero_line as hybrid
 
     spec = _matching_review_spec(filename)
@@ -91,12 +92,23 @@ def _detect_from_review_inputs(
 
     selected_case = hybrid.select_case(common["zero_ratio"], common["zero_count"])
     if selected_case == 1:
-        final_mask, _details = hybrid.run_case1(common)
+        final_mask, details = hybrid.run_case1(common)
         lines = _mask_contours_as_lines(final_mask)
-        overlay = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        tint = np.zeros_like(overlay)
-        tint[final_mask] = (0, 235, 255)
-        overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
+        # Keep the review result untouched: it is drawn on the inpainted
+        # source, with the blue zero-area fill and its 4 px boundary.  The
+        # uploaded original has labels/noise that were explicitly removed
+        # before correction and zero-line detection.
+        _board, overlay = kdt.build_board(
+            common["image"],
+            common["positive"],
+            common["negative"],
+            common["zero"],
+            "case1_contour_polygon",
+            details,
+            None,
+            common["zero_ratio"],
+            common["zero_count"],
+        )
     else:
         final_mask, details = hybrid.run_case2(common)
         lines = []
@@ -131,7 +143,7 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
 
     The distribution rule is shared with the review engine: separated zero
     components whose total area is below 40% choose case 1; all other inputs
-    choose Park Junhyeok's original case-2 routing implementation.
+    choose the original case-2 routing implementation.
     """
     try:
         review_result = _detect_from_review_inputs(image_bgr, filename)
@@ -147,7 +159,7 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
     fallback_part_px = max(1, int(base.part_mask.sum()))
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
-        import park_junhyeok_adapter as park  # loaded from EXPERIMENT_DIR
+        import case2_route_adapter as case2  # loaded from EXPERIMENT_DIR
         import generate_final_hybrid_zero_line as hybrid
         import generate_adaptive_zero_line_preview as kdt
 
@@ -180,7 +192,7 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
                 warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
             )
 
-        routed = park.run_original_case2_pipeline(
+        routed = case2.run_original_case2_pipeline(
             original_bgr=image_bgr, scale_max_mm=_scale_for(filename)
         )
         line_mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)

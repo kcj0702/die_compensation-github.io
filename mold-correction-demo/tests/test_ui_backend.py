@@ -26,6 +26,7 @@ _SERVER_IMPORT_DB_DIR = tempfile.TemporaryDirectory()
 with patch.dict(
     os.environ,
     {
+        "AJIN_CORRECTION_DB_URL": "",
         "AJIN_CORRECTION_DB_PATH": str(
             Path(_SERVER_IMPORT_DB_DIR.name) / "import-correction-history.db"
         )
@@ -33,6 +34,7 @@ with patch.dict(
 ):
     SPEC.loader.exec_module(backend_server)
 
+from core import UNKNOWN_ITEM_FOLDER, UNKNOWN_VEHICLE_FOLDER  # noqa: E402
 from label_detector import LabelCandidate  # noqa: E402
 
 
@@ -118,6 +120,22 @@ class _FocusedReader(_ScriptedReader):
         return response
 
 
+class UiBackendMarkerDifferenceTest(unittest.TestCase):
+    def test_marker_centers_are_measured_from_version_difference(self) -> None:
+        labels_inpainted = np.full((40, 60, 3), 120, dtype=np.uint8)
+        labels_points_inpainted = labels_inpainted.copy()
+        labels_points_inpainted[8:13, 17:22] = 180
+        labels_points_inpainted[25:30, 43:48] = 60
+
+        centers = backend_server._marker_centers_from_version_difference(
+            labels_inpainted, labels_points_inpainted
+        )
+
+        self.assertEqual(len(centers), 2)
+        self.assertTrue(any(np.hypot(x - 19, y - 10) < 0.1 for x, y in centers))
+        self.assertTrue(any(np.hypot(x - 45, y - 27) < 0.1 for x, y in centers))
+
+
 class UiBackendModelDiscoveryTest(unittest.TestCase):
     def test_find_qwen_model_discovers_complete_workspace_model(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -145,6 +163,580 @@ class UiBackendModelDiscoveryTest(unittest.TestCase):
         self.assertEqual(found, model_dir.resolve())
 
 
+class UiBackendFileOrganizerTest(unittest.TestCase):
+    def test_file_organizer_routes_allow_the_methods_the_ui_calls(self) -> None:
+        # 화면이 부르는 HTTP 메서드와 라우트 선언이 어긋나면 사용자에게는
+        # 'Method Not Allowed' 가 JSON 파싱 오류로만 보인다("원본 스캔" 버튼).
+        expected = {
+            "/api/file-organizer/status": {"GET"},
+            "/api/file-organizer/scan": {"GET"},
+            "/api/file-organizer/upload": {"POST"},
+            "/api/file-organizer/discard": {"POST"},
+            "/api/file-organizer/execute": {"POST"},
+            "/api/file-organizer/database": {"POST"},
+            "/api/file-organizer/folder-order": {"GET", "POST"},
+            "/api/file-organizer/paths": {"GET", "POST"},
+            "/api/file-organizer/reveal": {"POST"},
+        }
+        declared = {
+            route.path: set(route.methods or ())
+            for route in backend_server.app.routes
+            if getattr(route, "path", "").startswith("/api/file-organizer/")
+        }
+        for path, methods in expected.items():
+            self.assertIn(path, declared, f"{path} 라우트가 없습니다")
+            self.assertTrue(
+                methods <= declared[path],
+                f"{path}: 화면은 {sorted(methods)} 를 부르는데 라우트는 {sorted(declared[path])} 만 허용합니다",
+            )
+
+    def test_folder_order_accepts_every_four_axis_permutation(self) -> None:
+        expected = ["item", "vehicle", "category", "detail"]
+        self.assertTrue(backend_server.is_valid_folder_order(expected))
+        self.assertTrue(backend_server.is_valid_folder_order(["vehicle", "item", "detail", "category"]))
+        self.assertFalse(backend_server.is_valid_folder_order(["item", "vehicle", "category"]))
+        self.assertFalse(backend_server.is_valid_folder_order(["item", "item", "category", "detail"]))
+
+    def test_folder_order_migration_preserves_detail_tree_without_accumulation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            product = root / "64XX2" / "JD"
+            drawing_file = product / "02. 금형도면" / "02. 패턴도" / "OP30" / "pattern.zip"
+            document_file = product / "03. 문서" / "02. 보정이력" / "history.xlsx"
+            drawing_file.parent.mkdir(parents=True)
+            document_file.parent.mkdir(parents=True)
+            drawing_file.write_bytes(b"drawing")
+            document_file.write_bytes(b"document")
+
+            first = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "detail", "item", "vehicle"],
+            )
+            self.assertEqual(first.errors, [])
+            self.assertEqual(first.moved, 2)
+            moved_drawing = (
+                root / "02. 금형도면" / "02. 패턴도" / "OP30"
+                / "64XX2" / "JD" / "pattern.zip"
+            )
+            moved_document = (
+                root / "03. 문서" / "02. 보정이력"
+                / "64XX2" / "JD" / "history.xlsx"
+            )
+            self.assertEqual(moved_drawing.read_bytes(), b"drawing")
+            self.assertEqual(moved_document.read_bytes(), b"document")
+
+            second = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["item", "vehicle", "category", "detail"],
+            )
+            self.assertEqual(second.errors, [])
+            self.assertEqual(second.moved, 2)
+            self.assertEqual(drawing_file.read_bytes(), b"drawing")
+            self.assertEqual(document_file.read_bytes(), b"document")
+
+            # 같은 순서로 다시 저장하면 이미 제자리인 파일은 건드리지 않는다.
+            again = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["item", "vehicle", "category", "detail"],
+            )
+            self.assertEqual(again.moved, 0)
+            self.assertEqual(again.errors, [])
+
+    def test_placeholder_only_tree_reports_the_structure_it_rebuilt(self) -> None:
+        """빈 폴더뿐인 트리도 배치가 바뀌었음을 알려야 한다.
+
+        .gitkeep 은 옮긴 파일로 세지 않으므로, 실제 파일이 없는 트리에서는
+        moved 가 늘 0 이다. 그것만 보고 화면이 "제자리입니다"라고 알리면
+        폴더는 실제로 재배치됐는데 아무 일도 없었던 것처럼 보인다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            keep = root / "64XX2" / "JD" / "01. 3D제품데이터" / ".gitkeep"
+            keep.parent.mkdir(parents=True)
+            keep.touch()
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 0)
+            self.assertEqual(result.structure_moved, 1)
+            self.assertTrue(
+                (root / "01. 3D제품데이터" / "JD" / "64XX2" / ".gitkeep").exists()
+            )
+            self.assertFalse(keep.exists())
+
+            # 같은 순서로 다시 저장하면 옮길 것이 없으므로 둘 다 0 이어야 한다.
+            again = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+            self.assertEqual(again.moved, 0)
+            self.assertEqual(again.structure_moved, 0)
+
+    def test_classification_follows_selected_folder_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["category", "detail", "item", "vehicle"],
+            )
+            result = classifier.classify(
+                Path("JM_67312-DZ000_DASH LWR_OP30_패턴도_260825.zip")
+            )
+            self.assertEqual(
+                result.target_dir.relative_to(destination_root).parts,
+                ("02. 금형도면", "02. 패턴도", "OP30", "67312", "JM"),
+            )
+
+    def test_existing_item_folder_is_recognized_when_item_is_not_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            existing = (
+                destination_root / "02. 금형도면" / "02. 패턴도" / "OP30" / "67312"
+            )
+            existing.mkdir(parents=True)
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["category", "detail", "item", "vehicle"],
+            )
+
+            result = classifier.classify(
+                Path("JM_67312-DZ000_DASH LWR_OP30_패턴도_260825.zip")
+            )
+
+            self.assertEqual(result.matched_product_folder, "67312")
+
+    def test_migration_moves_files_under_unknown_vehicle_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            source = (
+                root / "67312" / UNKNOWN_VEHICLE_FOLDER
+                / "02. 금형도면" / "02. 패턴도" / "OP30"
+            )
+            source.mkdir(parents=True)
+            (source / "pattern.zip").write_bytes(b"drawing")
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["vehicle", "item", "category", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 1)
+            moved = (
+                root / UNKNOWN_VEHICLE_FOLDER / "67312"
+                / "02. 금형도면" / "02. 패턴도" / "OP30" / "pattern.zip"
+            )
+            self.assertEqual(moved.read_bytes(), b"drawing")
+
+    def test_migration_recognizes_vehicle_not_registered_in_rules(self) -> None:
+        # 분류기는 rules.json 에 없는 새 차종 폴더도 스스로 만든다. 순서 변경이
+        # 그 폴더를 못 알아보면 새 차종 자료만 옛 구조에 남는다.
+        self.assertNotIn("XM", backend_server.FILE_ORGANIZER_RULES["customers"])
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            source = root / "71612" / "XM" / "02. 금형도면" / "01. 구조도" / "OP30"
+            source.mkdir(parents=True)
+            (source / "structure.zip").write_bytes(b"drawing")
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["vehicle", "item", "category", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 1)
+            moved = (
+                root / "XM" / "71612" / "02. 금형도면" / "01. 구조도" / "OP30"
+                / "structure.zip"
+            )
+            self.assertEqual(moved.read_bytes(), b"drawing")
+
+    def test_classify_shares_family_folder_across_detail_suffixes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["item", "vehicle", "category", "detail"],
+            )
+
+            first = classifier.classify(
+                Path("JM_67312-DZ000_DASH LWR_OP30_패턴도_260825.zip")
+            )
+            self.assertIsNotNone(first.target_dir)
+            first.target_dir.mkdir(parents=True)
+
+            # 앞자리 계열 코드가 같으면 상세 코드가 달라도 같은 품번 폴더를 쓴다.
+            second = classifier.classify(
+                Path("JM_67312-DZ001_DASH LWR_OP20_완성도_260825.zip")
+            )
+
+            product_dir = destination_root / "67312" / "JM"
+            self.assertEqual(
+                first.target_dir.relative_to(product_dir).parts,
+                ("02. 금형도면", "02. 패턴도", "OP30"),
+            )
+            self.assertEqual(
+                second.target_dir.relative_to(product_dir).parts,
+                ("02. 금형도면", "03. 완성도", "OP20"),
+            )
+            self.assertEqual(second.matched_product_folder, "67312")
+
+    def test_excel_detail_tags_select_drawing_document_and_nc_subfolders(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            product_root = destination_root / "64XX2" / "JD"
+            for category in ("02. 금형도면", "03. 문서", "06. NC DATA"):
+                (product_root / category).mkdir(parents=True)
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["item", "vehicle", "category", "detail"],
+            )
+
+            drawing = classifier.classify(
+                Path("JD_64XX2-DR000_PNL DASH_OP30_패턴도_260825.zip")
+            )
+            document = classifier.classify(
+                Path("JD_64XX2-DR000_보정적용_260825.xlsx")
+            )
+            nc_data = classifier.classify(
+                Path("260825_JD_64XX2-DR000_DASH_OP50_형상_UPRDIE_NC DATA.ZIP")
+            )
+
+            self.assertEqual(drawing.category_key, "02")
+            self.assertEqual(drawing.detail_path, "02. 패턴도/OP30")
+            self.assertEqual(
+                drawing.target_dir.relative_to(product_root).parts,
+                ("02. 금형도면", "02. 패턴도", "OP30"),
+            )
+            self.assertEqual(document.detail_path, "02. 보정이력")
+            self.assertEqual(
+                document.target_dir.relative_to(product_root).parts,
+                ("03. 문서", "02. 보정이력"),
+            )
+            self.assertEqual(nc_data.category_key, "06")
+            self.assertEqual(nc_data.detail_path, "OP50")
+            self.assertEqual(
+                nc_data.target_dir.relative_to(product_root).parts,
+                ("06. NC DATA", "OP50"),
+            )
+
+    def test_legacy_saved_folder_order_falls_back_to_default_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = Path(temp)
+            (settings / ".folder_order.json").write_text(
+                json.dumps(["product", "category"]), encoding="utf-8"
+            )
+            self.assertEqual(
+                backend_server.load_folder_order(settings),
+                ["item", "vehicle", "category", "detail"],
+            )
+
+    def test_classify_proposes_new_folder_for_unseen_customer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            destination_root = Path(temp) / "organized"
+            destination_root.mkdir()
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                destination_root,
+                ["item", "vehicle", "category", "detail"],
+            )
+
+            result = classifier.classify(Path("JDZ_12345-XX000_NEW PART_260825.dwg"))
+
+            self.assertEqual(result.item_no, "12345-XX000")
+            self.assertEqual(result.customer, "JDZ")
+            self.assertEqual(result.category_key, "02")
+            self.assertIsNotNone(result.target_dir)
+            self.assertEqual(
+                result.target_dir.relative_to(destination_root).parts,
+                ("12345", "JDZ", "02. 금형도면"),
+            )
+
+    def test_scan_classifies_product_data_into_existing_part_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            source_root.mkdir()
+            detail = destination_root / "64XX2" / "JD" / "01. 3D제품데이터"
+            detail.mkdir(parents=True)
+            source = source_root / "64XX2-DR000 제품데이터.png"
+            source.write_bytes(b"demo")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["item", "vehicle", "category", "detail"],
+            ):
+                items = backend_server._scan_organizer_source()
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["itemNo"], "64XX2-DR000")
+            self.assertEqual(items[0]["categoryKey"], "01")
+            self.assertIn("64XX2/JD/01. 3D제품데이터", items[0]["targetDir"])
+
+    def test_execute_copies_file_and_keeps_local_audit_log_without_database(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            log_root = root / "logs"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            staging_root.mkdir()
+            detail = destination_root / "64XX2" / "JD" / "01. 3D제품데이터"
+            detail.mkdir(parents=True)
+            source = source_root / "64XX2-DR000 제품데이터.png"
+            source.write_bytes(b"demo")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(backend_server, "FILE_LOG_ROOT", log_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ), patch.object(backend_server, "_active_file_database_url", return_value=""), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["item", "vehicle", "category", "detail"],
+            ):
+                response = backend_server._execute_file_organizer(
+                    {
+                        "operation": "copy",
+                        "conflict": "rename",
+                        "items": [{"sourcePath": str(source)}],
+                    }
+                )
+            copied = detail / source.name
+            self.assertTrue(source.exists())
+            self.assertEqual(copied.read_bytes(), b"demo")
+            self.assertEqual(response["results"][0]["status"], "success")
+            self.assertIn("로컬 감사 로그", response["databaseNote"])
+            self.assertEqual(len(list(log_root.glob("*.jsonl"))), 1)
+
+    def test_unclassifiable_file_goes_to_the_unclassified_folder_not_the_root(self) -> None:
+        """화면이 비운 대상 폴더를 루트로 읽지 않는지 확인한다.
+
+        품번이나 카테고리를 못 읽은 파일은 대상 폴더가 빈 문자열로 내려오고
+        화면은 그 자리에 '_미분류'를 보여 준다. 빈 문자열을 "사용자가 고른
+        폴더"로 받으면 정리 폴더 루트가 되어, 화면 표시와 달리 파일이 품번
+        폴더들 옆에 그대로 쌓인다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            log_root = root / "logs"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            staging_root.mkdir()
+            destination_root.mkdir()
+            # 품번도 차종도 없어 놓을 자리를 못 정하는 이름이다.
+            source = source_root / "성형해석 리포트 260825.ppt"
+            source.write_bytes(b"demo")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(backend_server, "FILE_LOG_ROOT", log_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ), patch.object(backend_server, "_active_file_database_url", return_value=""), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["vehicle", "category", "item", "detail"],
+            ):
+                scanned = backend_server._scan_organizer_source()
+                self.assertEqual(scanned[0]["targetDir"], "")
+                response = backend_server._execute_file_organizer(
+                    {
+                        "operation": "copy",
+                        "conflict": "rename",
+                        # 화면이 실제로 보내는 모양 그대로다.
+                        "items": [
+                            {"sourcePath": str(source), "targetDir": scanned[0]["targetDir"]}
+                        ],
+                    }
+                )
+
+            self.assertEqual(response["results"][0]["status"], "success")
+            unclassified = destination_root / "_미분류" / source.name
+            self.assertTrue(unclassified.exists(), "_미분류 로 가야 한다")
+            self.assertFalse(
+                (destination_root / source.name).exists(), "정리 폴더 루트에 남으면 안 된다"
+            )
+
+    def _classify_names(self, root, names, order=None):
+        classifier = backend_server.FilenameClassifier(
+            backend_server.FILE_ORGANIZER_RULES,
+            root,
+            order or ["vehicle", "category", "item", "detail"],
+        )
+        results = backend_server.classify_batch(classifier, [Path(n) for n in names])
+        return dict(zip(names, results))
+
+    def test_missing_item_no_is_borrowed_from_the_same_product_in_the_batch(self) -> None:
+        """품번이 빠진 파일은 같은 제품 파일의 품번을 참고해 태깅한다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            donor = "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip"
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(root, [donor, receiver])
+
+            borrowed = found[receiver]
+            self.assertEqual(borrowed.item_no, "67312-DZ000")
+            self.assertEqual(borrowed.family, "67312")
+            self.assertIsNotNone(borrowed.target_dir)
+            self.assertEqual(
+                borrowed.target_dir.relative_to(root).parts,
+                ("JM", "03. 문서", "67312", "01. 성형해석"),
+            )
+            self.assertTrue(
+                any(donor in reason for reason in borrowed.reasons),
+                "어느 파일에서 참고했는지 근거에 남아야 한다",
+            )
+            # 파일명에 품번이 적힌 쪽은 그대로다.
+            self.assertEqual(found[donor].item_no, "67312-DZ000")
+
+    def test_borrowed_item_no_scores_lower_than_one_read_from_the_filename(self) -> None:
+        """빌린 품번은 파일명에 적힌 품번보다 약한 근거이므로 신뢰도가 낮다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            donor = "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip"
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(root, [donor, receiver])
+            self.assertLess(found[receiver].confidence, found[donor].confidence)
+
+    def test_item_no_is_not_borrowed_when_the_same_product_has_two_item_numbers(self) -> None:
+        """같은 제품에 품번이 둘이면 지어내지 않고 미분류로 둔다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                [
+                    "JM_67312-DZ000_DASH LWR_OP20_완성도_260825.zip",
+                    "JM_67313-DZ000_DASH LWR_OP30_패턴도_260825.zip",
+                    receiver,
+                ],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+            # 품번을 지어내는 대신 자리표시 폴더에 모은다.
+            self.assertIn(
+                UNKNOWN_ITEM_FOLDER,
+                found[receiver].target_dir.relative_to(root).parts,
+            )
+
+    def test_item_no_is_not_borrowed_across_different_vehicles(self) -> None:
+        """차종이 다르면 품번을 물려받지 않는다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                ["XM_71612-DZ000_DASH LWR_OP20_완성도_260825.zip", receiver],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+            parts = found[receiver].target_dir.relative_to(root).parts
+            self.assertIn(UNKNOWN_ITEM_FOLDER, parts)
+            self.assertNotIn("71612", parts, "다른 차종의 품번을 가져오면 안 된다")
+            self.assertEqual(parts[0], "JM", "자기 차종 아래에 있어야 한다")
+
+    def test_item_no_is_not_borrowed_across_different_product_names(self) -> None:
+        """품명이 다르면 같은 차종이어도 물려받지 않는다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(
+                root,
+                ["JM_67312-DZ000_PNL HOOD INR_OP20_완성도_260825.zip", receiver],
+            )
+            self.assertEqual(found[receiver].item_no, "")
+
+    def test_vehicle_without_item_no_is_collected_under_a_placeholder_folder(self) -> None:
+        """차종·자료유형은 읽혔는데 품번만 없으면 차종 아래 자리표시로 모은다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            name = "260825_JDZ_DASH LWR_OP10_형상_UPRDIE_NC DATA.ZIP"
+            result = self._classify_names(root, [name])[name]
+
+            self.assertEqual(result.customer, "JDZ")
+            self.assertEqual(result.item_no, "")
+            self.assertIsNotNone(result.target_dir)
+            self.assertEqual(
+                result.target_dir.relative_to(root).parts,
+                ("JDZ", "06. NC DATA", UNKNOWN_ITEM_FOLDER, "OP10"),
+            )
+
+    def test_file_without_vehicle_and_item_no_still_goes_unclassified(self) -> None:
+        """차종까지 모르면 놓을 자리를 정할 수 없으므로 미분류로 남긴다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            name = "성형해석 리포트 260825.ppt"
+            result = self._classify_names(root, [name])[name]
+            self.assertEqual(result.customer, "")
+            self.assertEqual(result.item_no, "")
+            self.assertIsNone(result.target_dir)
+
+    def test_placeholder_item_folder_survives_a_folder_order_change(self) -> None:
+        """자리표시 폴더도 순서 변경 때 같이 옮겨져야 한다.
+
+        마이그레이션이 '_품번미확인'을 품번 칸으로 알아보지 못하면 이 폴더의
+        파일만 옛 자리에 남아 두 구조가 섞인다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            source = (
+                root / "JDZ" / "06. NC DATA"
+                / UNKNOWN_ITEM_FOLDER / "OP10" / "nc.zip"
+            )
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"nc")
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 1)
+            moved = (
+                root / "06. NC DATA" / "JDZ"
+                / UNKNOWN_ITEM_FOLDER / "OP10" / "nc.zip"
+            )
+            self.assertEqual(moved.read_bytes(), b"nc")
+            self.assertFalse(source.exists())
+
+    def test_source_path_outside_allowed_roots_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            staging_root.mkdir()
+            outside = root / "outside.txt"
+            outside.write_text("no", encoding="utf-8")
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ):
+                with self.assertRaisesRegex(ValueError, "허용된 원본"):
+                    backend_server._safe_organizer_source(str(outside))
+
+
 class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -155,6 +747,72 @@ class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.db_patch.start()
         self.addCleanup(self.db_patch.stop)
+        self.env_patch = patch.dict(os.environ, {"AJIN_CORRECTION_DB_URL": ""})
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
+    def test_mysql_url_is_parsed_without_exposing_credentials(self) -> None:
+        config = backend_server._mysql_connection_config(
+            "mysql://adc_user:p%40ss@db.internal:3307/ajin_adc"
+            "?charset=utf8mb4&connect_timeout=12"
+        )
+
+        self.assertEqual(config["host"], "db.internal")
+        self.assertEqual(config["port"], 3307)
+        self.assertEqual(config["user"], "adc_user")
+        self.assertEqual(config["password"], "p@ss")
+        self.assertEqual(config["database"], "ajin_adc")
+        self.assertEqual(config["charset"], "utf8mb4")
+        self.assertEqual(config["connection_timeout"], 12)
+        self.assertFalse(config["autocommit"])
+
+    def test_mysql_adapter_uses_server_parameter_markers(self) -> None:
+        class FakeCursor:
+            def __init__(self) -> None:
+                self.statement = ""
+                self.params: tuple[object, ...] = ()
+
+            def execute(self, statement, params) -> None:
+                self.statement = statement
+                self.params = params
+
+            def close(self) -> None:
+                pass
+
+        class FakeConnection:
+            def __init__(self) -> None:
+                self.cursor_instance = FakeCursor()
+                self.dictionary = False
+
+            def cursor(self, *, dictionary=False):
+                self.dictionary = dictionary
+                return self.cursor_instance
+
+        raw = FakeConnection()
+        connection = backend_server._CorrectionConnection(raw, "mysql")
+        cursor = connection.execute(
+            "SELECT * FROM correction_history WHERE part_no = ? AND id = ?",
+            ("64XX2", 7),
+        )
+
+        self.assertTrue(raw.dictionary)
+        self.assertEqual(
+            cursor.statement,
+            "SELECT * FROM correction_history WHERE part_no = %s AND id = %s",
+        )
+        self.assertEqual(cursor.params, ("64XX2", 7))
+
+    def test_invalid_mysql_url_is_rejected(self) -> None:
+        invalid_urls = (
+            "postgresql://user:pass@db/ajin",
+            "mysql://db/ajin",
+            "mysql://user@db",
+            "mysql://user@db/ajin?connect_timeout=slow",
+        )
+        for database_url in invalid_urls:
+            with self.subTest(database_url=database_url):
+                with self.assertRaises(ValueError):
+                    backend_server._mysql_connection_config(database_url)
 
     def test_legacy_database_is_migrated_without_changing_existing_row(self) -> None:
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
@@ -403,6 +1061,19 @@ class UiBackendCorrectionHistoryTest(unittest.IsolatedAsyncioTestCase):
                     )
                 )
                 self.assertEqual(response.status_code, 422)
+
+    async def test_database_outage_returns_service_unavailable(self) -> None:
+        with patch.object(
+            backend_server,
+            "_get_correction_db",
+            side_effect=backend_server.CorrectionDatabaseError("offline"),
+        ):
+            response = await backend_server.list_corrections(
+                _json_request(method="GET", query={"partNo": "64XX2"})
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("error", _response_json(response))
 
 
 class UiBackendStrictReadingTest(unittest.TestCase):

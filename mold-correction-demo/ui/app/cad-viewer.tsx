@@ -1144,7 +1144,16 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       return need;
     };
 
-    const startDir = new THREE.Vector3(0.62, 0.46, 0.79).normalize();
+    // 기본 화면은 가장 얇은 축에서 바라봐 판금의 넓은 면이 먼저 보이게 한다.
+    // 등각 고정 시 긴 패널이 옆면만 보이는 문제가 있었다.
+    const dimensions = box.getSize(new THREE.Vector3());
+    const thinAxis = dimensions.x <= dimensions.y && dimensions.x <= dimensions.z
+      ? 0 : dimensions.y <= dimensions.z ? 1 : 2;
+    const startDir = new THREE.Vector3();
+    startDir.setComponent(thinAxis, 1);
+    startDir.setComponent((thinAxis + 1) % 3, 0.12);
+    startDir.setComponent((thinAxis + 2) % 3, 0.08);
+    startDir.normalize();
     if (overlay?.fit) {
       const along = [0, 0, 0];
       along[overlay.fit.axis] = overlay.fit.sign >= 0 ? 1 : -1;
@@ -1328,7 +1337,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         return;
       }
       const hit = raycaster.intersectObjects(holesRoot.children, false)
-        .find((entry) => entry.object.userData?.hole);
+        .find((entry: any) => entry.object.userData?.hole);
       setPicked(hit ? (hit.object.userData.hole as CadHole) : null);
     };
     // ── 공정 구역 붓 ─────────────────────────────────────────
@@ -1514,17 +1523,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     };
     tick();
 
+    let resizeFrame = 0;
     const resize = new ResizeObserver(() => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
       const w = mount.clientWidth, h = mount.clientHeight;
       if (!w || !h) return;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      // CSS 크기는 건드리지 않아 ResizeObserver 자기 호출을 막는다.
+      renderer.setSize(w, h, false);
+      });
     });
     resize.observe(mount);
 
     return () => {
       cancelAnimationFrame(loop);
+      cancelAnimationFrame(resizeFrame);
       resize.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onButtonDown);
       renderer.domElement.removeEventListener('pointermove', onMove);
@@ -1537,7 +1552,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
       renderer.dispose();
-      scene.traverse((node) => {
+      scene.traverse((node: any) => {
         const any = node as THREE.Mesh;
         any.geometry?.dispose?.();
         const material = any.material as THREE.Material | THREE.Material[] | undefined;
