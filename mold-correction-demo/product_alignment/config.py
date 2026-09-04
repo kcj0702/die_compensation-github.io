@@ -5,6 +5,9 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 PRODUCT_DIR = ROOT_DIR / "data" / "product"
 ALIGNMENT_DIR = ROOT_DIR / "data" / "alignment"
+# CATIA 에서 export 한 STEP/STL 을 품번당 한 파일로 보관한다. PNG 가 없어도
+# 여기 파일이 있으면 스캔 방향에 맞춰 뷰를 즉석에서 렌더한다.
+MESH_DIR = ROOT_DIR / "data" / "product_mesh"
 
 # 제품데이터는 초록/파랑 CAD 렌더에 검은 외곽선이 얹힌 흰 배경 이미지다.
 # label_removal.build_scan_mask와 같은 "흰색에서 얼마나 떨어졌는가" 기준을 쓴다.
