@@ -55,6 +55,8 @@ ROW_POINTS = 14.0         # 양식의 행 높이(pt)
 PAGE_ROWS = 40            # 한 페이지가 40행. 실제 시트도 이만큼씩 반복된다
 PROCESS_ROW = 36          # 공정 표기가 들어갈 자리(그림 아래)
 PROCESS_COL = 2           # B 열
+CAPTION_ROW = 7           # 그림 바로 위 줄 — 어느 시점 그림인지 적는다
+CAPTION_COL = 2           # B 열
 
 PLUS = (63, 72, 224)      # BGR — 살이 많다(깎는다)
 MINUS = (224, 127, 47)    # BGR — 살이 부족하다(붙인다)
@@ -118,6 +120,7 @@ def build_workbook(
     applied_at: str | None = None,
     coefficient: float = 1.0,
     processes: list | None = None,
+    captions: list | None = None,
 ) -> bytes:
     """현업 양식으로 채운 엑셀 파일을 바이트로 준다."""
     import openpyxl
@@ -163,6 +166,14 @@ def build_workbook(
         anchor_row = int("".join(ch for ch in IMAGE_ANCHOR if ch.isdigit())) + offset
         anchor_col = "".join(ch for ch in IMAGE_ANCHOR if ch.isalpha())
         page.add_image(picture, f"{anchor_col}{anchor_row}")
+
+        # 그림 바로 위에 그 쪽이 무슨 그림인지 적는다 — "3D 형상 · 우측"
+        # 처럼. 3D 는 돌려 놓고 찍으므로 방향을 안 적으면 나중에 못 가린다.
+        if captions and index < len(captions) and captions[index]:
+            head = page.cell(CAPTION_ROW + offset, CAPTION_COL)
+            head.value = str(captions[index])
+            head.font = Font(size=9, bold=True)
+            head.alignment = Alignment(horizontal="left", vertical="center")
 
     if len(pages) > 1:
         page.print_area = f"A1:AD{PAGE_ROWS * len(pages)}"

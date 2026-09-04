@@ -1756,8 +1756,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     link.click();
     URL.revokeObjectURL(url);
   };
-  /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다. */
-  const [shots, setShots] = useState<string[]>([]);
+  /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다.
+     어느 시점에서 찍었는지 함께 들고 있는다 — 엑셀 쪽마다 그 이름을
+     적어 두지 않으면 나중에 보는 사람이 방향을 못 가린다. */
+  const [shots, setShots] = useState<{ url: string; label: string }[]>([]);
   const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
   const [sheetError, setSheetError] = useState<string | null>(null);
 
@@ -1770,7 +1772,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       const response = await fetch(`${API_BASE}/api/sheet-excel`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          analysisId, corrections: sheetValues.values, images: shots,
+          analysisId, corrections: sheetValues.values,
+          images: shots.map((shot) => shot.url),
+          imageLabels: shots.map((shot) => shot.label),
           meta: {
             partNo: scan?.result?.naming?.part_no || scan?.partNo,
             partName: scan?.result?.naming?.part_name || '',
@@ -2079,7 +2083,8 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   sheetValues={sheetValues?.values ?? null}
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
-                  onCapture={(url) => setShots((current) => [...current, url])}
+                  onCapture={(url, label) =>
+                    setShots((current) => [...current, { url, label }])}
                   morph={morph} morphMode={morphMode}
                   regions={[...standardZones, ...(regionsByCad[notesKey] ?? [])]}
                   onRegionsChange={(next) => notesKey && setRegionsByCad(
@@ -2338,6 +2343,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   </button>
                   {shots.length > 0 && <button type="button" className="tool-button"
                     onClick={() => setShots([])}>담은 화면 비우기</button>}
+
                   <button type="button" className="tool-button" onClick={buildMorph}
                     disabled={morphState === 'working'}>
                     {morphState === 'working' ? '만드는 중…' : '보정 후 형상'}
@@ -2392,6 +2398,30 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                     ({overlay.rejected.slice(0, 4).map((r) => r.id).join(', ')}
                     {overlay.rejected.length > 4 ? ' 외' : ''})
                   </span>}
+              </div>}
+              {/* 담은 화면을 눈으로 확인하고 한 장씩 뺀다.
+                  예전에는 "화면 3장" 이라는 숫자뿐이라, 잘못 담으면
+                  전부 비우고 처음부터 다시 찍는 수밖에 없었다.
+                  순서가 곧 엑셀의 쪽 순서다(1쪽은 늘 스캔 전체도). */}
+              {shots.length > 0 && <div className="shot-strip">
+                <span className="shot-strip__head">
+                  시트에 담은 화면 {shots.length}장 · 1쪽은 스캔 전체도이고
+                  아래 순서대로 2쪽부터 붙습니다
+                </span>
+                <div className="shot-strip__row">
+                  {shots.map((shot, order) => (
+                    <figure key={`${shot.label}-${order}`} className="shot-card">
+                      <img src={shot.url} alt={`${shot.label} 화면`} />
+                      <figcaption>{order + 2}쪽 · {shot.label}</figcaption>
+                      <button type="button" aria-label={`${shot.label} 화면 빼기`}
+                        title="이 화면만 뺍니다"
+                        onClick={() => setShots((current) =>
+                          current.filter((_, index) => index !== order))}>
+                        <X size={12} />
+                      </button>
+                    </figure>
+                  ))}
+                </div>
               </div>}
             </>
           : <div className="cad-drop">

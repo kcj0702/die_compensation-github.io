@@ -1535,7 +1535,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
 
 
 def sheet_excel_for(analysis_id: str, corrections: dict,
-                    meta: dict, images: list | None = None) -> bytes:
+                    meta: dict, images: list | None = None,
+                    image_labels: list | None = None) -> bytes:
     """최종 보정시트를 현업 엑셀 양식으로 만든다.
 
     보정량은 화면이 준다 — 작업자가 고친 값과 계수가 반영된 최종값이다.
@@ -1576,7 +1577,9 @@ def sheet_excel_for(analysis_id: str, corrections: dict,
     points.sort(key=lambda p: p.point_id)
 
     pages: list = []
-    for raw in (images or []):
+    captions: list = []
+    labels = list(image_labels or [])
+    for order, raw in enumerate(images or []):
         text = str(raw or "")
         if "," in text:
             text = text.split(",", 1)[1]
@@ -1587,14 +1590,20 @@ def sheet_excel_for(analysis_id: str, corrections: dict,
             shot = None
         if shot is not None:
             pages.append(shot)
+            # 어느 시점에서 찍은 그림인지 쪽마다 적어 둔다. 3D 화면은
+            # 돌려 놓고 찍으면 나중에 방향을 못 가린다.
+            name = str(labels[order]) if order < len(labels) else ""
+            captions.append(f"3D 형상 · {name}" if name else "3D 형상")
     # 1쪽은 **항상** 스캔에 보정치를 그린 전체도다. 예전에는 3D 화면을
     # 담아 두면 그걸로 1쪽을 통째로 대체해서, 정합이 어긋난 CAD 캡처
     # 한 장이 시트가 됐다 — "71XX2 로 만들었는데 다른 제품이 나온다" 는
     # 말이 그것이었다. 현업 시트도 전체도가 먼저고 상세도가 뒤따른다.
     pages = [draw_sheet_image(base_bgr, points)] + pages
+    captions = ["스캔 전체도 · 보정치"] + captions
 
     return build_workbook(
         pages, points,
+        captions=captions,
         part_no=str(meta.get("partNo") or entry.get("part_no") or ""),
         part_name=str(meta.get("partName") or ""),
         process=str(meta.get("process") or ""),
@@ -1615,11 +1624,13 @@ async def sheet_excel(request: Request) -> Response:
         images = body.get("images")
         if isinstance(images, str):
             images = [images]
+        image_labels = body.get("imageLabels")
         payload = await run_in_threadpool(
             sheet_excel_for, str(body.get("analysisId") or ""),
             {str(k): float(v) for k, v in corrections.items()},
             body.get("meta") or {},
             images if isinstance(images, list) else None,
+            image_labels if isinstance(image_labels, list) else None,
         )
         name = str(body.get("filename") or "보정시트") + ".xlsx"
         quoted = urllib.parse.quote(name)

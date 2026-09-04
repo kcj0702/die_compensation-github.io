@@ -348,7 +348,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   notes?: CadNote[];
   onNotesChange?: (notes: CadNote[]) => void;
   /* 지금 보이는 화면을 PNG 로 넘겨준다 — 보정시트에 넣을 그림이다. */
-  onCapture?: (dataUrl: string) => void;
+  onCapture?: (dataUrl: string, viewName: string) => void;
   regions?: CadRegion[];
   onRegionsChange?: (regions: CadRegion[]) => void;
   /* 보정 후 형상. 있으면 원본과 겹쳐 보거나 갈아 끼울 수 있다. */
@@ -383,6 +383,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      못 하고, 마우스 가운데 버튼이 없는 사람도 있다. 버튼으로 준다. */
   const rollRef = useRef(0);
   const [roll, setRoll] = useState(0);
+  /* 지금 보고 있는 시점의 이름. 시트에 담을 때 어느 방향에서 본
+     그림인지 같이 적는다 — 현업 시트도 전체도와 상세도를 따로 싣고,
+     나중에 보는 사람은 그림만으로는 방향을 못 가린다. */
+  const [viewName, setViewName] = useState('등각');
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
      핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
@@ -447,7 +451,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const surfaceRef = useRef<THREE.Mesh | null>(null);
   const viewApi = useRef<{
     frame: (direction: THREE.Vector3) => void;
-    snapshot: () => string;
+    snapshot: (scale?: number) => string;
     /* 카메라를 지금 값으로 다시 세운다(화면 돌리기 등). */
     refresh: () => void;
     centre: THREE.Vector3; radius: number;
@@ -1227,6 +1231,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         // 부호가 CATIA 기준이다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다.
         spherical.theta += dx * 0.005;
         spherical.phi += dy * 0.005;
+        // 손으로 돌린 순간부터는 표준 뷰가 아니다.
+        setViewName((current) => (current === '자유 시점' ? current : '자유 시점'));
       } else if (mode === 'pan') {
         const height = mount.clientHeight || 1;
         const perPixel = 2 * spherical.radius
@@ -1497,9 +1503,31 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       spherical.setFromVector3(dir.multiplyScalar(fitDistance(dir)));
       applyCamera();
     };
-    const snapshot = () => {
+    /* 화면을 그림으로 굽는다.
+     *
+     * [왜 배율이 필요한가]
+     * 보정시트는 A4 가로로 인쇄된다. 양식의 그림 자리가 597pt 인데
+     * 화면 캔버스는 CSS 1000 x 470 이라, 그대로 실으면 인쇄에서 글자와
+     * 지시선이 뭉개진다. 시트에 담을 때만 버퍼를 키워 다시 그린다.
+     * setSize 의 셋째 인자를 false 로 둬야 CSS 크기는 그대로고 그리는
+     * 버퍼만 커진다 — 화면이 출렁이지 않는다. */
+    const snapshot = (scale = 1) => {
+      const canvas = renderer.domElement;
+      if (scale <= 1) {
+        renderer.render(scene, camera);
+        return canvas.toDataURL('image/png');
+      }
+      const wide = canvas.clientWidth || canvas.width;
+      const high = canvas.clientHeight || canvas.height;
+      const ratio = renderer.getPixelRatio();
+      renderer.setPixelRatio(Math.min(ratio * scale, 4));
+      renderer.setSize(wide, high, false);
       renderer.render(scene, camera);
-      return renderer.domElement.toDataURL('image/png');
+      const url = canvas.toDataURL('image/png');
+      renderer.setPixelRatio(ratio);
+      renderer.setSize(wide, high, false);
+      renderer.render(scene, camera);
+      return url;
     };
     viewApi.current = { frame, snapshot, refresh: applyCamera,
                         centre: centre.clone(), radius,
@@ -1750,11 +1778,45 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         const patch = geometry.clone();
         patch.setIndex(keep);
         const skin = new THREE.Mesh(patch, new THREE.MeshBasicMaterial({
-          color: 0xff5fa8, transparent: true, opacity: 0.42,
+          // 칠은 옅게 깐다. 진하게 칠하면 그 아래 형상과 보정량이 묻힌다.
+          color: 0xff5fa8, transparent: true, opacity: 0.26,
           side: THREE.DoubleSide, depthWrite: false,
+          // 테두리와 같은 자리를 다투지 않게 살짝 뒤로 민다.
+          polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
         }));
         skin.renderOrder = 6;
         root.add(skin);
+
+        /* 테두리 — 구역을 "깔끔하게" 보이게 하는 것은 칠이 아니라 이 선이다.
+         *
+         * 칠만 하면 삼각망을 따라 가장자리가 들쭉날쭉해 색칠한 자국처럼
+         * 보인다(실측 67XX6 에서 그랬다). 고른 삼각형 집합에서 **한 번만
+         * 나오는 모서리**가 곧 그 구역의 바깥선이다 — 안쪽 모서리는 이웃한
+         * 삼각형 둘이 공유하므로 두 번 나온다. 그 선만 그리면 곡면을 그대로
+         * 따라가는 닫힌 윤곽이 남는다. */
+        const rim = new Map<string, [number, number]>();
+        for (let i = 0; i < keep.length; i += 3) {
+          const corner = [keep[i], keep[i + 1], keep[i + 2]];
+          for (let k = 0; k < 3; k += 1) {
+            const from = corner[k], to = corner[(k + 1) % 3];
+            const key = from < to ? `${from}_${to}` : `${to}_${from}`;
+            if (rim.has(key)) rim.delete(key);   // 안쪽 모서리
+            else rim.set(key, [from, to]);
+          }
+        }
+        if (rim.size) {
+          const line: number[] = [];
+          rim.forEach(([from, to]) => {
+            line.push(position.getX(from), position.getY(from), position.getZ(from));
+            line.push(position.getX(to), position.getY(to), position.getZ(to));
+          });
+          const edge = new THREE.LineSegments(
+            new THREE.BufferGeometry().setAttribute(
+              'position', new THREE.Float32BufferAttribute(line, 3)),
+            new THREE.LineBasicMaterial({ color: 0xd6146e, depthWrite: false }));
+          edge.renderOrder = 7;
+          root.add(edge);
+        }
       }
 
       // 시트 표기와 같은 말로 적는다 — "① 하형 용접".
@@ -1838,16 +1900,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     else void box?.requestFullscreen?.();
   };
 
-  const goToView = (dir: [number, number, number]) => {
+  const goToView = (dir: [number, number, number], label?: string) => {
     viewApi.current?.frame(new THREE.Vector3(...dir));
+    if (label) setViewName(label);
   };
 
   const saveImage = () => {
-    const url = viewApi.current?.snapshot();
+    const url = viewApi.current?.snapshot(2);
     if (!url) return;
     const link = document.createElement('a');
     link.href = url;
-    link.download = `${mesh.summary.name || 'part'}.png`;
+    link.download = `${mesh.summary.name || 'part'}_${viewName}.png`;
     link.click();
   };
 
@@ -1864,6 +1927,69 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   useEffect(() => { detailRef.current = detail; }, [detail]);
 
   if (error) return <div className="cad-viewer__error">{error}</div>;
+
+  /* 제로라인 기준으로 공정 구역을 저절로 잡는다.
+   *
+   * [왜 이게 되는가]
+   * 제로라인은 보정량의 **부호가 뒤집히는 자리**다. 그 선을 넘어가면
+   * 할 일이 바뀐다 — 안쪽(+)은 살을 붙이고(용접), 바깥쪽(-)은 깎는다
+   * (CNC 가공). 그러니 부호가 같은 포인트끼리 묶으면 그 덩어리가 곧
+   * 한 공정 구역이고, 구역의 경계는 제로라인이 된다. 손으로 칠하는
+   * 것과 달리 근거가 보정값 자체라 사람마다 달라지지 않는다.
+   *
+   * [묶는 규칙]
+   * 부호가 같고 서로 가까운 것끼리 잇는다(단일 연결). 거리 기준은
+   * 부품 크기의 12% — 이보다 좁히면 포인트마다 구역이 하나씩 생기고,
+   * 넓히면 제로라인 건너편까지 한 구역으로 삼킨다. 부호가 다른 것은
+   * 애초에 서로 안 묶이므로 제로라인을 넘지 않는다. */
+  const zonesFromZeroLine = () => {
+    const points = (overlay?.points ?? [])
+      .map((p) => ({ at: p.position, value: sheetValues?.[p.id] }))
+      .filter((p): p is { at: [number, number, number]; value: number } =>
+        typeof p.value === 'number' && Math.abs(p.value) >= 0.05);
+    if (!points.length || !onRegionsChange) return;
+
+    const scale = viewApi.current?.radius ?? 100;
+    const near = scale * 0.12;
+    const nearSq = near * near;
+    const gap = (a: number[], b: number[]) =>
+      (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+
+    const made: CadRegion[] = [];
+    for (const sign of [1, -1]) {
+      const mine = points.filter((p) => Math.sign(p.value) === sign);
+      const taken = new Array(mine.length).fill(false);
+      for (let seed = 0; seed < mine.length; seed += 1) {
+        if (taken[seed]) continue;
+        // 씨앗에서 이웃을 타고 번져 나간다 — 같은 부호 안에서만.
+        const group = [seed];
+        taken[seed] = true;
+        for (let cursor = 0; cursor < group.length; cursor += 1) {
+          for (let other = 0; other < mine.length; other += 1) {
+            if (taken[other]) continue;
+            if (gap(mine[group[cursor]].at, mine[other].at) > nearSq) continue;
+            taken[other] = true;
+            group.push(other);
+          }
+        }
+        if (group.length < 2) continue;   // 외톨이 하나는 구역이라 하지 않는다
+        const worst = Math.max(...group.map((k) => Math.abs(mine[k].value)));
+        made.push({
+          id: `Z-${sign > 0 ? 'W' : 'C'}${made.length}-${Date.now().toString(36)}`,
+          // 붙일 자리는 용접, 깎을 자리는 가공. 금형은 사람이 고른다.
+          die: '하형',
+          work: sign > 0 ? '용접' : '가공',
+          note: `제로라인 기준 자동 · 포인트 ${group.length}개 · `
+                + `최대 ${(sign * worst).toFixed(2)}mm`,
+          stamps: group.map((k) => ({ at: mine[k].at, radius: near * 0.55 })),
+        });
+      }
+    }
+    // 손으로 그린 구역은 남기고 자동 구역만 갈아 끼운다.
+    const byHand = (regions ?? []).filter((r) => !r.id.startsWith('Z-'));
+    onRegionsChange([...byHand, ...made]);
+    setZoning(true);
+  };
 
   const sheetCount = overlay?.points
     ?.filter((p) => typeof sheetValues?.[p.id] === 'number').length ?? 0;
@@ -1918,7 +2044,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
     <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
       {VIEWS.map((view) => (
-        <button key={view.id} type="button" onClick={() => goToView(view.dir)}>
+        <button key={view.id} type="button"
+          className={viewName === view.label ? 'is-on' : undefined}
+          onClick={() => goToView(view.dir, view.label)}>
           {view.label}
         </button>
       ))}
@@ -1938,10 +2066,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장
       </button>
-      {onCapture && <button type="button" title="이 화면을 보정시트에 담습니다"
+      {onCapture && <button type="button"
+        title={`지금 보이는 ${viewName} 화면을 인쇄 해상도로 시트에 담습니다`}
         onClick={() => {
-          const url = viewApi.current?.snapshot();
-          if (url) onCapture(url);
+          // 시트에 실을 그림만 2배로 굽는다. 화면용 해상도로 실으면
+          // A4 인쇄에서 콜아웃 숫자가 뭉개진다.
+          const url = viewApi.current?.snapshot(2);
+          if (url) onCapture(url, viewName);
         }}>시트에 담기</button>}
     </div>
 
@@ -2110,6 +2241,25 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
               value={zoneRadius}
               onChange={(event) => setZoneRadius(Number(event.target.value))} />
           </> : <em>형상 위에서 끌면 그만큼이 구역이 됩니다</em>}
+        </div>
+        {/* 제로라인이 곧 공정의 경계다 — 손으로 칠하지 않고 보정값 부호로
+            구역을 잡는다. 손으로 그린 구역은 그대로 남는다. */}
+        <div className="cad-viewer__zone-tools cad-viewer__zone-auto">
+          <button type="button" onClick={zonesFromZeroLine}
+            disabled={!sheetCount}
+            title={sheetCount
+              ? '보정량 부호가 바뀌는 자리(제로라인)를 경계로 삼아 + 는 용접, - 는 가공 구역으로 잡습니다'
+              : '먼저 스캔을 골라 보정량을 올리세요'}>
+            제로라인 기준 자동
+          </button>
+          {(regions ?? []).some((r) => r.id.startsWith('Z-')) && (
+            <button type="button"
+              title="자동으로 잡은 구역만 지웁니다 (손으로 그린 것은 남습니다)"
+              onClick={() => onRegionsChange?.(
+                (regions ?? []).filter((r) => !r.id.startsWith('Z-')))}>
+              자동 구역 지우기
+            </button>
+          )}
         </div>
         {(regions ?? []).map((region, order) => (
           <div key={region.id}
