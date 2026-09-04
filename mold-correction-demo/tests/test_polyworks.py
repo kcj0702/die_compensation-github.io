@@ -125,6 +125,89 @@ def test_PLY_로_쓰고_다시_읽는다(tmp_path, cloud_file):
     assert np.abs(다시 - points).max() < 0.001
 
 
+def hex_of(value: float) -> str:
+    """실수를 워크스페이스가 쓰는 빅엔디언 hex 글자로 바꾼다."""
+    import struct as _struct
+    return _struct.pack(">d", value).hex().upper()
+
+
+def write_metadata(vault: Path, body: str) -> Path:
+    target = vault / "2c" / "meta"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        '<?xml version="1.0" encoding="UTF-8" standalone="no" ?>\n'
+        f"<Objects>{body}</Objects>\n" + " " * 1200,
+        encoding="utf-8")
+    return target
+
+
+def surf_point(name: str, spot: tuple, normal: tuple, deviation: float) -> str:
+    """실측 구조 그대로 검사 포인트 하나를 짓는다."""
+    corner = "".join(f"<E>{hex_of(v)}</E>" for v in spot)
+    way = "".join(f"<E>{hex_of(v)}</E>" for v in normal)
+    return (
+        f'<O id="x" clsid="CmpPtSurf">'
+        f'<P id="Name">{name}</P>'
+        f'<P id="PiercePt">{corner}</P>'
+        f'<P id="EffectiveNormal">{way}</P>'
+        f"</O>"
+        f'<O id="y" clsid="CmpPtDim">'
+        f'<P id="DimName"><E>1</E><E>Surface Distance</E></P>'
+        f'<P id="Deviation">{hex_of(deviation)}</P>'
+        f"</O>"
+    )
+
+
+def test_검사_포인트를_자리와_값째로_꺼낸다(tmp_path):
+    work = tmp_path / "스캔.pwk"
+    work.write_text("<?xml version=\"1.0\"?><PolyworksWorkspace/>",
+                    encoding="utf-8")
+    vault = tmp_path / "스캔_Files" / "wm-data" / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    write_metadata(vault, (
+        surf_point("surf pt 6", (473.8, -739.3, 340.7), (-0.05, -0.99, 0.0), -2.79)
+        + surf_point("surf pt 7", (476.7, -743.8, 374.6), (0.0, -1.0, 0.0), -2.02)
+    ))
+
+    points = polyworks.inspection_points(work)
+    assert [p.name for p in points] == ["surf pt 6", "surf pt 7"]
+    assert points[0].position == pytest.approx((473.8, -739.3, 340.7))
+    assert points[0].deviation == pytest.approx(-2.79)
+    assert points[1].deviation == pytest.approx(-2.02)
+    assert points[0].normal == pytest.approx((-0.05, -0.99, 0.0))
+
+
+def test_표면거리가_아닌_값은_섞지_않는다(tmp_path):
+    """한 포인트에 각도·반경 같은 다른 값이 함께 붙는다.
+
+    실측 파일은 CmpPtSurf 79개에 CmpPtDim 이 1580개였다 — 포인트마다
+    값이 여러 개다. 표면 거리만 골라야 편차가 엉뚱한 값으로 덮이지 않는다.
+    """
+    work = tmp_path / "스캔.pwk"
+    work.write_text("<x/>", encoding="utf-8")
+    vault = tmp_path / "스캔_Files" / "wm-data" / "vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    write_metadata(vault, (
+        f'<O clsid="CmpPtSurf">'
+        f'<P id="Name">surf pt 1</P>'
+        f'<P id="PiercePt">{"".join(f"<E>{hex_of(v)}</E>" for v in (1.0, 2.0, 3.0))}</P>'
+        f"</O>"
+        # 표면 거리가 아닌 값이 먼저 온다 — 이걸 집으면 안 된다.
+        f'<O clsid="CmpPtDim">'
+        f'<P id="DimName"><E>1</E><E>Angle</E></P>'
+        f'<P id="Deviation">{hex_of(88.0)}</P>'
+        f"</O>"
+        f'<O clsid="CmpPtDim">'
+        f'<P id="DimName"><E>1</E><E>Surface Distance</E></P>'
+        f'<P id="Deviation">{hex_of(-0.42)}</P>'
+        f"</O>"
+    ))
+
+    points = polyworks.inspection_points(work)
+    assert len(points) == 1
+    assert points[0].deviation == pytest.approx(-0.42)
+
+
 def test_워크스페이스에서_점군을_찾는다(tmp_path):
     """`.pwk` 를 주면 옆의 `_Files/wm-data/vault` 를 훑는다."""
     work = tmp_path / "스캔.pwk"

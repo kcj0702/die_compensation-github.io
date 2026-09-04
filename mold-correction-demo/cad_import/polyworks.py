@@ -33,6 +33,7 @@ SHA-1 이름으로 흩어져 있다(git 과 같은 방식이다). 형식은 공�
 """
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,5 +198,126 @@ def decimate(points: np.ndarray, target: int) -> np.ndarray:
     return points[::step][:target]
 
 
-__all__ = ["ScanCloud", "clouds_in", "decimate", "looks_like_cloud",
-           "read_cloud"]
+# ── 검사 포인트 ─────────────────────────────────────────────
+#
+# [무엇을 꺼내는가]
+# 우리가 PNG 에서 힘들게 읽던 그 콜아웃이다. 지금 파이프라인은 라벨을
+# 지우고, 지시선 끝점을 찾고, Qwen 으로 숫자를 읽는다(실측 79개). 그
+# 숫자와 자리가 워크스페이스 안에 **그대로** 들어 있다 — 읽을 것도,
+# 컬러바로 색을 되돌릴 것도 없다.
+#
+# 구조는 이렇다.
+#   <O clsid="CmpPtSurf">   검사 포인트 하나
+#     <P id="Name">surf pt 6</P>
+#     <P id="PiercePt">      부품 좌표(mm) — hex float64 셋
+#     <P id="EffectiveNormal">  그 자리의 법선
+#   <O clsid="CmpPtDim">    그 포인트에 딸린 값들
+#     <P id="DimName">... Surface Distance
+#     <P id="Deviation">     편차(mm) — hex float64
+#
+# 값은 IEEE754 를 **빅엔디언 hex 글자**로 적어 둔다(점군의 리틀엔디언
+# 바이트와 다르다). CmpPtDim 은 바로 앞의 CmpPtSurf 에 딸린다.
+
+_OBJECT = None      # 정규식은 처음 쓸 때 만든다(임포트를 가볍게 둔다)
+
+
+def _hex_float(text: str) -> float:
+    """`C00650A7BB663A3D` 같은 빅엔디언 hex 를 실수로 되돌린다."""
+    return struct.unpack(">d", bytes.fromhex(text.strip()))[0]
+
+
+def _hex_triple(block: str) -> list:
+    return [_hex_float(x) for x in re.findall(r"<E>([0-9A-Fa-f]{16})</E>", block)]
+
+
+@dataclass
+class InspectionPoint:
+    """검사 포인트 하나 — 자리와 편차."""
+
+    name: str
+    position: tuple                # (x, y, z) 부품 좌표 mm
+    normal: tuple | None           # 그 자리의 법선
+    deviation: float | None        # mm. + 는 살이 더 있음, - 는 모자람
+
+    def as_dict(self) -> dict:
+        return {"name": self.name, "position": list(self.position),
+                "normal": list(self.normal) if self.normal else None,
+                "deviation": self.deviation}
+
+
+def inspection_points(workspace: Path) -> list:
+    """워크스페이스에서 검사 포인트를 모두 꺼낸다.
+
+    Returns:
+        InspectionPoint 목록. 실측 "3D스캔 AX과제" 에서 79개가 나온다 —
+        우리 PNG 파이프라인이 읽어 내던 것과 같은 수다.
+    """
+    global _OBJECT
+    if _OBJECT is None:
+        _OBJECT = re.compile(
+            r'<O\b[^>]*clsid="(CmpPtSurf|CmpPtDim)"[^>]*>(.*?)</O>', re.S)
+
+    text = _metadata_text(workspace)
+    out: list = []
+    for kind, body in _OBJECT.findall(text):
+        if kind == "CmpPtSurf":
+            pierce = re.search(r'<P id="PiercePt">(.*?)</P>', body, re.S)
+            if pierce is None:
+                continue
+            spot = _hex_triple(pierce.group(1))
+            if len(spot) != 3:
+                continue
+            normal = re.search(r'<P id="EffectiveNormal">(.*?)</P>', body, re.S)
+            way = _hex_triple(normal.group(1)) if normal else []
+            name = re.search(r'<P id="Name">([^<]*)</P>', body)
+            out.append(InspectionPoint(
+                name=(name.group(1) if name else f"pt {len(out) + 1}"),
+                position=tuple(spot),
+                normal=tuple(way) if len(way) == 3 else None,
+                deviation=None))
+        elif out and out[-1].deviation is None:
+            # 바로 앞 포인트에 딸린 값이다. 표면 거리만 쓴다 — 같은
+            # 포인트에 각도나 반경 같은 다른 값이 함께 붙기도 한다.
+            if "Surface Distance" not in body:
+                continue
+            found = re.search(r'<P id="Deviation">([0-9A-Fa-f]{16})</P>', body)
+            if found:
+                out[-1].deviation = _hex_float(found.group(1))
+    return out
+
+
+def _metadata_text(workspace: Path) -> str:
+    """워크스페이스의 XML 메타데이터를 찾아 읽는다.
+
+    vault 안에 XML 로 된 파일이 하나 있다(실측 4.2MB). 이름이 SHA-1 이라
+    머리를 보고 가린다.
+    """
+    root = Path(workspace)
+    if root.suffix.lower() == ".pwk":
+        root = root.with_name(root.stem + "_Files")
+    vault = root / "wm-data" / "vault"
+    if not vault.is_dir():
+        found = list(root.glob("*_Files/wm-data/vault"))
+        if not found:
+            raise FileNotFoundError(f"vault 를 찾지 못했습니다: {root}")
+        vault = found[0]
+
+    best = ""
+    for item in vault.rglob("*"):
+        if not item.is_file() or item.stat().st_size < 1024:
+            continue
+        with item.open("rb") as handle:
+            head = handle.read(64)
+        if b"<?xml" not in head:
+            continue
+        text = item.read_text(encoding="utf-8", errors="replace")
+        # 검사 포인트가 든 쪽을 고른다. 워크스페이스 XML 이 여러 개다.
+        if "CmpPtSurf" in text and len(text) > len(best):
+            best = text
+    if not best:
+        raise FileNotFoundError("검사 포인트가 든 메타데이터를 찾지 못했습니다")
+    return best
+
+
+__all__ = ["InspectionPoint", "ScanCloud", "clouds_in", "decimate",
+           "inspection_points", "looks_like_cloud", "read_cloud"]
