@@ -1115,6 +1115,9 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             tone = parsed.get("colour") or {}
             web["colour"] = tone.get("dominant")
             web["palette"] = list(tone.get("palette", {}).keys())[:8]
+            # 한 부품이 여러 색이면 삼각형 구간으로 준다 — 실측 71XX1 은
+            # 회색 몸통(74,594)에 아랫부분만 분홍(11,581)이다.
+            web["colourGroups"] = parsed.get("colour_groups") or []
 
             # 오버레이(제로라인·보정량)를 그리려면 원본 삼각망이 필요하다.
             # 화면용 메시는 간략화돼 있어 광선 교차에 쓰면 어긋난다.

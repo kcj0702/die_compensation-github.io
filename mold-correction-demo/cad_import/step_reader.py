@@ -170,23 +170,86 @@ def load_step_coloured(path: str | Path):
     for i in range(1, roots.Length() + 1):
         builder.Add(bundle, shapes.GetShape_s(roots.Value(i)))
 
+    """색을 어느 단계에서 찾나 — 면이 아니라 **껍질(shell)** 이다.
+
+    처음에는 면에만 물었는데 71XX1 이 죄다 흰색으로 나왔다. CATIA 화면은
+    회색과 분홍 두 가지인데 말이다. 단계별로 세어 보니 —
+
+        SOLID    1개   #C1C4C0
+        SHELL   11개   #D9D9D9 6 · #FF00FF 2 · #FF99CC 1 · #857489 1 · 없음 1
+        FACE  3,682개  #FFFFFF 2,359 · 없음 1,323
+
+    세 파일을 다 세어 보니 색이 어느 단계에 있는지가 파일마다 다르다 —
+
+        64XX1  SOLID #C1C4C0 · SHELL #C1C4C0 48 · FACE #00FF00 6,126
+        67XX6  SOLID #83AAD6 3 · #0080FF 2 · SHELL #0080FF 25 · FACE 없음 6,899
+        71XX1  SOLID #C1C4C0 · SHELL #FF99CC 1 · #D9D9D9 6 · FACE #FFFFFF 2,359
+
+    CATIA 화면과 맞는 것은 **껍질** 이다. 71XX1 은 회색 몸통에 아랫부분만
+    분홍인데 그 분홍이 껍질에 있고, 67XX6 의 파랑도 껍질·솔리드에만 있다.
+    면의 흰색(71XX1)은 물어보면 나오지만 화면에 그 색으로 보이지 않는다 —
+    OCCT 가 물려받은 기본값을 돌려주는 것이라 믿을 값이 아니다.
+
+    그래서 껍질 -> 솔리드 -> 면 순으로 본다. 어느 단계에도 없으면 None 을
+    주고, 화면이 기본 회색으로 칠한다.
+    """
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
+                              TopTools_IndexedMapOfShape)
+
+    def tone_of(shape_item):
+        tone = Quantity_Color()
+        for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
+                     XCAFDoc_ColorType.XCAFDoc_ColorGen):
+            if colours.GetColor(shape_item, kind, tone):
+                return _to_hex(tone)
+        return None
+
+    # 면이 어느 껍질에 속하는지 미리 훑어 둔다.
+    parents = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(bundle, TopAbs_ShapeEnum.TopAbs_FACE,
+                                   TopAbs_ShapeEnum.TopAbs_SHELL, parents)
+    solid_tone = None
+    solids = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(bundle, TopAbs_ShapeEnum.TopAbs_SOLID, solids)
+    if solids.Extent():
+        solid_tone = tone_of(solids.FindKey(1))
+
+    shell_tone: dict = {}
+
+    def colour_of(face) -> str | None:
+        # 껍질 색이 있으면 그것이 CATIA 가 보여 주는 색이다.
+        try:
+            index = parents.FindIndex(face)
+        except Exception:
+            index = 0
+        if index:
+            shells = parents.FindFromIndex(index)
+            if shells.Extent():
+                shell = shells.First()
+                # OCP 판에 따라 HashCode 가 없다. 파이썬 해시로 갈음한다 —
+                # 같은 껍질이면 같은 값이 나오면 그만이다.
+                key = hash(shell)
+                if key not in shell_tone:
+                    shell_tone[key] = tone_of(shell)
+                if shell_tone[key]:
+                    return shell_tone[key]
+        return solid_tone or tone_of(face)
+
     spread: dict = {}
     walker = TopExp_Explorer(bundle, TopAbs_ShapeEnum.TopAbs_FACE)
     while walker.More():
         face = TopoDS.Face_s(walker.Current())
-        tone = Quantity_Color()
-        for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
-                     XCAFDoc_ColorType.XCAFDoc_ColorGen):
-            if colours.GetColor(face, kind, tone):
-                got = _to_hex(tone)
-                spread[got] = spread.get(got, 0.0) + _face_area(face)
-                break
+        got = colour_of(face)
+        if got:
+            spread[got] = spread.get(got, 0.0) + _face_area(face)
         walker.Next()
 
     top = max(spread, key=spread.get) if spread else None
     return bundle, {"dominant": top,
                     "palette": {k: round(v, 1) for k, v in sorted(
-                        spread.items(), key=lambda kv: -kv[1])}}
+                        spread.items(), key=lambda kv: -kv[1])},
+                    "of_face": colour_of}
 
 
 def face_colours(path: str | Path) -> dict:
@@ -212,8 +275,16 @@ def face_colours(path: str | Path) -> dict:
     return load_step_coloured(path)[1]
 
 
-def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
-    """B-Rep 을 삼각망으로 바꾼다. (vertices Nx3, faces Mx3) 을 준다."""
+def tessellate(shape, deflection: float = DEFAULT_DEFLECTION,
+               colour_of=None):
+    """B-Rep 을 삼각망으로 바꾼다. (vertices Nx3, faces Mx3) 을 준다.
+
+    colour_of 를 주면 색깔이 같은 삼각형끼리 이어 붙이고 구간 목록을
+    함께 돌려준다 — (vertices, faces, [(색, 시작삼각형, 개수), ...]).
+    CATIA 는 한 부품을 여러 색으로 칠한다(실측 71XX1 은 회색 몸통에
+    아랫부분만 분홍이다). 정점마다 색을 실어 보내면 30만 개가 넘어 무거우니
+    구간으로 준다 — three.js 의 geometry group 과 그대로 맞는다.
+    """
     from OCP.BRep import BRep_Tool
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
@@ -223,12 +294,17 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
 
     BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
 
-    all_v: list = []
-    all_f: list = []
-    offset = 0
+    # 색깔별 주머니. 색을 안 쓰면 주머니 하나에 다 담긴다.
+    buckets: dict = {}
+    order: list = []
     explorer = TopExp_Explorer(shape, TopAbs_ShapeEnum.TopAbs_FACE)
     while explorer.More():
         face = TopoDS.Face_s(explorer.Current())
+        tone = colour_of(face) if colour_of is not None else None
+        if tone not in buckets:
+            buckets[tone] = {"v": [], "f": [], "n": 0}
+            order.append(tone)
+        bucket = buckets[tone]
         location = TopLoc_Location()
         triangulation = BRep_Tool.Triangulation_s(face, location)
         if triangulation is not None:
@@ -247,14 +323,34 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
                 # 뒤집힌 면은 정점 순서를 바꿔야 법선이 바깥을 향한다
                 tris[i - 1] = (a - 1, c - 1, b - 1) if reversed_face else (a - 1, b - 1, c - 1)
 
-            all_v.append(verts)
-            all_f.append(tris + offset)
-            offset += n_nodes
+            bucket["v"].append(verts)
+            bucket["f"].append(tris + bucket["n"])
+            bucket["n"] += n_nodes
         explorer.Next()
 
-    if not all_v:
+    if not any(b["v"] for b in buckets.values()):
         raise ValueError("테셀레이션 결과가 비었습니다.")
-    return np.vstack(all_v), np.vstack(all_f)
+
+    all_v: list = []
+    all_f: list = []
+    groups: list = []
+    start = 0
+    shift = 0
+    for tone in order:
+        bucket = buckets[tone]
+        if not bucket["v"]:
+            continue
+        faces_here = np.vstack(bucket["f"]) + shift
+        all_v.append(np.vstack(bucket["v"]))
+        all_f.append(faces_here)
+        groups.append((tone, start, len(faces_here)))
+        start += len(faces_here)
+        shift += bucket["n"]
+
+    vertices, faces = np.vstack(all_v), np.vstack(all_f)
+    if colour_of is None:
+        return vertices, faces
+    return vertices, faces, groups
 
 
 def _face_props(face) -> tuple:
@@ -638,9 +734,10 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 5      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 6      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
                        # 4: CATIA 면 색(colour)을 함께 담는다
                        # 5: 그 색을 선형에서 sRGB 로 되돌린다
+                       # 6: 껍질 단위 색과 삼각형 구간을 담는다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
@@ -696,16 +793,20 @@ def read_step_full(
                     "planes": meta["planes"],
                     "counts": meta["counts"],
                     "colour": meta.get("colour"),
+                    "colour_groups": meta.get("colour_groups") or [],
                 }
         except Exception:
             cached = None      # 캐시가 깨져도 그냥 다시 읽으면 된다
 
     # 형상과 색을 한 번에 읽는다. 색을 못 읽는 파일이면 형상만 다시 읽는다.
+    groups: list = []
     try:
         shape, colour = load_step_coloured(path)
+        vertices, faces, groups = tessellate(
+            shape, deflection, colour_of=colour.pop("of_face"))
     except Exception:
         shape, colour = load_step(path), None
-    vertices, faces = tessellate(shape, deflection)
+        vertices, faces = tessellate(shape, deflection)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
     # 원통은 find_cylinders 안에서 이미 면을 합쳐 놓았다(_merge_cylinder_faces).
@@ -724,6 +825,8 @@ def read_step_full(
             "planes": len(planes),
         },
         "colour": colour,
+        # 색이 같은 삼각형 구간. three.js 의 geometry group 과 그대로 맞는다.
+        "colour_groups": [[t, int(a), int(n)] for t, a, n in groups if t],
     }
     if cached is not None:
         try:

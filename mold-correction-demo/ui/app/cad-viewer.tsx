@@ -101,6 +101,9 @@ export type CadMesh = {
      쓴다 — 실측 64XX1 은 #00FF00, 71XX1 은 #FFFFFF, 67XX6 은 여섯 색이다. */
   colour?: string | null;
   palette?: string[];
+  /* 색이 같은 삼각형 구간 [색, 시작삼각형, 개수]. CATIA 는 한 부품을
+     여러 색으로 칠한다 — 실측 71XX1 은 회색 몸통에 아랫부분만 분홍이다. */
+  colourGroups?: [string, number, number][];
   note?: string;
 };
 
@@ -688,6 +691,17 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 손으로 정한 색이 먼저, 없으면 CATIA 가 STEP 에 넣어 둔 색.
     const chosen = partTintRef.current ?? mesh.colour;
     const catia = (!painted && chosen) ? new THREE.Color(chosen) : null;
+
+    /* CATIA 는 한 부품을 여러 색으로 칠한다 — 실측 71XX1 은 회색 몸통
+     * (삼각형 74,594)에 아랫부분만 분홍(11,581)이다. 색이 같은 삼각형을
+     * 구간으로 받아 재질을 여러 개 붙인다. 정점마다 색을 실으면 30만 개가
+     * 넘어 무겁고, 히트맵이 쓰는 정점색과도 부딪힌다.
+     *
+     * 히트맵을 칠할 때나 손으로 색을 정했을 때는 구간을 쓰지 않는다 —
+     * 그때는 온 부품이 한 색이어야 뜻이 맞는다. */
+    const bands = (!painted && !partTintRef.current
+                   && (mesh.colourGroups?.length ?? 0) > 1)
+      ? mesh.colourGroups! : null;
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: painted ? 0xffffff : (catia ?? SURFACE),
       vertexColors: painted,
@@ -706,12 +720,35 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       clippingPlanes: clipRefValue.current === null ? [] : [clipPlane],
     }));
     clipPlane.constant = clipRefValue.current ?? 0;
+
+    if (bands) {
+      // 구간마다 같은 설정에 색만 바꾼 재질을 붙인다.
+      const base = surface.material as THREE.MeshStandardMaterial;
+      const coats = bands.map(([tone]) => {
+        const coat = base.clone();
+        coat.color = new THREE.Color(tone);
+        return coat;
+      });
+      geometry.clearGroups();
+      bands.forEach(([, start, count], slot) => {
+        // three 는 삼각형이 아니라 정점 번호로 센다.
+        geometry.addGroup(start * 3, count * 3, slot);
+      });
+      base.dispose();
+      // Mesh 는 재질 하나로 만들어 두었다. 여러 개를 다는 것은 three 가
+      // 허락하지만 타입 정의가 좁아 여기서만 넓혀 준다.
+      (surface as unknown as { material: THREE.Material[] }).material = coats;
+    }
+
     // 겹쳐 볼 때는 원본을 반투명 뼈대로 남긴다
     if (morph && morphMode === 'after') surface.visible = false;
     else if (morph && morphMode === 'both') {
-      const material = surface.material as THREE.MeshStandardMaterial;
-      material.transparent = true;
-      material.opacity = 0.28;
+      const coats = Array.isArray(surface.material)
+        ? surface.material : [surface.material];
+      for (const coat of coats as THREE.MeshStandardMaterial[]) {
+        coat.transparent = true;
+        coat.opacity = 0.28;
+      }
     }
     scene.add(surface);
     solidMesh.current = surface;
