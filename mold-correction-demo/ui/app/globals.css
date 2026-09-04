@@ -238,6 +238,14 @@ button { cursor: pointer; }
 .cad-overlay-bar select:focus-visible{outline:2px solid #6fb4e8;outline-offset:1px}
 .cad-overlay-bar__note{color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
 .cad-overlay-bar__err{color:#bd4650;font-size:8.5px}
+.cad-align-panel,.cad-zone-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cad-align-panel{margin:10px 0;padding:12px 14px;border:1px solid #dfe5ea;border-radius:9px;background:#f8fafb}
+.cad-align-panel label{display:flex;align-items:center;gap:5px;color:#5b6878;font-size:10px;font-weight:700}
+.cad-align-panel input{width:72px;height:30px;padding:0 7px;border:1px solid #ccd5df;border-radius:6px}
+.cad-zone-book{margin-top:12px;padding:14px}
+.cad-zone-row{margin-top:9px;padding:9px;border:1px solid #e1e5e9;border-radius:7px;background:#fafbfc;font-size:10px}
+.cad-zone-row input{min-width:180px;flex:1;height:30px;padding:0 8px;border:1px solid #d4dae0;border-radius:6px}
+.cad-zone-row select{height:30px;border:1px solid #d4dae0;border-radius:6px;background:#fff}
 .cad-error p{margin:5px 0 0;color:#95626a;font-size:9px;line-height:1.5}
 @media(max-width:900px){.cad-layout{grid-template-columns:1fr}}
 .anchor-layer{z-index:8}
@@ -536,6 +544,13 @@ button { cursor: pointer; }
   border-radius:7px; color:#33404f; background:#fff; cursor:pointer; font:inherit; font-size:9px; font-weight:750; }
 .sheet-print:hover { border-color:#c1650f; color:#a8560c; background:#fff8f0; }
 .sheet-print svg { color:#c1650f; }
+
+.cad-file-tabs{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 12px}
+.cad-file-tab{display:flex;align-items:center;border:1px solid #d8dee6;border-radius:7px;background:#fff;overflow:hidden}
+.cad-file-tab.active{border-color:#4d91c8;background:#eef7ff}
+.cad-file-tab button{height:30px;padding:0 10px;border:0;background:transparent;color:#526174;font-size:9px}
+.cad-file-tab button:last-child{padding:0 7px;border-left:1px solid #d8dee6;color:#8b95a2}
+.cad-file-tab.active button:first-child{color:#245f8c;font-weight:700}
 
 @media print {
   @page { size: A4 landscape; margin: 0; }

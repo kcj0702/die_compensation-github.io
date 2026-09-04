@@ -52,6 +52,52 @@ TITLE_CELLS = {
     "applied_date": "Y5",
 }
 
+TITLE_LABEL_CELLS = {
+    "management_label": "J1",
+    "part_name_label": "U1",
+    "process_label": "J3",
+    "part_no_label": "U3",
+    "material_label": "J5",
+    "applied_date_label": "U5",
+}
+
+TITLE_BLOCK_MERGES = (
+    "A1:I6",
+    "J1:L2", "M1:T2", "U1:X2", "Y1:AD2",
+    "J3:L4", "M3:T4", "U3:X4", "Y3:AD4",
+    "J5:L6", "M5:T6", "U5:X6", "Y5:AD6",
+)
+
+TITLE_DEFAULT_FONTS = {
+    "heading": "휴먼옛체",
+    "management_label": "돋움",
+    "management_no": "맑은 고딕",
+    "part_name_label": "돋움",
+    "part_name": "맑은 고딕",
+    "process_label": "돋움",
+    "process": "맑은 고딕",
+    "part_no_label": "돋움",
+    "part_no": "맑은 고딕",
+    "material_label": "돋움",
+    "material": "맑은 고딕",
+    "applied_date_label": "돋움",
+    "applied_date": "맑은 고딕",
+}
+
+TITLE_DEFAULT_SIZES = {
+    "heading": 18,
+    "management_label": 10, "management_no": 10,
+    "part_name_label": 10, "part_name": 10,
+    "process_label": 10, "process": 10,
+    "part_no_label": 10, "part_no": 10,
+    "material_label": 10, "material": 10,
+    "applied_date_label": 10, "applied_date": 10,
+}
+
+PRINT_AREA = "A1:AD40"
+PRINT_PAGE_ROWS = 40
+PAGE_BREAK_PREVIEW_ZOOM = 85
+
 # 표제란 왼쪽 여백에 들어가는 시트 제목. 양식에는 비어 있는 A1:I6 영역이라
 # 새로 병합해서 채운다.
 SHEET_HEADING_TEXT = "보정 적용 내용"

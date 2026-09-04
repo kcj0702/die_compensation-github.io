@@ -1337,7 +1337,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         return;
       }
       const hit = raycaster.intersectObjects(holesRoot.children, false)
-        .find((entry) => entry.object.userData?.hole);
+        .find((entry: any) => entry.object.userData?.hole);
       setPicked(hit ? (hit.object.userData.hole as CadHole) : null);
     };
     // ── 공정 구역 붓 ─────────────────────────────────────────
@@ -1552,7 +1552,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
       renderer.dispose();
-      scene.traverse((node) => {
+      scene.traverse((node: any) => {
         const any = node as THREE.Mesh;
         any.geometry?.dispose?.();
         const material = any.material as THREE.Material | THREE.Material[] | undefined;
