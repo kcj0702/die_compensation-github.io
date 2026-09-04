@@ -1965,8 +1965,11 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(raw_item, dict):
             raise ValueError("파일 항목 형식이 올바르지 않습니다.")
         source = _safe_organizer_source(str(raw_item.get("sourcePath", "")))
-        manual_target = raw_item.get("targetDir")
-        parsed_items.append((source, str(manual_target) if manual_target is not None else None))
+        # 분류가 안 된 파일은 화면이 대상 폴더를 빈 문자열로 돌려보내고 그 자리에
+        # '_미분류' 를 보여 준다. 빈 값을 "사용자가 고른 폴더"로 받으면 정리 폴더
+        # 루트가 되어, 화면 표시와 달리 파일이 품번 폴더들 옆에 쌓인다.
+        manual_target = str(raw_item.get("targetDir") or "").strip() or None
+        parsed_items.append((source, manual_target))
 
     classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
     sources = [source for source, _ in parsed_items]
