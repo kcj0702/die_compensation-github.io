@@ -770,3 +770,5 @@ button { cursor: pointer; }
 /* 부품 색 고르개 */
 .cad-viewer__tint{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
 .cad-viewer__tint input{width:20px;height:18px;padding:0;border:0;border-radius:3px;background:none;cursor:pointer}
+.cad-viewer__swatches{display:inline-flex;align-items:center;gap:2px;padding:4px 6px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
+.cad-viewer__swatches i{width:11px;height:11px;border-radius:2px;border:1px solid rgba(255,255,255,.3)}

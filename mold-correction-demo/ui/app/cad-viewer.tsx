@@ -443,9 +443,24 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   /* 부품 색을 손으로 정한 값. STEP 이 색을 안 들고 있거나(면 대부분이
      색 없음) CATIA 에서 보던 것과 다를 때 쓴다 — 실측 67XX6 은 파랑
      #0080FF 이 팔레트에 등록만 돼 있고 어느 면에도 안 칠해져 있었다. */
-  const [partTint, setPartTint] = useState<string | null>(null);
+  /* 손으로 정한 색은 **부품마다 따로** 기억한다.
+     뷰어 컴포넌트는 CAD 를 바꿔도 그대로 살아 있어서, 값 하나로 두면
+     한 부품 색을 바꿨을 때 세 부품이 다 바뀐다. 열쇠는 파일 이름이다 —
+     cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다(주석·구역과 같은
+     방식이다). */
+  const [tintByCad, setTintByCad] = useState<Record<string, string>>({});
+  const tintKey = mesh.summary.name;
+  const partTint = tintByCad[tintKey] ?? null;
   const partTintRef = useRef<string | null>(null);
   partTintRef.current = partTint;
+  const setPartTint = (tone: string | null) => setTintByCad((current) => {
+    if (tone === null) {
+      const next = { ...current };
+      delete next[tintKey];
+      return next;
+    }
+    return { ...current, [tintKey]: tone };
+  });
   /* 화면에 그릴 좌표축 방향(카메라 기준). 카메라가 움직일 때마다 갱신한다. */
   const [axisView, setAxisView] = useState<[number, number, number][]>(
     [[1, 0, 0], [0, -1, 0], [0, 0, 1]]);
@@ -1742,10 +1757,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const plane = clipRef.current;
     const surface = surfaceRef.current;
     if (!plane || !surface) return;
-    const material = surface.material as THREE.MeshStandardMaterial;
-    material.clippingPlanes = clip === null ? [] : [plane];
+    // 부품이 여러 색이면 재질도 여러 개다. 하나로 가정하면 단면이
+    // 안 먹는다 — 배열에 clippingPlanes 를 꽂아도 아무 일도 안 일어난다.
+    const coats = (Array.isArray(surface.material)
+      ? surface.material : [surface.material]) as THREE.MeshStandardMaterial[];
+    for (const coat of coats) {
+      coat.clippingPlanes = clip === null ? [] : [plane];
+      coat.needsUpdate = true;
+    }
     plane.constant = clip ?? 0;
-    material.needsUpdate = true;
   }, [clip]);
 
   /* 단면에서 보정 **전후 윤곽**을 견준다.
@@ -2252,17 +2272,30 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           안 들고 있거나 CATIA 에서 보던 것과 다르면 손으로 정한다. */}
       <label className="cad-viewer__tint"
         title={mesh.colour
-          ? `STEP 에 적힌 색 ${mesh.colour}${mesh.palette && mesh.palette.length > 1
-              ? ` (이 부품에 쓰인 색 ${mesh.palette.length}가지)` : ''}`
-          : '이 STEP 에는 색이 없습니다 — 손으로 정하세요'}>
+          ? `CAD 에서 읽은 색 ${(mesh.colourGroups ?? []).map(
+              ([tone, , count]) => `${tone} ${count.toLocaleString()}삼각형`
+            ).join(' · ') || mesh.colour}`
+          : '이 CAD 에는 색이 없습니다 — 손으로 정하세요'}>
         <input type="color" aria-label="부품 색"
           value={partTint ?? mesh.colour ?? '#8FA3B4'}
           onChange={(event) => setPartTint(event.target.value)} />
-        색
+        {/* CAD 색이 몇 가지로 들어왔는지 눈으로 보이게 한다 — 안 읽혔으면
+            여기가 비어 CAD 파일을 다시 열어야 한다는 걸 알 수 있다. */}
+        {partTint ? '내가 정한 색'
+          : (mesh.colourGroups?.length ?? 0) > 1
+            ? `CAD 색 ${mesh.colourGroups!.length}가지`
+            : mesh.colour ? 'CAD 색' : '색 없음'}
       </label>
+      {(mesh.colourGroups?.length ?? 0) > 1 && !partTint && (
+        <span className="cad-viewer__swatches" aria-hidden="true">
+          {mesh.colourGroups!.map(([tone], k) => (
+            <i key={`${tone}-${k}`} style={{ background: tone }} />
+          ))}
+        </span>
+      )}
       {partTint && (
         <button type="button" onClick={() => setPartTint(null)}
-          title="CATIA 가 STEP 에 넣어 둔 색으로 되돌립니다">되돌리기</button>
+          title="CAD 에 들어 있는 색으로 되돌립니다">CAD 색으로</button>
       )}
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장
