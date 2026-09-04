@@ -140,7 +140,12 @@ button { cursor: pointer; }
 .cad-viewer__seg button+button{border-left:0}
 .cad-viewer__stat{padding:5px 10px;border-radius:6px;background:rgba(14,22,30,.6);color:#8fa3b4;font-size:9px;letter-spacing:.02em;backdrop-filter:blur(6px)}
 .cad-viewer__hint{color:#6f8395}
-.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;gap:0;z-index:2}
+.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:0;z-index:2;max-width:60%}
+/* 좌표축 표시 — 지금 어느 쪽에서 보는지 */
+.cad-viewer__axis{position:absolute;left:12px;bottom:96px;z-index:3;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 7px 5px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:rgba(14,22,30,.76);backdrop-filter:blur(6px);pointer-events:none}
+.cad-viewer__axis svg{width:58px;height:58px;overflow:visible}
+.cad-viewer__axis-ring{fill:none;stroke:rgba(255,255,255,.14)}
+.cad-viewer__axis small{color:#8fa3b4;font-size:7.5px;letter-spacing:.02em;white-space:nowrap}
 .cad-viewer__views button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
 .cad-viewer__views button:first-child{border-radius:6px 0 0 6px}
 .cad-viewer__views button:last-child{border-radius:0 6px 6px 0}

@@ -198,13 +198,38 @@ function rampColor(t: number): [number, number, number] {
   return RAMP[RAMP.length - 1][1];
 }
 
-/** 표준 뷰 — CATIA 의 정면/우측/평면/등각과 같은 자리. */
+/** 표준 뷰 — CATIA 도면의 정면도·측면도·평면도와 같은 자리.
+ *
+ * [축을 어떻게 아는가 — 추측이 아니다]
+ * 이 CAD 는 차량 좌표계로 들어온다. 71XX1-DR000_HDCT0458.stp 실측 범위가
+ *
+ *     X 1445.0 ~ 1990.0   (0 에서 멀다 = 차량 앞뒤로 떨어진 자리)
+ *     Y -795.5 ~  795.5   (0 을 가운데 두고 대칭 = 차량 중심선 기준 좌우)
+ *     Z    30.5 ~ 1260.2  (바닥에서 올라간 높이)
+ *
+ * 이고, 보정시트의 "H : 300 · T : 1700" 표기에서 H(높이)가 Z 범위에만,
+ * T(전후)가 X 범위에만 들어간다. 그래서 X=전후 · Y=좌우 · Z=높이다.
+ * section_zero.py 의 AXIS_OF 도 같은 근거로 정해 뒀다.
+ *
+ * [그래서 도면의 뷰는 이렇게 된다]
+ * 정면도는 차를 앞에서 본 그림이므로 **X 축을 따라** 본다. 예전에는
+ * 정면이 [0,-1,0](Y 축을 따라 봄)이라 실제로는 측면도였고, 우측이
+ * [1,0,0] 이라 그게 정면도였다 — 이름과 그림이 서로 바뀌어 있었다.
+ *
+ * dir 은 부품에서 카메라로 가는 방향이다. */
 const VIEWS: { id: string; label: string; dir: [number, number, number] }[] = [
-  { id: 'iso', label: '등각', dir: [1, 0.85, 1.25] },
-  { id: 'front', label: '정면', dir: [0, -1, 0] },
-  { id: 'right', label: '우측', dir: [1, 0, 0] },
+  // CATIA 의 기본 등각과 같은 팔분면(앞·좌·위)에서 본다.
+  { id: 'iso', label: '등각', dir: [1, -0.85, 0.75] },
+  { id: 'front', label: '정면', dir: [-1, 0, 0] },
+  { id: 'rear', label: '배면', dir: [1, 0, 0] },
+  { id: 'left', label: '좌측', dir: [0, -1, 0] },
+  { id: 'right', label: '우측', dir: [0, 1, 0] },
   { id: 'top', label: '평면', dir: [0, 0, 1] },
+  { id: 'bottom', label: '저면', dir: [0, 0, -1] },
 ];
+
+/** 좌표축 이름 — 차량 좌표계에서 무엇을 뜻하는지 같이 적는다. */
+const AXIS_MEANING: [string, string, string] = ['X 전후', 'Y 좌우', 'Z 높이'];
 
 /** 캔버스에 글자를 구워 스프라이트로 만든다.
  *  three 의 텍스트 지오메트리는 폰트 파일을 받아야 해서 쓰지 않는다
@@ -387,6 +412,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      그림인지 같이 적는다 — 현업 시트도 전체도와 상세도를 따로 싣고,
      나중에 보는 사람은 그림만으로는 방향을 못 가린다. */
   const [viewName, setViewName] = useState('등각');
+  /* 화면에 그릴 좌표축 방향(카메라 기준). 카메라가 움직일 때마다 갱신한다. */
+  const [axisView, setAxisView] = useState<[number, number, number][]>(
+    [[1, 0, 0], [0, -1, 0], [0, 0, 1]]);
   const [measuring, setMeasuring] = useState(false);
   /* 보정시트는 편차 포인트를 전부 적지 않는다 — 손볼 자리만 골라 적는다.
      핵심 포인트 선별이 아직 개발 중이라, 그 전까지는 보정량 크기로 거른다. */
@@ -1203,6 +1231,21 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       camera.near = Math.max(radius * 0.001, (away - radius) * 0.5);
       camera.far = away + radius * 4;
       camera.updateProjectionMatrix();
+
+      /* 좌표축 표시를 카메라와 함께 돌린다.
+       *
+       * 3D 는 돌려 보는 물건이라 "지금 어느 쪽에서 보고 있는지" 를
+       * 이름표만으로는 못 가린다. 축을 화면에 그려 두면 정면·우측이
+       * 무엇을 기준으로 한 말인지 볼 때마다 확인된다.
+       * 카메라 기준으로 축의 방향만 필요하므로 회전 성분만 쓴다 —
+       * 화면 좌표는 x 오른쪽, y 위쪽이라 y 는 부호를 뒤집는다. */
+      const spin = new THREE.Matrix4().extractRotation(camera.matrixWorldInverse);
+      setAxisView(([
+        [1, 0, 0], [0, 1, 0], [0, 0, 1],
+      ] as [number, number, number][]).map((unit) => {
+        const seen = new THREE.Vector3(...unit).applyMatrix4(spin);
+        return [seen.x, -seen.y, seen.z] as [number, number, number];
+      }));
     };
     applyCamera();
 
@@ -2040,6 +2083,27 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       {clipPct < 100 && (
         <button type="button" onClick={() => setClipPct(100)}>끄기</button>
       )}
+    </div>
+
+    {/* 좌표축 — 지금 어느 쪽에서 보고 있는지 늘 보이게 한다.
+        축이 화면을 향해 다가오면(z>0) 점으로 줄어드는데, 그때는 흐리게
+        해서 "이 축은 화면 쪽을 보고 있다" 를 알 수 있게 한다. */}
+    <div className="cad-viewer__axis" aria-hidden="true"
+         title={`정면·배면은 X(전후), 좌측·우측은 Y(좌우), 평면·저면은 Z(높이) 축을 따라 봅니다`}>
+      <svg viewBox="-30 -30 60 60">
+        <circle cx="0" cy="0" r="27" className="cad-viewer__axis-ring" />
+        {axisView.map((dir, k) => {
+          const tip = { x: dir[0] * 21, y: dir[1] * 21 };
+          const paint = ['#ff6b6b', '#5fd38d', '#6fb4e8'][k];
+          return <g key={k} opacity={dir[2] > 0.65 ? 0.4 : 1}>
+            <line x1="0" y1="0" x2={tip.x} y2={tip.y} stroke={paint} strokeWidth="2" />
+            <text x={tip.x * 1.28} y={tip.y * 1.28} fill={paint}
+              textAnchor="middle" dominantBaseline="central"
+              fontSize="11">{'XYZ'[k]}</text>
+          </g>;
+        })}
+      </svg>
+      <small>{AXIS_MEANING.join(' · ')}</small>
     </div>
 
     <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
