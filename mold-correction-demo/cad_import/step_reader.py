@@ -99,6 +99,91 @@ def load_step(path: str | Path):
     return shape
 
 
+def load_step_coloured(path: str | Path):
+    """STEP 을 한 번만 읽어 형상과 CATIA 면 색을 함께 준다.
+
+    [왜 한 번인가 — 두 번 읽으면 두 배 걸린다]
+    색은 XCAF 문서에 딸려 오므로 STEPControl_Reader 로는 못 읽는다. 그렇다고
+    형상은 STEPControl 로, 색은 STEPCAFControl 로 따로 읽으면 큰 파일을 두
+    번 파싱한다 — 실측 64XX1(206MB)이 243초, 71XX1(57MB)이 77초였다.
+    CAF 리더가 형상도 주므로 그것 하나만 쓴다.
+
+    Returns:
+        (shape, {"dominant": "#RRGGBB" | None, "palette": {색: 넓이}})
+    """
+    from OCP.STEPCAFControl import STEPCAFControl_Reader
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorType
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDF import TDF_LabelSequence
+    from OCP.Quantity import Quantity_Color
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopoDS import TopoDS, TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    path = Path(path)
+    doc = TDocStd_Document(TCollection_ExtendedString("step"))
+    reader = STEPCAFControl_Reader()
+    reader.SetColorMode(True)
+    reader.ReadFile(str(path))
+    reader.Transfer(doc)
+
+    colours = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+    shapes = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    roots = TDF_LabelSequence()
+    shapes.GetFreeShapes(roots)
+    if roots.Length() == 0:
+        raise ValueError(f"STEP 에 형상이 없습니다: {path.name}")
+
+    # 최상위가 여럿이면 하나로 묶는다. 아래 단계(테셀레이션·원통 찾기)가
+    # shape 하나를 받는다.
+    builder = BRep_Builder()
+    bundle = TopoDS_Compound()
+    builder.MakeCompound(bundle)
+    for i in range(1, roots.Length() + 1):
+        builder.Add(bundle, shapes.GetShape_s(roots.Value(i)))
+
+    spread: dict = {}
+    walker = TopExp_Explorer(bundle, TopAbs_ShapeEnum.TopAbs_FACE)
+    while walker.More():
+        face = TopoDS.Face_s(walker.Current())
+        tone = Quantity_Color()
+        for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
+                     XCAFDoc_ColorType.XCAFDoc_ColorGen):
+            if colours.GetColor(face, kind, tone):
+                got = "#{:02X}{:02X}{:02X}".format(
+                    int(round(tone.Red() * 255)),
+                    int(round(tone.Green() * 255)),
+                    int(round(tone.Blue() * 255)))
+                spread[got] = spread.get(got, 0.0) + _face_area(face)
+                break
+        walker.Next()
+
+    top = max(spread, key=spread.get) if spread else None
+    return bundle, {"dominant": top,
+                    "palette": {k: round(v, 1) for k, v in sorted(
+                        spread.items(), key=lambda kv: -kv[1])}}
+
+
+def face_colours(path: str | Path) -> dict:
+    """STEP 에 CATIA 가 넣어 둔 면 색만 읽는다(형상은 버린다).
+
+    [실측 — 카티아 파일 세 개]
+        64XX1-DR000_HDCT1860   #00FF00  (넓이 2,919,400mm^2)
+        67XX6-DR050_HDCT1750   여섯 색 — #4E544D · #171A17 · #888D86 등
+        71XX1-DR000_HDCT0458   #FFFFFF  (넓이 740,821mm^2)
+
+    64XX1 의 #00FF00 은 COLOUR_RGB 가 아니라 DRAUGHTING_PRE_DEFINED_COLOUR
+    ('green') 에서 온다. 파일을 글자로 훑어 COLOUR_RGB 만 찾으면 엉뚱하게
+    #C1C4C0 이 나온다 — 그래서 OCCT 로 실제 적용된 색을 물어야 한다.
+
+    한 부품이 여러 색을 쓰기도 한다. 화면에는 **넓이가 가장 넓은 색**을
+    대표로 쓴다 — 면 개수로 세면 작은 모따기 수백 개가 큰 판 하나를 이긴다.
+    """
+    return load_step_coloured(path)[1]
+
+
 def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
     """B-Rep 을 삼각망으로 바꾼다. (vertices Nx3, faces Mx3) 을 준다."""
     from OCP.BRep import BRep_Tool
@@ -525,7 +610,8 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 3      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 4      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+                       # 4: CATIA 면 색(colour)을 함께 담는다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
@@ -580,11 +666,16 @@ def read_step_full(
                     "holes": meta["holes"],
                     "planes": meta["planes"],
                     "counts": meta["counts"],
+                    "colour": meta.get("colour"),
                 }
         except Exception:
             cached = None      # 캐시가 깨져도 그냥 다시 읽으면 된다
 
-    shape = load_step(path)
+    # 형상과 색을 한 번에 읽는다. 색을 못 읽는 파일이면 형상만 다시 읽는다.
+    try:
+        shape, colour = load_step_coloured(path)
+    except Exception:
+        shape, colour = load_step(path), None
     vertices, faces = tessellate(shape, deflection)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
@@ -603,6 +694,7 @@ def read_step_full(
             "holes": len(holes),
             "planes": len(planes),
         },
+        "colour": colour,
     }
     if cached is not None:
         try:
@@ -618,6 +710,7 @@ def read_step_full(
 __all__ = [
     "STEP_SUFFIXES", "DEFAULT_DEFLECTION",
     "Cylinder", "PlaneFace",
-    "is_step_file", "load_step", "tessellate",
+    "is_step_file", "load_step", "load_step_coloured", "tessellate",
+    "face_colours",
     "find_cylinders", "find_planes", "read_step_full",
 ]

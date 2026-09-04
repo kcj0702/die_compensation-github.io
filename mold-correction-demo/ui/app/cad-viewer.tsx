@@ -97,6 +97,10 @@ export type CadMesh = {
   counts: { cylinders: number; holes: number; planes: number };
   recentered: boolean;
   cadId?: string;
+  /* CATIA 가 STEP 에 넣어 둔 부품 색(넓이 기준 대표색). 없으면 기본색을
+     쓴다 — 실측 64XX1 은 #00FF00, 71XX1 은 #FFFFFF, 67XX6 은 여섯 색이다. */
+  colour?: string | null;
+  palette?: string[];
   note?: string;
 };
 
@@ -426,6 +430,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      그림인지 같이 적는다 — 현업 시트도 전체도와 상세도를 따로 싣고,
      나중에 보는 사람은 그림만으로는 방향을 못 가린다. */
   const [viewName, setViewName] = useState('등각');
+  /* 흰 바탕. 시트에 실을 그림이라 이쪽이 기본이다 — 어두운 네모가
+     엑셀에 통째로 박히면 인쇄에서 튄다. 화면에서 히트맵을 볼 때는
+     어두운 배경이 색을 잘 읽어 주므로 버튼으로 바꾼다.
+     씬을 다시 만들 때 최신 값을 봐야 하므로 ref 도 같이 둔다. */
+  const [light, setLight] = useState(true);
+  const lightRef = useRef(true);
+  lightRef.current = light;
   /* 화면에 그릴 좌표축 방향(카메라 기준). 카메라가 움직일 때마다 갱신한다. */
   const [axisView, setAxisView] = useState<[number, number, number][]>(
     [[1, 0, 0], [0, -1, 0], [0, 0, 1]]);
@@ -543,7 +554,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     }
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(mount.clientWidth, mount.clientHeight);
-    renderer.setClearColor(0x16202a);
+    // 배경. 시트에 실을 그림은 흰 바탕이라야 엑셀에서 잘려 보이지
+    // 않는다 — 어두운 네모가 통째로 박히면 인쇄에서도 튄다. 화면에서
+    // 히트맵을 볼 때는 어두운 쪽이 색이 잘 읽혀 버튼으로 바꿀 수 있게 뒀다.
+    renderer.setClearColor(lightRef.current ? 0xffffff : 0x16202a);
     renderer.localClippingEnabled = true;
     // 금속은 밝은 곳을 반사해야 형태가 읽힌다. 톤매핑 없이 두면
     // 반사 하이라이트가 흰색으로 다 타버린다.
@@ -664,8 +678,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // metalness 0.55 로 두었더니 환경맵이 없던 시절 형상이 새까맣게 나왔다.
     // 환경맵을 넣은 지금도 판금은 완전한 거울이 아니므로 0.25 정도가
     // 실제 강판에 가깝고 곡면 음영이 훨씬 잘 읽힌다.
+    // 색 순서: 히트맵을 칠할 때는 정점색 -> 아니면 CATIA 색 -> 기본색.
+    const catia = (!painted && mesh.colour) ? new THREE.Color(mesh.colour) : null;
     const surface = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-      color: painted ? 0xffffff : SURFACE,
+      color: painted ? 0xffffff : (catia ?? SURFACE),
       vertexColors: painted,
       metalness: painted ? 0.05 : 0.15,
       roughness: painted ? 0.85 : 0.62,
@@ -1117,15 +1133,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 그쪽이 깔끔해 보이는 건 밝기가 아니라 **그림자와 림 라이트**다 —
     // 그림자가 면과 면을 가르고, 뒤에서 치는 림이 윤곽을 세워 준다.
     // 밝기 자체는 우리 화면(어두운 배경 + 환경맵)에 맞게 낮췄다.
-    scene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 0.3));
-    const key = new THREE.DirectionalLight(0xffffff, 0.85);
+    // 흰 바탕에서는 아래쪽 반사광을 밝게 준다. 어두운 배경에 맞춰
+    // 놓은 짙은 바닥색(0x1e293b)을 그대로 쓰면 판 아랫면이 새까맣게
+    // 죽어 흰 바탕에서 얼룩처럼 보인다.
+    const pale = lightRef.current;
+    scene.add(new THREE.HemisphereLight(
+      0xdbeafe, pale ? 0xbfc9d4 : 0x1e293b, pale ? 0.55 : 0.3));
+    const key = new THREE.DirectionalLight(0xffffff, pale ? 0.7 : 0.85);
     key.position.set(1, 1.4, 1).multiplyScalar(radius * 3);
     scene.add(key);
     const fill = new THREE.DirectionalLight(0x93c5fd, 0.3);
     fill.position.set(-1.2, -0.6, -0.9).multiplyScalar(radius * 3);
     scene.add(fill);
-    const rim = new THREE.DirectionalLight(0xf8fafc, 0.4);
-    rim.position.set(-0.4, 0.3, -1.4).multiplyScalar(radius * 3);
+    // 흰 바탕에서는 뒤에서 치는 림이 윤곽을 오히려 지운다(흰 위에 흰).
+    // 대신 아래에서 살짝 받쳐 바닥면을 띄운다.
+    const rim = new THREE.DirectionalLight(
+      pale ? 0xd8e2ec : 0xf8fafc, pale ? 0.25 : 0.4);
+    rim.position.set(-0.4, pale ? -0.9 : 0.3, -1.4).multiplyScalar(radius * 3);
     scene.add(rim);
 
     // ── 카메라 ───────────────────────────────────────────────
@@ -1632,7 +1656,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       mount.removeChild(renderer.domElement);
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode, sections, exaggeration, ceiling]);
+      morph, morphMode, sections, exaggeration, ceiling, light]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -2081,7 +2105,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   }).length ?? 0;
 
   return <>
-    <div ref={mountRef} className="cad-viewer__stage" />
+    <div ref={mountRef}
+      className={`cad-viewer__stage${light ? ' is-light' : ''}`} />
 
     {/* 아래쪽 조작부는 한 덩어리로 쌓는다. 예전에는 단면 슬라이더를
         bottom:52px 로 못 박아 뒀는데, 아래 버튼 줄이 두 줄로 접히면
@@ -2164,6 +2189,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       <button type="button" onClick={toggleFull}
         title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
         {full ? '축소' : '확대'}
+      </button>
+      <button type="button" onClick={() => setLight((v) => !v)}
+        title={light
+          ? '어두운 배경으로 바꿉니다 (히트맵 색이 잘 읽힙니다)'
+          : '흰 배경으로 바꿉니다 (시트에 실을 그림용)'}>
+        {light ? '흰 바탕' : '검은 바탕'}
       </button>
       <button type="button" onClick={saveImage} title="보이는 그대로 PNG 로 저장">
         저장

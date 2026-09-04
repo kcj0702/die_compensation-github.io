@@ -1109,6 +1109,12 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             web["holes"] = _shift_centers(parsed["holes"], offset)
             web["planes"] = _shift_centers(parsed["planes"][:50], offset)
             web["counts"] = parsed["counts"]
+            # CATIA 가 STEP 에 넣어 둔 면 색. 화면은 넓이가 가장 넓은 색을
+            # 부품 색으로 쓴다 — 시트에 실었을 때 CATIA 에서 보던 것과
+            # 같은 색으로 보이라는 것이다.
+            tone = parsed.get("colour") or {}
+            web["colour"] = tone.get("dominant")
+            web["palette"] = list(tone.get("palette", {}).keys())[:8]
 
             # 오버레이(제로라인·보정량)를 그리려면 원본 삼각망이 필요하다.
             # 화면용 메시는 간략화돼 있어 광선 교차에 쓰면 어긋난다.

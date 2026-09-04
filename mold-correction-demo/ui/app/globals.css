@@ -763,3 +763,7 @@ button { cursor: pointer; }
 .zone-book__table button{padding:2px 8px;border:1px solid #d9b4b4;border-radius:4px;background:#fff;color:#a3323f;font-size:10px;cursor:pointer}
 /* 검사 원본에서 그대로 가져왔을 때는 경고가 아니라 알림이다 */
 .cad-viewer__warn--ok{border-color:rgba(90,200,140,.45);background:rgba(12,44,30,.86);color:#a9e6c4}
+/* 흰 바탕 3D. 시트에 실을 그림이라 이쪽이 기본이다.
+   위에 얹는 조작부는 어두운 반투명이라 흰 바탕에서도 그대로 읽힌다. */
+.cad-viewer:has(.cad-viewer__stage.is-light){background:#fff}
+.cad-viewer__stage.is-light{background:#fff}
