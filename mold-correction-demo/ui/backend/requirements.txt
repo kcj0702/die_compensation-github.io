@@ -8,6 +8,8 @@
 # requirements.txt 도 함께 설치해야 한다 (torch, opencv 등).
 
 starlette>=0.38
+fast-simplification>=0.1
+cadquery-ocp>=7.8
 uvicorn>=0.30
 scipy>=1.11
 python-multipart>=0.0.9    # /api/analyze 의 파일 업로드(form) 파싱에 필요

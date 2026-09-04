@@ -234,3 +234,6 @@ __marimo__/
 # Confidential label-removal datasets — never commit or upload.
 /mold-correction-demo/label_removal/input/
 /mold-correction-demo/label_removal/output/
+
+# Local verification artifacts generated while testing workbook exports.
+/outputs/

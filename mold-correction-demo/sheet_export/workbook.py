@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
@@ -21,7 +20,8 @@ import openpyxl
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AbsoluteAnchor
 from openpyxl.drawing.xdr import XDRPoint2D, XDRPositiveSize2D
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.worksheet.pagebreak import Break
 from openpyxl.utils import range_boundaries
 
 from . import config, drawing
@@ -32,11 +32,18 @@ from .layout import SheetView, default_layout, place_labels
 class TitleBlock:
     """The values that go into the sheet's header cells."""
 
+    heading: str = "보정 적용 내용"
+    management_label: str = "관리 NO"
     management_no: str = ""
+    part_name_label: str = "PART NAME"
     part_name: str = ""
+    process_label: str = "공정"
     process: str = ""
+    part_no_label: str = "PART NO"
     part_no: str = ""
+    material_label: str = "원소재"
     material: str = ""
+    applied_date_label: str = "적용일자"
     applied_date: str = ""
 
     def as_cells(self) -> dict[str, str]:
@@ -106,16 +113,9 @@ def _encode_png(image: np.ndarray) -> io.BytesIO:
     return io.BytesIO(encoded.tobytes())
 
 
-def _write_heading(sheet) -> None:
-    """Put the '보정 적용 내용' title in the empty A1:I6 area.
-
-    The company form leaves this block blank so the operator can label the
-    sheet by hand; we fill it so the exported file matches the printed form.
-    Existing merges that overlap the range are removed first to avoid
-    openpyxl raising ``Cannot merge already merged cells``.
-    """
-    heading_range = config.SHEET_HEADING_RANGE
-    min_col, min_row, max_col, max_row = range_boundaries(heading_range)
+def _merge_title_block(sheet) -> None:
+    """Rebuild every title merge so a damaged/missing template is harmless."""
+    min_col, min_row, max_col, max_row = range_boundaries("A1:AD6")
     overlapping = [
         merged
         for merged in list(sheet.merged_cells.ranges)
@@ -128,11 +128,72 @@ def _write_heading(sheet) -> None:
     ]
     for merged in overlapping:
         sheet.unmerge_cells(str(merged))
-    sheet.merge_cells(heading_range)
-    cell = sheet[config.SHEET_HEADING_ANCHOR]
-    cell.value = config.SHEET_HEADING_TEXT
-    cell.alignment = Alignment(horizontal="center", vertical="center")
-    cell.font = Font(size=config.SHEET_HEADING_FONT_SIZE, bold=True)
+    for merged_range in config.TITLE_BLOCK_MERGES:
+        sheet.merge_cells(merged_range)
+
+
+def _title_font(field_name: str, title_fonts, title_font_sizes) -> Font:
+    family = (title_fonts or {}).get(field_name) or config.TITLE_DEFAULT_FONTS[field_name]
+    size = (title_font_sizes or {}).get(field_name)
+    try:
+        size = float(size) if size is not None else config.TITLE_DEFAULT_SIZES[field_name]
+    except (TypeError, ValueError):
+        size = config.TITLE_DEFAULT_SIZES[field_name]
+    return Font(
+        name=str(family), size=size,
+        bold=field_name in {"heading", "part_no"},
+        color="FFFF0000" if field_name == "part_no" else "FF000000",
+        charset=129,
+    )
+
+
+def _style_title_block(sheet, title: TitleBlock, title_fonts=None,
+                       title_font_sizes=None) -> None:
+    """Apply the company title box without relying on template side effects."""
+    _merge_title_block(sheet)
+    cells = {
+        "heading": config.SHEET_HEADING_ANCHOR,
+        **config.TITLE_LABEL_CELLS,
+        **config.TITLE_CELLS,
+    }
+    for field_name, cell_name in cells.items():
+        cell = sheet[cell_name]
+        cell.value = getattr(title, field_name)
+        cell.font = _title_font(field_name, title_fonts, title_font_sizes)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    thin = Side(style="thin", color="FF000000")
+    white = PatternFill(fill_type="solid", fgColor="FFFFFFFF")
+    for row in sheet.iter_rows(min_row=1, max_row=6, min_col=1, max_col=30):
+        for cell in row:
+            cell.fill = white
+            cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+
+def _apply_print_layout(sheet, max_row: int = config.PRINT_PAGE_ROWS) -> None:
+    """Open in Page Break Preview and print one landscape page per 40 rows."""
+    sheet.sheet_view.view = "pageBreakPreview"
+    sheet.sheet_view.zoomScale = config.PAGE_BREAK_PREVIEW_ZOOM
+    sheet.sheet_view.zoomScaleNormal = 100
+    sheet.sheet_view.showGridLines = False
+    sheet.freeze_panes = None
+    sheet.print_area = f"A1:AD{max_row}"
+    sheet.sheet_properties.pageSetUpPr.fitToPage = True
+    sheet.sheet_properties.pageSetUpPr.autoPageBreaks = False
+    sheet.page_setup.orientation = "landscape"
+    sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+    sheet.page_setup.scale = None
+    sheet.page_margins.left = 0
+    sheet.page_margins.right = 0
+    sheet.page_margins.top = 0
+    sheet.page_margins.bottom = 0
+    sheet.print_options.horizontalCentered = True
+    sheet.print_options.verticalCentered = False
+    sheet.row_breaks = type(sheet.row_breaks)()
+    sheet.row_breaks.append(Break(id=config.PRINT_PAGE_ROWS))
 
 
 def _open_template(template: Path | None) -> openpyxl.Workbook:
@@ -173,26 +234,9 @@ def build_sheet(
 
     book = _open_template(template)
     sheet = book.active
-    _write_heading(sheet)
     title_values = title or TitleBlock()
-    for cell, value in title_values.as_cells().items():
-        sheet[cell] = value
-    for field_name, cell in config.TITLE_CELLS.items():
-        if not getattr(title_values, field_name):
-            continue
-        family = (title_fonts or {}).get(field_name)
-        size = (title_font_sizes or {}).get(field_name)
-        if not family and size is None:
-            continue
-        font = copy(sheet[cell].font)
-        if family:
-            font.name = str(family)
-        try:
-            if size is not None:
-                font.sz = float(size)
-        except (TypeError, ValueError):
-            pass
-        sheet[cell].font = font
+    _style_title_block(sheet, title_values, title_fonts, title_font_sizes)
+    _apply_print_layout(sheet)
 
     default_layout(list(views))
 

@@ -32,13 +32,39 @@ function Wait-HttpHealth([int]$Seconds) {
 }
 
 function Find-Node {
+  if ($env:AJIN_NODE -and (Test-Path -LiteralPath $env:AJIN_NODE -PathType Leaf)) {
+    return (Resolve-Path -LiteralPath $env:AJIN_NODE).Path
+  }
   $command = Get-Command node.exe -ErrorAction SilentlyContinue
   if ($command) { return $command.Source }
-  foreach ($candidate in @(
+
+  $candidates = [System.Collections.Generic.List[string]]@(
     (Join-Path $env:ProgramFiles 'nodejs\node.exe'),
-    (Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe')
-  )) {
-    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
+    (Join-Path ${env:ProgramFiles(x86)} 'nodejs\node.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Volta\bin\node.exe'),
+    (Join-Path $env:USERPROFILE 'scoop\apps\nodejs\current\node.exe'),
+    (Join-Path $env:USERPROFILE 'scoop\apps\nodejs-lts\current\node.exe')
+  )
+  $nvmRoot = if ($env:NVM_HOME) { $env:NVM_HOME } else { Join-Path $env:APPDATA 'nvm' }
+  if (Test-Path -LiteralPath $nvmRoot -PathType Container) {
+    Get-ChildItem -LiteralPath $nvmRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending |
+      ForEach-Object { $candidates.Add((Join-Path $_.FullName 'node.exe')) }
+  }
+  $codexRuntimeRoot = Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\runtimes\cua_node'
+  if (Test-Path -LiteralPath $codexRuntimeRoot -PathType Container) {
+    Get-ChildItem -LiteralPath $codexRuntimeRoot -Directory -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTime -Descending |
+      ForEach-Object { $candidates.Add((Join-Path $_.FullName 'bin\node.exe')) }
+  }
+  foreach ($candidate in $candidates) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+      try {
+        $null = & $candidate --version 2>$null
+        if ($LASTEXITCODE -eq 0) { return $candidate }
+      } catch { }
+    }
   }
   return $null
 }
@@ -65,9 +91,6 @@ try {
   $pnpmCommand = Get-Command pnpm.cmd -ErrorAction SilentlyContinue
   $script:PnpmPath = if ($pnpmCommand) { $pnpmCommand.Source } else { $null }
   $script:CorepackPath = Join-Path (Split-Path $NodePath -Parent) 'corepack.cmd'
-  if (-not $PnpmPath -and -not (Test-Path -LiteralPath $CorepackPath)) {
-    Fail 'pnpm 또는 Corepack을 찾지 못했습니다.' 'Node.js 22 LTS를 다시 설치하거나 corepack enable 후 재실행하세요.'
-  }
 
   $pythonCandidates = @()
   if ($env:AJIN_PYTHON) { $pythonCandidates += $env:AJIN_PYTHON }
@@ -79,15 +102,22 @@ try {
 
   Write-Host "Node: $nodeVersion"
   Write-Host "Python: $pythonPath"
-  & $pythonPath -c "import cv2,numpy,uvicorn,starlette,trimesh,openpyxl"
+  # 서버 시작에 반드시 필요한 모듈만 검사한다. OCP와
+  # fast_simplification은 STEP/CAD 기능을 사용할 때만 지연 로드된다.
+  & $pythonPath -c "import cv2,numpy,uvicorn,starlette,trimesh,openpyxl,scipy"
   if ($LASTEXITCODE -ne 0) {
     Fail 'Python 엔진 의존성이 누락되었습니다.' "& '$pythonPath' -m pip install -r '$uiRoot\backend\requirements.txt'"
   }
 
   # node_modules exists even after a partial install; verify every imported
   # runtime package instead of checking only vinext.
-  & $NodePath -e "require.resolve('vinext/package.json'); require.resolve('three/package.json')" 2>$null
-  if ($LASTEXITCODE -ne 0) {
+  $vinextCli = Join-Path $uiRoot 'node_modules\vinext\dist\cli.js'
+  $threePackage = Join-Path $uiRoot 'node_modules\three\package.json'
+  if (-not (Test-Path -LiteralPath $vinextCli -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $threePackage -PathType Leaf)) {
+    if (-not $PnpmPath -and -not (Test-Path -LiteralPath $CorepackPath)) {
+      Fail 'UI 의존성이 누락되었고 pnpm 또는 Corepack도 찾지 못했습니다.' 'Node.js 22 LTS를 설치한 뒤 pnpm install을 실행하세요.'
+    }
     Write-Host 'UI dependencies are missing. Installing from pnpm-lock.yaml...'
     if ((Invoke-Pnpm @('install', '--frozen-lockfile')) -ne 0) {
       Fail 'UI package installation failed.' 'pnpm-lock.yaml과 package.json이 같은 커밋인지 확인하세요. 잠금파일을 임의로 지우지 마세요.'
@@ -115,6 +145,10 @@ try {
 
   Write-Host "`nAJIN Die Insight: http://127.0.0.1:3000"
   Write-Host 'Press Ctrl+C to stop the UI server.'
+  if (Test-Path -LiteralPath $vinextCli -PathType Leaf) {
+    & $NodePath $vinextCli dev
+    exit $LASTEXITCODE
+  }
   exit (Invoke-Pnpm @('dev'))
 }
 catch { Fail $_.Exception.Message }
