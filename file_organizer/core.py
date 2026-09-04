@@ -52,6 +52,9 @@ _FOLDER_ORDER_FILENAME = ".folder_order.json"
 # 파일명에서 차종을 못 읽었을 때 쓰는 자리. 이름을 여기 하나로 두어야
 # 분류가 만든 폴더를 순서 변경(migrate_folder_structure)도 알아본다.
 UNKNOWN_VEHICLE_FOLDER = "_차종미확인"
+# 차종·자료유형은 읽혔는데 품번만 없을 때 품번 칸에 쓰는 자리. 네 축 구조라
+# 품번 칸을 비울 수 없어서, 미분류로 빼는 대신 차종 아래에 모아 둔다.
+UNKNOWN_ITEM_FOLDER = "_품번미확인"
 # 빈 폴더를 형상관리에 남기기 위한 표시 파일. 사용자가 넣은 자료가 아니다.
 PLACEHOLDER_NAMES = {".gitkeep"}
 
@@ -157,6 +160,10 @@ def migrate_folder_structure(
         앞자리 계열 코드('64XX2')가 같으면 같은 품번으로 보므로 상세 코드
         ('-DR000')는 떼어 낸다 — 그래야 같은 제품의 자료가 한 폴더에 모인다.
         """
+        # 분류가 만든 자리표시 폴더도 품번 칸으로 본다 — 그러지 않으면 순서를
+        # 바꿀 때 이 폴더의 파일만 옛 자리에 남아 두 구조가 섞인다.
+        if part == UNKNOWN_ITEM_FOLDER:
+            return part
         match = _ITEM_NO_RE.fullmatch(part)
         if match:
             return match.group(1)
@@ -573,15 +580,22 @@ class FilenameClassifier:
         폴더를 추가하지 않는다. 어느 축이 몇 번째로 오는지는 화면에서 정한
         순서만 따르므로, 기존 폴더를 찾는 것도 그 순서대로 내려가며 확인한다.
         """
-        if not item_no:
-            return None, "", ["품번이 없어 폴더 구조를 만들 수 없습니다"]
         if category is None:
             return None, "", ["카테고리가 없어 폴더 구조를 만들 수 없습니다"]
+        # 품번을 끝내 못 읽어도 차종을 읽었으면 그 차종 아래에 모아 둔다.
+        # 차종까지 모르면 놓을 자리를 정할 수 없으므로 미분류로 보낸다.
+        if not item_no and not customer.strip():
+            return None, "", ["품번과 차종을 모두 읽지 못해 폴더 구조를 만들 수 없습니다"]
 
         reasons: list[str] = []
         matched_product_folder = ""
+        item_folder = family or item_no or UNKNOWN_ITEM_FOLDER
+        if not item_no:
+            reasons.append(
+                f"품번을 읽지 못해 '{UNKNOWN_ITEM_FOLDER}' 폴더에 모읍니다"
+            )
         axis_parts: dict[str, list[str]] = {
-            AXIS_ITEM: [family or item_no],
+            AXIS_ITEM: [item_folder],
             AXIS_VEHICLE: [],  # 차종 칸에 도착했을 때 그 자리를 보고 정한다.
             AXIS_CATEGORY: [category.folder_name],
             AXIS_DETAIL: detail_parts,
@@ -597,7 +611,7 @@ class FilenameClassifier:
                 candidate = current / part
                 if not candidate.is_dir():
                     reasons.append(f"{AXIS_LABELS[axis]} 폴더 '{part}'를 새로 만듭니다")
-                elif axis == AXIS_ITEM:
+                elif axis == AXIS_ITEM and part != UNKNOWN_ITEM_FOLDER:
                     matched_product_folder = candidate.name
                     reasons.append(f"기존 품번 폴더 '{candidate.name}'와 일치")
                 current = candidate

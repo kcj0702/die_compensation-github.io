@@ -34,7 +34,7 @@ with patch.dict(
 ):
     SPEC.loader.exec_module(backend_server)
 
-from core import UNKNOWN_VEHICLE_FOLDER  # noqa: E402
+from core import UNKNOWN_ITEM_FOLDER, UNKNOWN_VEHICLE_FOLDER  # noqa: E402
 from label_detector import LabelCandidate  # noqa: E402
 
 
@@ -541,8 +541,8 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             source_root.mkdir()
             staging_root.mkdir()
             destination_root.mkdir()
-            # 품번이 없어 분류되지 않는 이름이다.
-            source = source_root / "JM DASH LWR 성형해석 리포트 260825.ppt"
+            # 품번도 차종도 없어 놓을 자리를 못 정하는 이름이다.
+            source = source_root / "성형해석 리포트 260825.ppt"
             source.write_bytes(b"demo")
             with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
                 backend_server, "FOLDER_ROOT", destination_root
@@ -630,7 +630,11 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
                 ],
             )
             self.assertEqual(found[receiver].item_no, "")
-            self.assertIsNone(found[receiver].target_dir)
+            # 품번을 지어내는 대신 자리표시 폴더에 모은다.
+            self.assertIn(
+                UNKNOWN_ITEM_FOLDER,
+                found[receiver].target_dir.relative_to(root).parts,
+            )
 
     def test_item_no_is_not_borrowed_across_different_vehicles(self) -> None:
         """차종이 다르면 품번을 물려받지 않는다."""
@@ -643,7 +647,10 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
                 ["XM_71612-DZ000_DASH LWR_OP20_완성도_260825.zip", receiver],
             )
             self.assertEqual(found[receiver].item_no, "")
-            self.assertIsNone(found[receiver].target_dir)
+            parts = found[receiver].target_dir.relative_to(root).parts
+            self.assertIn(UNKNOWN_ITEM_FOLDER, parts)
+            self.assertNotIn("71612", parts, "다른 차종의 품번을 가져오면 안 된다")
+            self.assertEqual(parts[0], "JM", "자기 차종 아래에 있어야 한다")
 
     def test_item_no_is_not_borrowed_across_different_product_names(self) -> None:
         """품명이 다르면 같은 차종이어도 물려받지 않는다."""
@@ -656,6 +663,63 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
                 ["JM_67312-DZ000_PNL HOOD INR_OP20_완성도_260825.zip", receiver],
             )
             self.assertEqual(found[receiver].item_no, "")
+
+    def test_vehicle_without_item_no_is_collected_under_a_placeholder_folder(self) -> None:
+        """차종·자료유형은 읽혔는데 품번만 없으면 차종 아래 자리표시로 모은다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            name = "260825_JDZ_DASH LWR_OP10_형상_UPRDIE_NC DATA.ZIP"
+            result = self._classify_names(root, [name])[name]
+
+            self.assertEqual(result.customer, "JDZ")
+            self.assertEqual(result.item_no, "")
+            self.assertIsNotNone(result.target_dir)
+            self.assertEqual(
+                result.target_dir.relative_to(root).parts,
+                ("JDZ", "06. NC DATA", UNKNOWN_ITEM_FOLDER, "OP10"),
+            )
+
+    def test_file_without_vehicle_and_item_no_still_goes_unclassified(self) -> None:
+        """차종까지 모르면 놓을 자리를 정할 수 없으므로 미분류로 남긴다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            name = "성형해석 리포트 260825.ppt"
+            result = self._classify_names(root, [name])[name]
+            self.assertEqual(result.customer, "")
+            self.assertEqual(result.item_no, "")
+            self.assertIsNone(result.target_dir)
+
+    def test_placeholder_item_folder_survives_a_folder_order_change(self) -> None:
+        """자리표시 폴더도 순서 변경 때 같이 옮겨져야 한다.
+
+        마이그레이션이 '_품번미확인'을 품번 칸으로 알아보지 못하면 이 폴더의
+        파일만 옛 자리에 남아 두 구조가 섞인다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            source = (
+                root / "JDZ" / "06. NC DATA"
+                / UNKNOWN_ITEM_FOLDER / "OP10" / "nc.zip"
+            )
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"nc")
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 1)
+            moved = (
+                root / "06. NC DATA" / "JDZ"
+                / UNKNOWN_ITEM_FOLDER / "OP10" / "nc.zip"
+            )
+            self.assertEqual(moved.read_bytes(), b"nc")
+            self.assertFalse(source.exists())
 
     def test_source_path_outside_allowed_roots_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
