@@ -1222,6 +1222,43 @@ def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
                      json.dumps(fit_adjust or {}, sort_keys=True)])
 
 
+def _mend_decimal(value: float, limit: float,
+                  slack: float = 2.0) -> float | None:
+    """판독에서 날아간 소수점을 되살린다. 못 살리면 None.
+
+    [정답과 대 보고 알아낸 것]
+    64XX2 워크스페이스(검사 포인트 79개, 값이 확정)와 우리 판독을 견줬더니
+    컬러바(+-2.0mm) 밖의 값이 15개 나왔다 — -10, 6, 6, 6, 6, 6, 8, 9, 9,
+    9, 9, 60, 80, 80. 그런데 정답에는 -1.0, 0.6, 0.8, 0.9 가 있다.
+    **소수점이 빠진 것**이지 엉뚱한 숫자를 읽은 게 아니었다.
+
+    10 으로 나눠 범위 안에 들어오면 그 값을 쓴다. 다만 진짜로 컬러바를
+    넘는 값도 있다 — 이 부품의 정답 최솟값이 -2.79mm 로 컬러바 +-2.0 을
+    넘는다(공차를 벗어난 자리는 컬러바 밖으로도 찍힌다). 그래서 한계의
+    slack 배까지는 그대로 두고 그보다 멀 때만 손댄다.
+
+    [배수를 어떻게 정했나 — 정답 79개로 훑었다]
+        배수   일치    되살린 뒤 범위밖   진짜 값을 잘못 고침
+        1.0   52/79          0                 1   <- -2.8 을 -0.28 로 망침
+        1.5   52/79          0                 0
+        2.0   52/79          0                 0   <- 가운데를 쓴다
+        2.5   52/79          0                 0
+        3.0   49/79          0                 0   <- 되살릴 것을 놓친다
+    1.5~2.5 가 안전 구간이라 가운데인 2.0 을 쓴다. 이 고침만으로 값
+    일치가 57% 에서 66% 로 오르고 불가능한 값이 0 이 된다.
+    """
+    if not np.isfinite(value) or limit <= 0:
+        return None
+    if abs(value) <= limit * slack:
+        return None                       # 진짜로 컬러바를 넘는 값이다
+    moved = float(value)
+    for _ in range(3):                    # 소수점이 세 자리까지 밀릴 수 있다
+        moved /= 10.0
+        if abs(moved) <= limit * slack:
+            return moved
+    return None
+
+
 def cad_overlay_for(cad_id: str, analysis_id: str,
                     zero_edits: list | None = None,
                     fit_adjust: dict | None = None) -> dict[str, Any]:
@@ -1385,12 +1422,18 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     span = next((v for k, v in PRODUCT_COLORBAR_MM.items() if k in folded), None)
     limit = max(abs(span[0]), abs(span[1])) * 1.05 if span else None
 
-    wanted, rejected = [], []
+    wanted, rejected, mended = [], [], []
     for point in analysis.get("deviation_points", []):
         value = float(point.get("value", 0.0))
         if limit is not None and abs(value) > limit:
-            rejected.append({"id": point.get("id"), "value": round(value, 3)})
-            continue
+            fixed = _mend_decimal(value, limit)
+            if fixed is None:
+                rejected.append({"id": point.get("id"),
+                                 "value": round(value, 3)})
+                continue
+            mended.append({"id": point.get("id"), "was": round(value, 3),
+                           "value": round(fixed, 3)})
+            point = {**point, "value": fixed}
         wanted.append(point)
 
     # 광선은 한 번에 쏘는 게 훨씬 빠르다
@@ -1515,6 +1558,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     answer = {
             "fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
+            # 소수점을 되살린 판독. 조용히 고치면 사람이 모르므로 알린다.
+            "mended": mended,
             "zeroSurface": zero_surface,
             "zeroAreas": zero_areas,
             "zeroKind": "areas" if area_contours else (reference.get("kind") or "line"),

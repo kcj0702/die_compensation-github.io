@@ -425,3 +425,46 @@ class LabelStoreTest(unittest.TestCase):
                          backend_server._crop_key(right))
         self.assertNotEqual(backend_server._crop_key(left),
                             backend_server._crop_key(other))
+
+
+class 소수점되살리기Test(unittest.TestCase):
+    """판독에서 날아간 소수점 되살리기.
+
+    64XX2 워크스페이스(검사 포인트 79개, 값 확정)와 우리 판독을 견줘
+    찾은 실제 사례들이다. 컬러바 밖으로 나온 값 15개가 전부 소수점만
+    빠진 것이었다.
+    """
+
+    한계 = 2.1          # 이 부품 컬러바 +-2.0 에 5% 여유
+
+    def test_소수점_빠진_판독을_되살린다(self):
+        # 왼쪽이 우리 판독, 오른쪽이 워크스페이스의 확정값
+        for 읽은, 참 in ((6.0, 0.6), (8.0, 0.8), (9.0, 0.9),
+                        (60.0, 0.6), (80.0, 0.8), (-10.0, -1.0)):
+            with self.subTest(읽은=읽은):
+                self.assertAlmostEqual(
+                    backend_server._mend_decimal(읽은, self.한계), 참, places=6)
+
+    def test_진짜로_컬러바를_넘는_값은_건드리지_않는다(self):
+        """공차를 벗어난 자리는 컬러바 밖으로도 찍힌다.
+
+        이 부품의 확정 최솟값이 -2.79mm 다. 컬러바가 +-2.0 이라고 이걸
+        -0.279 로 고치면 진짜 값을 망친다.
+        """
+        for 참값 in (-2.79, -2.8, 2.5, -3.0, 4.0):
+            with self.subTest(값=참값):
+                self.assertIsNone(
+                    backend_server._mend_decimal(참값, self.한계))
+
+    def test_범위_안이면_손대지_않는다(self):
+        for 값 in (0.0, 0.4, -1.83, 2.0):
+            with self.subTest(값=값):
+                self.assertIsNone(backend_server._mend_decimal(값, self.한계))
+
+    def test_되살려도_범위에_못_들어오면_포기한다(self):
+        # 10 으로 세 번 나눠도 못 들어오는 값은 소수점 문제가 아니다.
+        self.assertIsNone(backend_server._mend_decimal(1e9, self.한계))
+
+    def test_이상한_입력에_터지지_않는다(self):
+        self.assertIsNone(backend_server._mend_decimal(float("nan"), self.한계))
+        self.assertIsNone(backend_server._mend_decimal(5.0, 0.0))

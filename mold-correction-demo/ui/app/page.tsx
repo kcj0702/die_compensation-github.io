@@ -1759,7 +1759,8 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   /* 시트에 담아둔 3D 화면들. 현업 시트도 전체도와 확대도를 따로 싣는다.
      어느 시점에서 찍었는지 함께 들고 있는다 — 엑셀 쪽마다 그 이름을
      적어 두지 않으면 나중에 보는 사람이 방향을 못 가린다. */
-  const [shots, setShots] = useState<{ url: string; label: string }[]>([]);
+  const [shots, setShots] = useState<
+    { id: string; url: string; label: string }[]>([]);
   const [sheetState, setSheetState] = useState<'idle' | 'saving' | 'error'>('idle');
   const [sheetError, setSheetError] = useState<string | null>(null);
 
@@ -2083,8 +2084,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   sheetValues={sheetValues?.values ?? null}
                   onCorrectionChange={(pointId, value) =>
                     overlayScanId && onOverrideChange(overlayScanId, pointId, value)}
-                  onCapture={(url, label) =>
-                    setShots((current) => [...current, { url, label }])}
+                  onCapture={(url, label) => setShots((current) => [...current,
+                    // 지울 때 뒤 장들의 열쇠가 바뀌지 않게 고유한 값을 준다.
+                    { id: `S-${Date.now().toString(36)}-${current.length}`,
+                      url, label }])}
                   morph={morph} morphMode={morphMode}
                   regions={[...standardZones, ...(regionsByCad[notesKey] ?? [])]}
                   onRegionsChange={(next) => notesKey && setRegionsByCad(
@@ -2391,6 +2394,13 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                   {sheetValues.hiddenCount > 0
                     ? ` · 숨긴 포인트 ${sheetValues.hiddenCount}개 제외` : ''}
                 </span>}
+                {overlay && overlay.mended && overlay.mended.length > 0 &&
+                  <span className="cad-overlay-bar__note">
+                    판독 {overlay.mended.length}개는 소수점이 빠져 있어 되살렸습니다
+                    ({overlay.mended.slice(0, 3)
+                      .map((m) => `${m.was}→${m.value}`).join(', ')}
+                    {overlay.mended.length > 3 ? ' 외' : ''})
+                  </span>}
                 {overlay && overlay.rejected && overlay.rejected.length > 0 &&
                   <span className="cad-overlay-bar__err">
                     판독값 {overlay.rejected.length}개 제외 — 컬러바 범위
@@ -2410,7 +2420,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
                 </span>
                 <div className="shot-strip__row">
                   {shots.map((shot, order) => (
-                    <figure key={`${shot.label}-${order}`} className="shot-card">
+                    <figure key={shot.id} className="shot-card">
                       <img src={shot.url} alt={`${shot.label} 화면`} />
                       <figcaption>{order + 2}쪽 · {shot.label}</figcaption>
                       <button type="button" aria-label={`${shot.label} 화면 빼기`}

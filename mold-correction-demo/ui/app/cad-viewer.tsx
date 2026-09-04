@@ -72,6 +72,9 @@ export type CadOverlay = {
   /* 컬러바 범위를 벗어나 제외한 판독. 실측 JD_67XX6 에서 +9.00 이
      5건 나왔는데 그 부품 컬러바는 +3.0~-3.0 이다. */
   rejected?: { id: string; value: number }[];
+  /* 소수점이 날아간 판독을 되살린 것. 실측 64XX2 에서 6 · 80 · -10 이
+     각각 0.6 · 0.8 · -1.0 이었다. 조용히 고치면 안 되므로 화면에 알린다. */
+  mended?: { id: string; was: number; value: number }[];
   colorbarLimit?: number | null;
 };
 
@@ -130,6 +133,11 @@ export type CadRegion = {
   note?: string;
   /* 좌표로 등록해 둔 표준 구역에서 왔는가 — 손으로 그린 것과 구분한다. */
   standard?: boolean;
+  /* 제로라인 기준으로 저절로 잡은 구역인가.
+     id 앞글자로 가리려다 손으로 그린 구역도 `Z-` 로 시작한다는 걸
+     놓쳤다 — 그대로 뒀으면 자동 구역을 지울 때 손으로 칠한 것까지
+     같이 지워졌다. 지우고 다시 잡는 대상을 이 표시로만 고른다. */
+  auto?: boolean;
   /* 예전 형식. 저장해 둔 작업을 계속 읽으려고 남겨 둔다. */
   at?: [number, number, number];
   radius?: number;
@@ -1837,11 +1845,31 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
          * 나오는 모서리**가 곧 그 구역의 바깥선이다 — 안쪽 모서리는 이웃한
          * 삼각형 둘이 공유하므로 두 번 나온다. 그 선만 그리면 곡면을 그대로
          * 따라가는 닫힌 윤곽이 남는다. */
+        /* 먼저 같은 자리 정점을 하나로 본다(용접).
+         *
+         * STEP 삼각망은 같은 좌표에 정점을 여러 개 둔다 — 면마다 따로
+         * 쪼개 내보내기 때문이다. 실측 64XX1 은 정점 302,340개 중 자리가
+         * 서로 다른 것이 92,515개뿐이었고, 그대로 세면 안쪽 모서리가
+         * 이웃과 짝을 못 이뤄 셋 중 하나가 바깥선으로 잡힌다. 그러면
+         * 테두리가 아니라 그물이 그려진다. */
+        const canon = new Map<string, number>();
+        const welded = (vertex: number) => {
+          const key = `${position.getX(vertex).toFixed(3)}`
+            + `_${position.getY(vertex).toFixed(3)}`
+            + `_${position.getZ(vertex).toFixed(3)}`;
+          const found = canon.get(key);
+          if (found !== undefined) return found;
+          canon.set(key, vertex);
+          return vertex;
+        };
+
         const rim = new Map<string, [number, number]>();
         for (let i = 0; i < keep.length; i += 3) {
           const corner = [keep[i], keep[i + 1], keep[i + 2]];
           for (let k = 0; k < 3; k += 1) {
-            const from = corner[k], to = corner[(k + 1) % 3];
+            const from = welded(corner[k]);
+            const to = welded(corner[(k + 1) % 3]);
+            if (from === to) continue;          // 눌린 삼각형
             const key = from < to ? `${from}_${to}` : `${to}_${from}`;
             if (rim.has(key)) rim.delete(key);   // 안쪽 모서리
             else rim.set(key, [from, to]);
@@ -1992,7 +2020,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         typeof p.value === 'number' && Math.abs(p.value) >= 0.05);
     if (!points.length || !onRegionsChange) return;
 
-    const scale = viewApi.current?.radius ?? 100;
+    // 부품 크기를 못 읽었으면 잡지 않는다. 100mm 로 갈음하면 큰 부품에서
+    // 포인트마다 구역이 하나씩 생겨 화면이 못 쓰게 된다.
+    const scale = viewApi.current?.radius ?? 0;
+    if (scale <= 0) return;
     const near = scale * 0.12;
     const nearSq = near * near;
     const gap = (a: number[], b: number[]) =>
@@ -2018,7 +2049,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         if (group.length < 2) continue;   // 외톨이 하나는 구역이라 하지 않는다
         const worst = Math.max(...group.map((k) => Math.abs(mine[k].value)));
         made.push({
-          id: `Z-${sign > 0 ? 'W' : 'C'}${made.length}-${Date.now().toString(36)}`,
+          id: `ZA-${sign > 0 ? 'W' : 'C'}${made.length}-${Date.now().toString(36)}`,
+          auto: true,
           // 붙일 자리는 용접, 깎을 자리는 가공. 금형은 사람이 고른다.
           die: '하형',
           work: sign > 0 ? '용접' : '가공',
@@ -2029,7 +2061,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       }
     }
     // 손으로 그린 구역은 남기고 자동 구역만 갈아 끼운다.
-    const byHand = (regions ?? []).filter((r) => !r.id.startsWith('Z-'));
+    const byHand = (regions ?? []).filter((r) => !r.auto);
     onRegionsChange([...byHand, ...made]);
     setZoning(true);
   };
@@ -2316,11 +2348,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
               : '먼저 스캔을 골라 보정량을 올리세요'}>
             제로라인 기준 자동
           </button>
-          {(regions ?? []).some((r) => r.id.startsWith('Z-')) && (
+          {(regions ?? []).some((r) => r.auto) && (
             <button type="button"
               title="자동으로 잡은 구역만 지웁니다 (손으로 그린 것은 남습니다)"
               onClick={() => onRegionsChange?.(
-                (regions ?? []).filter((r) => !r.id.startsWith('Z-')))}>
+                (regions ?? []).filter((r) => !r.auto))}>
               자동 구역 지우기
             </button>
           )}
