@@ -98,6 +98,9 @@ class FolderMigrationResult:
     moved: int
     skipped: int
     errors: list[str]
+    # 자리표시(.gitkeep)만 옮겨진 수. 빈 폴더뿐인 트리에서는 moved 가 0 이라
+    # 이 값이 있어야 "구조는 바뀌었다"를 알릴 수 있다.
+    structure_moved: int = 0
 
 
 def migrate_folder_structure(
@@ -247,13 +250,16 @@ def migrate_folder_structure(
             pass
 
     moved = 0
+    structure_moved = 0
     for stage, destination in staged:
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             if destination.exists():
                 destination = _next_available_path(destination)
             shutil.move(str(stage), str(destination))
-            if destination.name.casefold() not in PLACEHOLDER_NAMES:
+            if destination.name.casefold() in PLACEHOLDER_NAMES:
+                structure_moved += 1
+            else:
                 moved += 1
         except OSError as exc:
             errors.append(f"{destination.relative_to(folder_root)}: {exc}")
@@ -262,7 +268,9 @@ def migrate_folder_structure(
     except OSError:
         if staging_root.exists():
             errors.append(f"임시 이동 폴더를 정리하지 못했습니다: {staging_root.name}")
-    return FolderMigrationResult(moved=moved, skipped=skipped, errors=errors)
+    return FolderMigrationResult(
+        moved=moved, skipped=skipped, errors=errors, structure_moved=structure_moved,
+    )
 
 
 @dataclass(frozen=True)

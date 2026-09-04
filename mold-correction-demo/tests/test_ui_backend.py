@@ -245,6 +245,42 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             self.assertEqual(again.moved, 0)
             self.assertEqual(again.errors, [])
 
+    def test_placeholder_only_tree_reports_the_structure_it_rebuilt(self) -> None:
+        """빈 폴더뿐인 트리도 배치가 바뀌었음을 알려야 한다.
+
+        .gitkeep 은 옮긴 파일로 세지 않으므로, 실제 파일이 없는 트리에서는
+        moved 가 늘 0 이다. 그것만 보고 화면이 "제자리입니다"라고 알리면
+        폴더는 실제로 재배치됐는데 아무 일도 없었던 것처럼 보인다.
+        """
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            keep = root / "64XX2" / "JD" / "01. 3D제품데이터" / ".gitkeep"
+            keep.parent.mkdir(parents=True)
+            keep.touch()
+
+            result = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+
+            self.assertEqual(result.errors, [])
+            self.assertEqual(result.moved, 0)
+            self.assertEqual(result.structure_moved, 1)
+            self.assertTrue(
+                (root / "01. 3D제품데이터" / "JD" / "64XX2" / ".gitkeep").exists()
+            )
+            self.assertFalse(keep.exists())
+
+            # 같은 순서로 다시 저장하면 옮길 것이 없으므로 둘 다 0 이어야 한다.
+            again = backend_server.migrate_folder_structure(
+                root,
+                backend_server.FILE_ORGANIZER_RULES,
+                ["category", "vehicle", "item", "detail"],
+            )
+            self.assertEqual(again.moved, 0)
+            self.assertEqual(again.structure_moved, 0)
+
     def test_classification_follows_selected_folder_order(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             destination_root = Path(temp) / "organized"

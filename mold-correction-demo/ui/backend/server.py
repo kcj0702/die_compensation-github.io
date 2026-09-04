@@ -2086,6 +2086,7 @@ async def file_organizer_folder_order(request: Request) -> JSONResponse:
                 "migration": {
                     "moved": migration.moved,
                     "skipped": migration.skipped,
+                    "structureMoved": migration.structure_moved,
                     "errors": migration.errors,
                 },
             }

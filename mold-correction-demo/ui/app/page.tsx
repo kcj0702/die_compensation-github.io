@@ -1547,14 +1547,19 @@ function FileOrganizerPage() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ folderOrder }),
       });
-      const data = await response.json() as FolderOrderResponse & { migration?: { moved: number; skipped: number; errors: string[] } };
+      const data = await response.json() as FolderOrderResponse & { migration?: { moved: number; skipped: number; structureMoved?: number; errors: string[] } };
       if (!response.ok) throw new Error(data.error || '폴더 순서를 저장하지 못했습니다.');
       setFolderOrder(normalizeFolderOrder(data.folderOrder));
       const migration = data.migration;
+      /* 빈 폴더뿐인 트리에서는 옮긴 파일이 0개라도 폴더 배치는 실제로 바뀐다.
+         그때 "제자리입니다"라고만 알리면 화면과 디스크가 어긋나 보인다. */
+      const errorNote = migration?.errors.length ? ` · 오류 ${migration.errors.length}건` : '';
       const summary = migration
         ? migration.moved > 0
-          ? `파일 ${migration.moved}개를 새 구조로 옮겼습니다${migration.errors.length ? ` · 오류 ${migration.errors.length}건` : ''}.`
-          : '모든 파일이 이미 제자리입니다 — 옮길 파일이 없습니다.'
+          ? `파일 ${migration.moved}개를 새 구조로 옮겼습니다${errorNote}.`
+          : (migration.structureMoved ?? 0) > 0
+            ? `옮길 파일은 없었고, 빈 폴더 ${migration.structureMoved}개를 새 순서로 재배치했습니다${errorNote}.`
+            : '모든 파일이 이미 제자리입니다 — 옮길 파일이 없습니다.'
         : '폴더 순서를 저장했습니다.';
       setNotice({ tone: migration?.errors.length ? 'error' : 'success', text: summary });
       setShowFolderOrder(false);
