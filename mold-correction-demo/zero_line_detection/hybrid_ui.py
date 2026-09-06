@@ -59,7 +59,13 @@ def _matching_review_spec(filename: str):
 
 
 def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
-    """Expose each final zero region boundary in the response schema."""
+    """Expose each final zero region boundary in the response schema.
+
+    `cv2.findContours` gives an open point list (last point does not repeat
+    the first) even though the boundary is a closed loop. Consumers that draw
+    this as an open polyline(<polyline> in the UI) would then show every
+    region missing its last edge. Repeating the first point closes it.
+    """
     contours, _ = cv2.findContours(
         mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
@@ -67,7 +73,8 @@ def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
     for index, contour in enumerate(contours, start=1):
         points = contour.reshape(-1, 2)
         if len(points) >= 2:
-            lines.append({"id": index, "points": points.tolist()})
+            closed = np.vstack([points, points[:1]])
+            lines.append({"id": index, "points": closed.tolist()})
     return lines
 
 
@@ -185,10 +192,19 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
             tint = np.zeros_like(overlay)
             tint[final_mask] = (0, 235, 255)
             overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
+            # [버그였던 부분] Case 1(영역/다각형) 은 "선" 이 아니라 "면" 이라는
+            # 이유로 lines=[] 를 그냥 박아 뒀다. 하지만 다각형도 윤곽선을 따면
+            # 얼마든지 폴리라인으로 낼 수 있다 — 검토용(리뷰 자산) 경로의
+            # `_mask_contours_as_lines` 가 이미 이 방식을 쓴다. 여기서도 같은
+            # 함수를 재사용하면, 시트 화면(제품데이터 위 SVG 오버레이)에도
+            # Case 1 결과가 실제로 그려진다. 지금까지는 review 자산이 없는
+            # 이 PC 에서 Case 1 로 떨어진 스캔(67XX6 등)은 항상 "라인 없음"
+            # 으로 보였다.
             return HybridZeroLineOutput(
                 mask=final_mask.astype(bool), overlay_rgb=overlay, case=1,
                 regions=int(cv2.connectedComponents(final_mask.astype(np.uint8))[0] - 1),
-                ratio=float(final_mask.sum()) / part_px, lines=[],
+                ratio=float(final_mask.sum()) / part_px,
+                lines=_mask_contours_as_lines(final_mask.astype(np.uint8)),
                 warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
             )
 
@@ -213,8 +229,15 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
         )
     except Exception as exc:
         overlay = make_overlay(rgb, base.mask, base.centerline, zero_crossing=base.zero_crossing)
+        # 위 Case 1 분기와 같은 이유로, 여기서도 base.mask(영역) 를 폴리라인
+        # 윤곽선으로 뽑아 lines 를 채운다 — 컬러바 인식 실패 등으로 case2 가
+        # 죽어 이 최종 폴백까지 떨어져도 최소한 "면적 윤곽" 은 벡터로 보인다.
+        try:
+            fallback_lines = _mask_contours_as_lines(base.mask.astype(np.uint8))
+        except Exception:
+            fallback_lines = []
         return HybridZeroLineOutput(
             mask=base.mask.astype(bool), overlay_rgb=overlay, case=1,
-            regions=len(base.result.regions), ratio=fallback_ratio, lines=[],
+            regions=len(base.result.regions), ratio=fallback_ratio, lines=fallback_lines,
             warnings=list(base.warnings) + [f"Case 2 경로 계산 실패로 Case 1 후보를 표시했습니다: {exc}"],
         )

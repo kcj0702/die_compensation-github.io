@@ -88,6 +88,7 @@ from product_alignment.masks import (  # noqa: E402
 )
 from product_alignment.registry import (  # noqa: E402
     AlignmentStore,
+    MeshLibrary,
     ProductLibrary,
     part_number_from_name,
     read_image,
@@ -101,6 +102,13 @@ from sheet_export import (  # noqa: E402
     crop_view,
     stack_workbooks,
 )
+from cad_import.mesh_io import (  # noqa: E402
+    SUPPORTED_SUFFIXES as MESH_SUPPORTED_SUFFIXES,
+    is_mesh_file, load_any as load_any_mesh, load_mesh,
+    split_symmetric_pair, to_web_mesh,
+)
+from cad_import.overlay import fit_view as fit_mesh_view  # noqa: E402
+from cad_import.catia_capture import capture_product_image as capture_catia_product_image  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
 from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
@@ -161,6 +169,48 @@ FOLDER_ROOT = _initial_organizer_root(
 FILE_SOURCE_ROOT = _initial_organizer_root(
     "AJIN_FILE_SOURCE_ROOT", "sourceRoot", FILE_ORGANIZER_RULES["source_root"]
 )
+
+# CATIA 원본이 있는 실제 업무 폴더 — 사용자가 UI 에서 지정한다. 여기 안에서
+# 재귀적으로 파일명이 품번과 맞는 .CATPart / STEP / STL 을 찾는다. 이 저장소
+# 안 data/product_mesh 는 별도(직접 업로드용) — 이쪽은 검색용이다.
+_CAD_SOURCE_PATH_FILE = UI_DIR / "backend" / ".cad_source_path.json"
+
+
+def _load_cad_source_override() -> Path | None:
+    if not _CAD_SOURCE_PATH_FILE.is_file():
+        return None
+    try:
+        data = json.loads(_CAD_SOURCE_PATH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = str((data or {}).get("path", "")).strip() if isinstance(data, dict) else ""
+    return Path(raw).resolve() if raw else None
+
+
+def _default_cad_source_root() -> Path | None:
+    """UI 설정도 env 도 없을 때 쓸 기본 폴백.
+
+    현업 PC 는 CATIA 원본을 사용자 데스크톱 아래 프로젝트 폴더(ajin4)에
+    두는 습관이 굳어 있어, 그 안 어디에 던져 두어도 재귀 스캔이 잡아낸다.
+    폴더가 존재하지 않으면(다른 PC) None 을 준다.
+    """
+    candidate = Path.home() / "Desktop" / "ajin4"
+    return candidate.resolve() if candidate.is_dir() else None
+
+
+def _initial_cad_source_root() -> Path | None:
+    env_value = os.environ.get("AJIN_CAD_ROOT", "").strip()
+    if env_value:
+        return Path(env_value).resolve()
+    override = _load_cad_source_override()
+    if override is not None:
+        return override
+    return _default_cad_source_root()
+
+
+# UI/env 로 명시 지정한 게 없으면 사용자 데스크톱의 프로젝트 폴더를 폴백으로.
+# 사용자가 아무 설정 없이도 CATIA 원본을 그 안에 두면 자동 매칭이 성립한다.
+CAD_SOURCE_ROOT: Path | None = _initial_cad_source_root()
 FILE_STAGING_ROOT = UI_DIR / "backend" / "file_staging"
 FILE_LOG_ROOT = UI_DIR / "backend" / "file_operation_logs"
 MAX_FILE_ORGANIZER_UPLOAD_BYTES = 500 * 1024 * 1024
@@ -557,6 +607,9 @@ def _optional_source_entry_id(value: Any) -> int | None:
 # 등록해 두면 이후 스캔은 지금처럼 파일 하나만 올려도 자동으로 짝이 맞는다.
 PRODUCT_LIBRARY = ProductLibrary()
 ALIGNMENT_STORE = AlignmentStore()
+# CATIA 에서 export 한 STEP/STL 을 품번당 한 파일로 보관한다. PNG 가 없으면
+# 스캔 마스크에 fit_view 로 뷰를 맞춰 즉석 렌더한다.
+MESH_LIBRARY = MeshLibrary()
 
 
 def _is_complete_qwen_model(candidate: Path) -> bool:
@@ -856,6 +909,244 @@ def _resolve_product_image(
         return None, None, warnings
 
 
+# 재귀 스캔에서 반드시 건너뛰어야 할 폴더 이름들.
+# node_modules 하나만 수십만 파일이라, 프루닝 없이 rglob 을 돌리면 HTTP 핸들러가
+# 통째로 잠긴다. .venv/.git/__pycache__/.next/AJ_ENV/.local_archive 도 같은 이유.
+_CAD_SCAN_SKIP_DIRS = {
+    "node_modules", ".venv", ".git", "__pycache__", ".next", "AJ_ENV",
+    ".local_archive", ".pytest_cache", ".cache", ".idea", ".vscode",
+    "dist", "build", "out",
+}
+
+
+def _walk_cad_source(root: Path):
+    """os.walk 을 쓰되 위 노이즈 폴더는 즉시 프루닝. 파일 Path 를 순차 산출한다."""
+    for dir_path, dir_names, file_names in os.walk(root):
+        # 원소를 제거해 하위 재귀를 막는다 (os.walk 의 정식 프루닝 방식).
+        dir_names[:] = [d for d in dir_names if d not in _CAD_SCAN_SKIP_DIRS]
+        base = Path(dir_path)
+        for name in file_names:
+            yield base / name
+
+
+def _find_cad_source_for_part(part_number: str) -> Path | None:
+    """CAD_SOURCE_ROOT 안을 재귀적으로 훑어 품번과 맞는 CAD 파일을 하나 고른다.
+
+    같은 품번이 여러 파일에 걸릴 수 있어 우선순위를 준다:
+      1) 파일명이 정확히 <품번>.<ext> — 가장 명확
+      2) 파일명이 정확히 <베이스품번>.<ext> — 접두어 매칭 폴백
+      3) 파일명이 품번을 포함(예: `64XX2-DR000 3D모델.CATPart`)
+    확장자 우선순위는 STEP > STL > CATPart 순 — STEP 이 있으면 변환 없이 바로 로드
+    가능하고, STL 은 CATIA export 시 tessellation 이 이미 굳어 오지만 열기 쉽다.
+    CATPart 는 CATIA COM 을 거쳐야 하므로 마지막.
+    """
+    if CAD_SOURCE_ROOT is None or not CAD_SOURCE_ROOT.is_dir():
+        return None
+    from product_alignment.registry import base_number
+    part_upper = part_number.upper()
+    prefix_upper = base_number(part_upper)
+    supported = tuple(MeshLibrary.SUPPORTED_SUFFIXES)
+    priority = {".step": 0, ".stp": 0, ".stl": 1, ".ply": 1, ".obj": 1,
+                ".off": 1, ".glb": 1, ".gltf": 1, ".3mf": 1,
+                ".catpart": 2, ".catproduct": 3}
+
+    candidates: list[tuple[int, int, Path]] = []
+    try:
+        for candidate in _walk_cad_source(CAD_SOURCE_ROOT):
+            suffix = candidate.suffix.lower()
+            if suffix not in supported:
+                continue
+            stem_upper = candidate.stem.upper()
+            if stem_upper == part_upper:
+                match_rank = 0
+            elif stem_upper == prefix_upper:
+                match_rank = 1
+            elif part_upper in stem_upper or prefix_upper in stem_upper:
+                match_rank = 2
+            else:
+                continue
+            candidates.append((match_rank, priority.get(suffix, 9), candidate))
+            # 정확 매칭이 걸리는 순간 더 볼 이유가 없다 — 조기 종료로 초 단위 절약.
+            if match_rank == 0 and priority.get(suffix, 9) <= 1:
+                break
+    except (OSError, PermissionError):
+        return None
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], str(item[2]).lower()))
+    return candidates[0][2]
+
+
+def _cad_cache_dir() -> Path:
+    """CATIA 변환 등 캐시 산출물을 두는 곳. mesh 라이브러리 폴더 안이라
+    저장소 .gitignore 에 의해 자동 제외된다.
+    """
+    return MESH_LIBRARY.directory / ".cache"
+
+
+def _mesh_not_found_message(part_number: str | None) -> str:
+    """CAD 파일을 못 찾았을 때 사용자에게 이유와 대안을 알려 줄 문구.
+
+    "제품데이터도 mesh 도 없어서 이 스캔 위엔 아무것도 못 올렸음" 이 되기 전에,
+    등록된 파일과 자동 스캔 폴더를 함께 보여 준다 — 사용자는 파일이 왜 안
+    매칭됐는지(품번 오타/파일 위치/이름 규칙)를 바로 확인할 수 있다.
+    """
+    library = MESH_LIBRARY.registered()
+    lines: list[str] = []
+    if part_number:
+        lines.append(f"{part_number} 에 매칭되는 CAD 파일이 없습니다.")
+    else:
+        lines.append("스캔 파일 이름에서 품번을 찾지 못해 CAD 매칭을 시도하지 못했습니다.")
+    if library:
+        lines.append(f"등록된 CAD: {', '.join(library[:6])}" + ("…" if len(library) > 6 else ""))
+    if CAD_SOURCE_ROOT is not None:
+        lines.append(f"자동 스캔 폴더: {CAD_SOURCE_ROOT}")
+    return " · ".join(lines)
+
+
+def _resolve_product_from_mesh(
+    part_number: str | None, scan_image: np.ndarray,
+) -> tuple[np.ndarray, str, list[str]] | None:
+    """등록된 mesh 로 CATIA 제품데이터 이미지를 즉석으로 만든다.
+
+    실패 요인(등록 없음, 마스크 비어 있음, 로드 실패, 뷰 fit 실패, CATIA
+    캡처 실패) 모두 None 을 준다. 반환하면 (이미지, 출처, 경고) — 이 이미지는
+    실제 촬영된 제품데이터 PNG 와 똑같은 대접을 받는다: 호출자가 이걸
+    그대로 `_align_to_product` 에 넘겨서 좌우반전·위치·스케일을 그 검증된
+    2D 실루엣 매칭 엔진이 정하게 한다. mesh/fit 은 "어느 축 방향에서
+    찍을까" 를 고르는 데까지만 쓰인다 — 정밀한 정합은 여기서 안 한다
+    (이전에 mesh 좌표만으로 정합까지 하려다 CATIA 카메라의 실제 좌우
+    방향(handedness)을 잘못 가정해 뒤집힌 채 나온 적이 있었다).
+
+    [로깅]
+    이 경로는 개발 중이라 어디서 실패하는지 눈으로 볼 수 있어야 한다.
+    각 단계 시작·완료를 stderr 에 짧게 남긴다 — backend.err.log 로 흘러
+    사용자가 문의할 때 함께 확인할 수 있다.
+    """
+    def _log(message: str) -> None:
+        print(f"[mesh] {message}", file=sys.stderr, flush=True)
+
+    _log(f"resolve start part={part_number!r}")
+    if not part_number:
+        _log("skip: no part number")
+        return None
+
+    warnings: list[str] = []
+    match_path: Path | None = None
+    match_name: str = part_number
+
+    match = MESH_LIBRARY.find(part_number)
+    if match is not None:
+        match_path = match.path
+        match_name = match.part_number
+        _log(f"library hit: {match_path.name} (exact={match.exact})")
+        if not match.exact:
+            warnings.append(
+                f"{part_number} 에 정확히 맞는 mesh 가 없어 {match.part_number} 를 사용했습니다."
+            )
+
+    if match_path is None:
+        # 로컬 라이브러리에 없으면 사용자가 지정한 CAD 소스 폴더를 재귀 스캔.
+        _log("library miss — scanning CAD source root")
+        found = _find_cad_source_for_part(part_number)
+        if found is not None:
+            match_path = found
+            match_name = found.stem
+            _log(f"source scan hit: {found}")
+            warnings.append(f"CAD 소스 폴더에서 자동 매칭됨: {found.name}")
+
+    if match_path is None:
+        _log("no CAD file matched — giving up")
+        return None
+
+    import time as _time
+    step_t0 = _time.time()
+    try:
+        mesh = load_any_mesh(match_path, cache_dir=_cad_cache_dir())
+    except Exception as exc:
+        _log(f"load_any_mesh FAIL after {(_time.time()-step_t0):.1f}s: {type(exc).__name__}: {exc}")
+        warnings.append(f"등록된 mesh 를 열지 못했습니다({match_path.name}): {exc}")
+        return None
+    _log(f"mesh loaded {_time.time()-step_t0:.1f}s v={len(mesh.vertices)} f={len(mesh.faces)}")
+
+    step_t0 = _time.time()
+    try:
+        scan_mask = build_part_silhouette(scan_image)
+    except Exception as exc:
+        _log(f"scan mask FAIL: {exc}")
+        warnings.append(f"스캔 마스크를 만들지 못했습니다: {exc}")
+        return None
+    mask_pixels = int((scan_mask > 0).sum())
+    _log(f"scan mask {_time.time()-step_t0:.1f}s nonzero={mask_pixels}")
+    if mask_pixels == 0:
+        _log("scan mask empty — cannot fit")
+        warnings.append("스캔에서 부품 영역을 찾지 못해 mesh 뷰를 정렬할 수 없습니다.")
+        return None
+
+    # 현업 CATPart 는 좌우 대칭쌍(LH+RH)을 한 파일에 같이 담아 두는 경우가
+    # 있다(실측 71XX2). 스캔은 그중 한쪽만 찍은 것이라, 둘을 합친 mesh 로
+    # fit_view 를 돌리면 "합쳐진 실루엣" 과 "부품 하나짜리 스캔" 을 맞추려다
+    # 엉뚱한 축으로 수렴한다. 정점 좌표에 큰 빈틈이 있으면(=몸통이 둘) 둘로
+    # 쪼개 각각 fit_view 를 돌리고, 스캔과 더 잘 맞는 쪽을 쓴다.
+    mesh_parts = split_symmetric_pair(
+        np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64)
+    )
+    if len(mesh_parts) > 1:
+        _log(f"mesh split into {len(mesh_parts)} candidate parts (symmetric-pair gap detected)")
+
+    step_t0 = _time.time()
+    fit = None
+    fit_vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    fit_faces = np.asarray(mesh.faces, dtype=np.int64)
+    for idx, (part_vertices, part_faces) in enumerate(mesh_parts):
+        try:
+            candidate_fit = fit_mesh_view(part_vertices, part_faces, scan_mask)
+        except Exception as exc:
+            _log(f"fit_view candidate {idx} FAIL: {type(exc).__name__}: {exc}")
+            continue
+        candidate_score = float(candidate_fit.detail_iou or candidate_fit.iou)
+        _log(f"fit candidate {idx} v={len(part_vertices)} axis={candidate_fit.axis} "
+             f"sign={candidate_fit.sign} iou={candidate_fit.iou} detail={candidate_fit.detail_iou}")
+        if fit is None or candidate_score > float(fit.detail_iou or fit.iou):
+            fit = candidate_fit
+            fit_vertices, fit_faces = part_vertices, part_faces
+    if fit is None:
+        _log(f"fit_view FAIL after {(_time.time()-step_t0):.1f}s: all candidates failed")
+        warnings.append("mesh 뷰를 스캔에 맞추지 못했습니다.")
+        return None
+    if len(mesh_parts) > 1:
+        warnings.append("이 CAD 파일은 대칭쌍(좌우 한 쌍)으로 보여 스캔과 더 잘 맞는 한쪽만 사용했습니다.")
+    _log(f"fit {_time.time()-step_t0:.1f}s (winner v={len(fit_vertices)}) axis={fit.axis} sign={fit.sign} "
+         f"flip_u={fit.flip_u} flip_v={fit.flip_v} swap={getattr(fit,'swap',False)} "
+         f"angle={getattr(fit,'angle',0.0):.4f} mm_per_px={fit.mm_per_px:.4f} "
+         f"origin_u={fit.origin_u:.2f} origin_v={fit.origin_v:.2f} "
+         f"iou={fit.iou} detail={fit.detail_iou}")
+
+    # CATIA 를 열어 fit 이 고른 축 방향(axis/sign/swap)의 실제 셰이딩(부품별
+    # 지정 색상·재질)을 캡처하고, 부품만 딱 잘라낸다. 정밀한 각도·스케일·
+    # 좌우 방향은 여기서 안 맞춘다 — 아래에서 호출자가 이 이미지를 실제
+    # 제품데이터 PNG 와 동일하게 `_align_to_product` 로 넘겨 그 검증된 2D
+    # 매칭 엔진이 정하게 한다. 첫 캡처는 CATIA 기동 포함 20~50초, 이후 같은
+    # (파일,axis,sign,swap) 조합은 캐시로 즉시.
+    step_t0 = _time.time()
+    try:
+        rendered = capture_catia_product_image(match_path, fit, _cad_cache_dir())
+    except Exception as exc:
+        _log(f"catia capture FAIL after {(_time.time()-step_t0):.1f}s: {type(exc).__name__}: {exc}")
+        warnings.append(f"CATIA 캡처에 실패했습니다: {exc}")
+        return None
+    _log(f"catia capture {_time.time()-step_t0:.1f}s shape={rendered.shape}")
+
+    fit_iou = float(getattr(fit, "detail_iou", 0.0) or getattr(fit, "iou", 0.0))
+    source_note = f"CATIA 캡처 · {match_name} ({match_path.suffix.lstrip('.').upper()})"
+    if fit_iou < 0.6:
+        warnings.append(
+            f"mesh 뷰 실루엣 겹침이 낮습니다({fit_iou:.2f}) — 스캔이 정투영이 아니거나 부품이 다를 수 있습니다."
+        )
+    return rendered, source_note, warnings
+
+
 def _align_to_product(
     image: np.ndarray,
     product_image: np.ndarray,
@@ -903,6 +1194,21 @@ def analyze_image(
     )
     alignment = None
     alignment_overlay: np.ndarray | None = None
+    # PNG 등록/업로드가 없으면 mesh 라이브러리에서 CATIA 캡처로 즉석 제품
+    # 이미지를 만든다. 이 이미지는 실제 촬영된 제품데이터 PNG 와 완전히
+    # 동일하게 취급한다 — 아래 _align_to_product(2D 실루엣·구멍 매칭, 좌우
+    # 반전 4가지 실측 비교) 를 그대로 거친다. mesh/CATIA 쪽에서 좌우 방향을
+    # 미리 장담하지 않는 이유는 capture_product_image 모듈 docstring 참고.
+    if product_image is None and product_upload is None:
+        mesh_result = _resolve_product_from_mesh(part_number, image)
+        if mesh_result is not None:
+            product_image, product_source, mesh_warnings = mesh_result
+            product_warnings.extend(mesh_warnings)
+        else:
+            # 매칭 실패 이유를 사용자에게 명확히 알려 준다 — 조용히 넘어가면
+            # UI 는 그냥 "제품데이터 없음"으로만 보이고 이유를 알 수 없다.
+            product_warnings.append(_mesh_not_found_message(part_number))
+
     if product_image is not None:
         try:
             # 라벨을 읽기 전에 방향부터 바로잡는다. 사람이 이미 확정한 방향이거나
@@ -1016,7 +1322,13 @@ def analyze_image(
         zero_datum_mask = hybrid_zero.mask
         zero_overlay = hybrid_zero.overlay_rgb
         zero_lines = hybrid_zero.lines
+        print(f"[zero] hybrid case={hybrid_zero.case} lines={len(zero_lines)} "
+              f"ratio={hybrid_zero.ratio:.4f} regions={hybrid_zero.regions} "
+              f"warnings={hybrid_zero.warnings}",
+              file=sys.stderr, flush=True)
     except Exception as exc:
+        print(f"[zero] pipeline FAIL: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
         errors["zero"] = str(exc)
 
     points: list[dict[str, Any]] = []
@@ -1246,6 +1558,7 @@ async def health(_: Request) -> JSONResponse:
             ],
             "folderAvailable": FOLDER_ROOT.is_dir(),
             "registeredProducts": len(PRODUCT_LIBRARY.registered()),
+            "registeredMeshes": len(MESH_LIBRARY.registered()),
             "qwenCached": model_path is not None,
             "qwenLoaded": _reader is not None,
             "cuda": torch.cuda.is_available(),
@@ -1645,6 +1958,200 @@ async def products(request: Request) -> JSONResponse:
         return JSONResponse({"partNumber": part_number, "path": str(path)})
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+# STEP/STL 은 이미지보다 훨씬 커서 60MB 상한을 넘길 수 있다. 실측 CATPart
+# 하나가 53.7MB 였으니 STEP export 는 그보다 크기 쉽다.
+MAX_MESH_UPLOAD_BYTES = 200 * 1024 * 1024
+
+
+async def meshes(request: Request) -> JSONResponse:
+    """CATIA 에서 export 한 STEP/STL 을 품번당 하나 보관/조회한다.
+
+    등록해 두면 이후 스캔 분석에서 제품 PNG 대신 이 mesh 로 뷰를 즉석
+    렌더한다. 삭제(DELETE)와 등록(POST) 은 partNumber 하나로 판단한다.
+    """
+    if request.method == "GET":
+        return JSONResponse({
+            "entries": MESH_LIBRARY.entries(),
+            "directory": str(MESH_LIBRARY.directory),
+            "supportedSuffixes": sorted(MeshLibrary.SUPPORTED_SUFFIXES),
+        })
+
+    if request.method == "DELETE":
+        raw_part_number = str(request.query_params.get("partNumber", "")).strip().upper()
+        if not raw_part_number:
+            return JSONResponse({"error": "품번이 필요합니다."}, status_code=400)
+        removed = await run_in_threadpool(MESH_LIBRARY.forget, raw_part_number)
+        if not removed:
+            return JSONResponse(
+                {"error": f"등록된 mesh 가 없습니다: {raw_part_number}"},
+                status_code=404,
+            )
+        return JSONResponse({"partNumber": raw_part_number, "removed": True})
+
+    # POST: mesh 파일 업로드.
+    try:
+        form = await request.form(
+            max_files=1, max_fields=4, max_part_size=MAX_MESH_UPLOAD_BYTES
+        )
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "CAD 파일이 필요합니다."}, status_code=400)
+
+        filename = getattr(upload, "filename", "") or ""
+        suffix = Path(filename).suffix.lower()
+        if suffix not in MeshLibrary.SUPPORTED_SUFFIXES:
+            allowed = ", ".join(sorted(MeshLibrary.SUPPORTED_SUFFIXES))
+            return JSONResponse(
+                {"error": f"지원하지 않는 확장자입니다: '{suffix or filename}'. 허용: {allowed}"},
+                status_code=400,
+            )
+
+        raw_part_number = str(form.get("partNumber", "")).strip().upper()
+        part_number = raw_part_number or part_number_from_name(filename)
+        if not part_number:
+            return JSONResponse(
+                {"error": "품번을 찾지 못했습니다. partNumber를 함께 보내 주세요."},
+                status_code=400,
+            )
+        if part_number_from_name(f"{part_number}.png") != part_number:
+            return JSONResponse(
+                {"error": f"품번 형식이 올바르지 않습니다: {part_number}"},
+                status_code=400,
+            )
+
+        data = await upload.read()
+        if len(data) > MAX_MESH_UPLOAD_BYTES:
+            return JSONResponse(
+                {"error": f"파일이 너무 큽니다({len(data):,} B). 상한 {MAX_MESH_UPLOAD_BYTES:,} B."},
+                status_code=400,
+            )
+
+        path = await run_in_threadpool(
+            MESH_LIBRARY.register, part_number, suffix, data
+        )
+        # 등록된 mesh 가 실제로 열리는지 즉시 검증한다. 열리지 않으면
+        # 지우고 오류를 반환해 사용자가 export 를 다시 하도록 유도한다.
+        try:
+            mesh = await run_in_threadpool(load_any_mesh, path)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            return JSONResponse(
+                {"error": f"등록된 파일을 읽지 못했습니다: {exc}"}, status_code=422
+            )
+        return JSONResponse({
+            "partNumber": part_number,
+            "path": str(path),
+            "format": suffix.lstrip("."),
+            "vertices": int(len(mesh.vertices)),
+            "faces": int(len(mesh.faces)),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def mesh_source(request: Request) -> JSONResponse:
+    """CATIA 원본이 사는 사용자 폴더를 관리한다.
+
+    GET  : 현재 경로, 존재 여부, 그 안에서 잡히는 CAD 파일 개수 요약.
+    POST : {"path": "..."} 로 새 경로 저장. 빈 문자열이면 설정 해제.
+    """
+    global CAD_SOURCE_ROOT
+
+    if request.method == "GET":
+        path = CAD_SOURCE_ROOT
+        info: dict[str, Any] = {
+            "configured": path is not None,
+            "path": str(path) if path is not None else "",
+            "exists": bool(path is not None and path.is_dir()),
+        }
+        if info["exists"]:
+            # 미리보기는 threadpool 에서 돌린다 — 큰 폴더는 몇 초 걸릴 수 있고,
+            # 그 사이 uvicorn 이벤트 루프가 잠기면 안 된다. 노이즈 폴더는
+            # _walk_cad_source 가 프루닝해 준다.
+            supported = tuple(MeshLibrary.SUPPORTED_SUFFIXES)
+
+            def _preview() -> tuple[int, list[str], str | None]:
+                samples: list[str] = []
+                count = 0
+                try:
+                    for candidate in _walk_cad_source(path):  # type: ignore[arg-type]
+                        if candidate.suffix.lower() not in supported:
+                            continue
+                        count += 1
+                        if len(samples) < 5:
+                            try:
+                                samples.append(str(candidate.relative_to(path)))  # type: ignore[arg-type]
+                            except ValueError:
+                                samples.append(candidate.name)
+                        if count >= 500:
+                            break
+                except (OSError, PermissionError) as exc:
+                    return count, samples, str(exc)
+                return count, samples, None
+
+            count, samples, scan_error = await run_in_threadpool(_preview)
+            info["fileCount"] = count
+            info["sampleFiles"] = samples
+            if scan_error:
+                info["scanError"] = scan_error
+        return JSONResponse(info)
+
+    # POST
+    try:
+        payload = await request.json()
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    raw = str((payload or {}).get("path", "")).strip()
+    if raw:
+        candidate = Path(raw).resolve()
+        if not candidate.is_dir():
+            return JSONResponse(
+                {"error": f"폴더가 존재하지 않거나 접근할 수 없습니다: {candidate}"},
+                status_code=400,
+            )
+        CAD_SOURCE_ROOT = candidate
+        try:
+            _CAD_SOURCE_PATH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CAD_SOURCE_PATH_FILE.write_text(
+                json.dumps({"path": str(candidate)}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"경로를 저장하지 못했습니다: {exc}"}, status_code=500
+            )
+        return JSONResponse({"configured": True, "path": str(candidate)})
+
+    # 빈 값이면 설정 해제.
+    CAD_SOURCE_ROOT = None
+    try:
+        if _CAD_SOURCE_PATH_FILE.is_file():
+            _CAD_SOURCE_PATH_FILE.unlink()
+    except OSError:
+        pass
+    return JSONResponse({"configured": False, "path": ""})
+
+
+async def mesh_reveal(_: Request) -> JSONResponse:
+    """CATIA .CATPart 를 직접 던져 넣을 폴더를 Windows 탐색기로 연다.
+
+    UI 상 "폴더 열기" 버튼이 여기 붙는다. 사용자가 파일을 그 폴더에 두면
+    다음 분석부터 자동으로 매칭되어 STEP 변환·렌더가 이어진다.
+    """
+    target = MESH_LIBRARY.directory
+    target.mkdir(parents=True, exist_ok=True)
+    if not hasattr(os, "startfile"):
+        return JSONResponse(
+            {"error": "이 서버 환경에서는 탐색기 열기를 지원하지 않습니다."},
+            status_code=400,
+        )
+    try:
+        os.startfile(str(target))  # noqa: S606
+    except OSError as exc:
+        return JSONResponse({"error": f"탐색기를 열지 못했습니다: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True, "directory": str(target)})
 
 
 async def confirm_alignment(request: Request) -> JSONResponse:
@@ -3077,6 +3584,9 @@ app = Starlette(
         Route("/api/realign", realign, methods=["POST"]),
         Route("/api/sheet", sheet, methods=["POST"]),
         Route("/api/products", products, methods=["GET", "POST"]),
+        Route("/api/mesh", meshes, methods=["GET", "POST", "DELETE"]),
+        Route("/api/mesh/reveal", mesh_reveal, methods=["POST"]),
+        Route("/api/mesh/source", mesh_source, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),

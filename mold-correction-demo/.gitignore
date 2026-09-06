@@ -5,6 +5,8 @@ data/output/*
 # 등록된 제품데이터 이미지와 품번별 확정 정렬은 회사 자료라 커밋하지 않는다.
 data/product/*
 data/alignment/*
+# CATIA .CATPart 원본과 그로부터 캐시된 STEP 도 회사 자료 — 절대 커밋 금지.
+data/product_mesh/*
 # 사내 보정시트 엑셀 양식도 마찬가지다.
 data/template/*
 
@@ -14,6 +16,7 @@ data/template/*
 !data/output/.gitkeep
 !data/product/.gitkeep
 !data/alignment/.gitkeep
+!data/product_mesh/.gitkeep
 !data/template/.gitkeep
 
 __pycache__/
