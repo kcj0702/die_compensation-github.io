@@ -65,13 +65,25 @@ def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
     the first) even though the boundary is a closed loop. Consumers that draw
     this as an open polyline(<polyline> in the UI) would then show every
     region missing its last edge. Repeating the first point closes it.
+
+    Case 1 is produced from a raster area mask, so even CHAIN_APPROX_SIMPLE can
+    leave a handle at every tiny pixel stair-step.  Those points add no useful
+    editing precision.  Increase Douglas-Peucker tolerance only until the
+    editable contour has at most 32 vertices; the detection mask and raster
+    overlay remain untouched.
     """
     contours, _ = cv2.findContours(
         mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     lines: list[dict] = []
     for index, contour in enumerate(contours, start=1):
-        points = contour.reshape(-1, 2)
+        perimeter = float(cv2.arcLength(contour, True))
+        epsilon = max(2.0, perimeter * 0.0015)
+        simplified = cv2.approxPolyDP(contour, epsilon, True)
+        while len(simplified) > 32 and epsilon < perimeter * 0.03:
+            epsilon *= 1.35
+            simplified = cv2.approxPolyDP(contour, epsilon, True)
+        points = simplified.reshape(-1, 2)
         if len(points) >= 2:
             closed = np.vstack([points, points[:1]])
             lines.append({"id": index, "points": closed.tolist()})

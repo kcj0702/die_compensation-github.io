@@ -1393,7 +1393,7 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         self.assertAlmostEqual(point["yProduct"], 25.0, delta=2.0)
         self.assertEqual(result["stats"]["pointsTransferred"], 1)
 
-    def test_upside_down_scan_is_righted_before_ocr_reads_it(self) -> None:
+    def test_ocr_reads_the_original_scan_coordinate_frame(self) -> None:
         """product_alignment 는 좌표 행렬만 만든다 -- 라벨의 인쇄된 숫자는
 
         건드리지 않는다. 그래서 스캔이 제품데이터 대비 뒤집혀 있으면(이 픽스처는
@@ -1429,10 +1429,9 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
             backend_server.analyze_image(self.scan, "JD_64XX2-DR000 3D 스캔.png", self.product)
 
         self.assertEqual(len(captured), 1)
-        righted = cv2.flip(self.scan, -1)  # self.scan 은 product 를 180도 뒤집은 것이니, 되돌리면 이거다.
         np.testing.assert_array_equal(
             captured[0],
-            righted,
+            self.scan,
             "라벨을 찾기 전에 스캔을 바로 세워야 OCR 이 뒤집힌 숫자를 오독하지 않는다.",
         )
 
@@ -1538,6 +1537,42 @@ class ZeroLineEditTest(unittest.TestCase):
         self.assertEqual(moved[0]["points"], [[15.0, 7.0], [25.0, 7.0]])
         self.assertEqual(moved[1]["points"], lines[1]["points"],
                          "손대지 않은 선은 그대로여야 한다")
+
+    def test_개별_꼭짓점_이동은_그_점에만_더해진다(self) -> None:
+        lines = [{"line_id": 1, "points": [[10.0, 10.0], [20.0, 15.0], [30.0, 20.0]]}]
+        edits = [{
+            "index": 0, "dx": 2.0, "dy": -1.0,
+            "points": {"1": {"dx": 4.5, "dy": 3.0}},
+        }]
+
+        moved = backend_server.apply_zero_edits(lines, edits)
+
+        self.assertEqual(moved[0]["points"], [
+            [12.0, 9.0],
+            [26.5, 17.0],
+            [32.0, 19.0],
+        ])
+
+    def test_분할한_꼭짓점과_스플라인_설정이_3d로_전달된다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [20.0, 0.0]]}]
+        edits = [{
+            "index": 0, "dx": 1.0, "dy": -2.0, "splineSegments": [1],
+            "vertices": [[0.0, 0.0], [10.0, 4.0], [20.0, 0.0]],
+        }]
+
+        moved = backend_server.apply_zero_edits(lines, edits)
+
+        self.assertEqual(moved[0]["points"], [
+            [1.0, -2.0], [11.0, 2.0], [21.0, -2.0],
+        ])
+        self.assertEqual(moved[0]["splineSegments"], [1])
+
+    def test_기존_전체_스플라인_저장값도_모든_구간으로_호환된다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [10.0, 5.0], [20.0, 0.0]]}]
+        moved = backend_server.apply_zero_edits(
+            lines, [{"index": 0, "dx": 0, "dy": 0, "spline": True}]
+        )
+        self.assertEqual(moved[0]["splineSegments"], [0, 1])
 
     def test_숨긴_선은_빠진다(self) -> None:
         lines = [{"line_id": 1, "points": [[0.0, 0.0], [1.0, 1.0]]},

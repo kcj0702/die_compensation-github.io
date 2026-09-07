@@ -24,6 +24,9 @@ FLIP_CANDIDATES = ((False, False), (False, True), (True, False), (True, True))
 # 노치처럼 방향을 가르는 특징을 키워 주므로 가중치를 2배로 준다.
 BOUNDARY_BAND_WIDTH = 3
 BOUNDARY_BAND_WEIGHT = 2.0
+# 거꾸로 놓인 패널은 외곽 형상이 거의 같아도 내부 개구부 위치가 다르다.
+# 방향 판정에서는 내부 구멍 일치도를 외곽 면적보다 강하게 반영한다.
+HOLE_WEIGHT = 3.0
 
 # bbox끼리 맞추면 두 마스크의 경계 두께 차이가 그대로 배율에 섞여 부품이 조금
 # 축소된다. 실측에서 구멍 중심이 반경 방향으로 최대 3.4px 안쪽으로 당겨졌다.

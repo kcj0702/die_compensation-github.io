@@ -103,6 +103,20 @@ class AlignmentTest(unittest.TestCase):
                 self.assertGreaterEqual(alignment.outline_iou, config.MIN_OUTLINE_IOU)
                 self.assertTrue(alignment.confident)
 
+    def test_clockwise_quarter_turn_is_recovered(self) -> None:
+        original = _panel(200, 120)
+        scan = cv2.resize(original, (400, 240), interpolation=cv2.INTER_NEAREST)
+        product = cv2.rotate(original, cv2.ROTATE_90_CLOCKWISE)
+
+        alignment = estimate_alignment(
+            build_product_mask(scan), build_product_mask(product)
+        )
+
+        self.assertEqual(alignment.rotation, 90)
+        self.assertGreaterEqual(alignment.outline_iou, config.MIN_OUTLINE_IOU)
+        self.assertGreater(abs(alignment.matrix[1]), 0.1)
+        self.assertGreater(abs(alignment.matrix[3]), 0.1)
+
     def test_mapped_point_lands_on_the_matching_product_pixel(self) -> None:
         scan_mask, product_mask = self._pair(-1)
         alignment = estimate_alignment(scan_mask, product_mask)
@@ -208,6 +222,21 @@ class AlignmentTest(unittest.TestCase):
         self.assertTrue(alignment.overridden)
         self.assertTrue(alignment.confident)
         self.assertFalse(any("방향" in warning for warning in alignment.warnings))
+
+    def test_confirmed_rotation_is_not_reselected(self) -> None:
+        scan_mask, product_mask = self._pair(-1)
+
+        alignment = estimate_alignment(
+            scan_mask,
+            product_mask,
+            flip_x=False,
+            flip_y=False,
+            rotation=90,
+        )
+
+        self.assertEqual(alignment.rotation, 90)
+        self.assertFalse(alignment.flip_x)
+        self.assertFalse(alignment.flip_y)
 
     def test_pinning_one_axis_still_decides_the_other(self) -> None:
         # 정답은 (True, True)다. 맞는 축을 고정하면 나머지 축은 자동으로 맞아야 한다.

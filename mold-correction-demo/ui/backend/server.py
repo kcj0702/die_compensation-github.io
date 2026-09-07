@@ -1060,14 +1060,70 @@ def _resolve_product_from_mesh(
         _log("no CAD file matched — giving up")
         return None
 
+    def _capture_without_mesh() -> np.ndarray | None:
+        """Use CATIA views only when native-to-mesh conversion is unavailable.
+
+        Trying every principal axis avoids the old failure mode where a fixed
+        Z view captured a valid but sideways or edge-on part.  The normal mesh
+        fit path remains preferred because it can split symmetric pairs.
+        """
+        if match_path.suffix.lower() not in {".catpart", ".catproduct"}:
+            return None
+        from types import SimpleNamespace
+
+        try:
+            scan_mask = build_part_silhouette(scan_image)
+        except Exception as exc:
+            _log(f"capture fallback scan mask FAIL: {exc}")
+            return None
+        best: tuple[float, np.ndarray, Any] | None = None
+        for axis in (0, 1, 2):
+            for sign in (1, -1):
+                for swap in (False, True):
+                    try:
+                        candidate = capture_catia_product_image(
+                            match_path,
+                            SimpleNamespace(axis=axis, sign=sign, swap=swap),
+                            _cad_cache_dir(),
+                        )
+                        candidate_alignment = estimate_alignment(
+                            scan_mask, build_product_mask(candidate)
+                        )
+                        score = float(candidate_alignment.score)
+                        _log(
+                            f"capture fallback axis={axis} sign={sign} swap={swap} "
+                            f"rotation={candidate_alignment.rotation} score={score:.4f}"
+                        )
+                        if best is None or score > best[0]:
+                            best = (score, candidate, candidate_alignment)
+                    except Exception as capture_exc:
+                        _log(
+                            f"capture fallback axis={axis} sign={sign} swap={swap} "
+                            f"FAIL: {capture_exc}"
+                        )
+        if best is None:
+            return None
+        warnings.append(
+            "CAD 메시 변환이 지원되지 않아 CATIA의 모든 정면 후보 중 "
+            f"최적 화면을 사용했습니다(화면 회전 {best[2].rotation}°)."
+        )
+        return best[1]
+
     import time as _time
     step_t0 = _time.time()
     try:
         mesh = load_any_mesh(match_path, cache_dir=_cad_cache_dir())
     except Exception as exc:
         _log(f"load_any_mesh FAIL after {(_time.time()-step_t0):.1f}s: {type(exc).__name__}: {exc}")
-        warnings.append(f"등록된 mesh 를 열지 못했습니다({match_path.name}): {exc}")
-        return None
+        rendered_fallback = _capture_without_mesh()
+        if rendered_fallback is None:
+            warnings.append(f"등록된 mesh 를 열지 못했습니다({match_path.name}): {exc}")
+            return None
+        return (
+            rendered_fallback,
+            f"CATIA 후보 비교 캡처 · {match_name} ({match_path.suffix.lstrip('.').upper()})",
+            warnings,
+        )
     _log(f"mesh loaded {_time.time()-step_t0:.1f}s v={len(mesh.vertices)} f={len(mesh.faces)}")
 
     step_t0 = _time.time()
@@ -1129,14 +1185,46 @@ def _resolve_product_from_mesh(
     # 제품데이터 PNG 와 동일하게 `_align_to_product` 로 넘겨 그 검증된 2D
     # 매칭 엔진이 정하게 한다. 첫 캡처는 CATIA 기동 포함 20~50초, 이후 같은
     # (파일,axis,sign,swap) 조합은 캐시로 즉시.
+    # 메시 투영만으로는 앞면/뒷면을 구분할 수 없다. 선택된 축의 양쪽 면과
+    # 화면 축 교환 후보를 실제 CATIA로 캡처한 뒤, 원본 스캔의 외곽선과
+    # 내부 홀 윤곽이 가장 잘 맞는 화면을 제품 이미지로 선택한다.
+    from types import SimpleNamespace
     step_t0 = _time.time()
-    try:
-        rendered = capture_catia_product_image(match_path, fit, _cad_cache_dir())
-    except Exception as exc:
-        _log(f"catia capture FAIL after {(_time.time()-step_t0):.1f}s: {type(exc).__name__}: {exc}")
-        warnings.append(f"CATIA 캡처에 실패했습니다: {exc}")
+    rendered_candidates: list[tuple[float, np.ndarray, int, bool]] = []
+    capture_errors: list[str] = []
+    for candidate_sign in (1, -1):
+        for candidate_swap in (False, True):
+            try:
+                candidate_image = capture_catia_product_image(
+                    match_path,
+                    SimpleNamespace(axis=fit.axis, sign=candidate_sign, swap=candidate_swap),
+                    _cad_cache_dir(),
+                )
+                candidate_alignment = estimate_alignment(
+                    scan_mask, build_product_mask(candidate_image)
+                )
+                rendered_candidates.append((
+                    float(candidate_alignment.score), candidate_image,
+                    candidate_sign, candidate_swap,
+                ))
+                _log(
+                    f"catia face candidate axis={fit.axis} sign={candidate_sign} "
+                    f"swap={candidate_swap} score={candidate_alignment.score:.4f} "
+                    f"rotation={candidate_alignment.rotation}"
+                )
+            except Exception as exc:
+                capture_errors.append(str(exc))
+    if not rendered_candidates:
+        reason = capture_errors[0] if capture_errors else "캡처 후보 없음"
+        _log(f"catia capture FAIL after {(_time.time()-step_t0):.1f}s: {reason}")
+        warnings.append(f"CATIA 캡처에 실패했습니다: {reason}")
         return None
-    _log(f"catia capture {_time.time()-step_t0:.1f}s shape={rendered.shape}")
+    rendered_candidates.sort(key=lambda item: item[0], reverse=True)
+    _, rendered, chosen_sign, chosen_swap = rendered_candidates[0]
+    _log(
+        f"catia capture selected in {_time.time()-step_t0:.1f}s "
+        f"axis={fit.axis} sign={chosen_sign} swap={chosen_swap} shape={rendered.shape}"
+    )
 
     fit_iou = float(getattr(fit, "detail_iou", 0.0) or getattr(fit, "iou", 0.0))
     source_note = f"CATIA 캡처 · {match_name} ({match_path.suffix.lstrip('.').upper()})"
@@ -1153,29 +1241,28 @@ def _align_to_product(
     part_number: str | None,
     flip_x: bool | None,
     flip_y: bool | None,
+    rotation: int | None = None,
 ) -> tuple[Any, np.ndarray | None, list[str]]:
     """Estimate the scan-to-product transform, reusing a confirmed direction."""
     warnings: list[str] = []
     scan_silhouette = build_part_silhouette(image)
     product_mask = build_product_mask(product_image)
-    if flip_x is None and flip_y is None and part_number:
-        saved = ALIGNMENT_STORE.load(part_number)
-        if saved is not None:
-            flip_x, flip_y = saved.flip_x, saved.flip_y
-            warnings.append(f"{part_number}에 확정 저장된 방향을 사용했습니다.")
-    alignment = estimate_alignment(scan_silhouette, product_mask, flip_x=flip_x, flip_y=flip_y)
+    # 캡처가 바뀌었거나 예전에 잘못 저장된 방향이 현재 분석을 오염시키지
+    # 않도록 매번 원본 스캔과 현재 제품 이미지에서 방향을 다시 판정한다.
+    alignment = estimate_alignment(
+        scan_silhouette, product_mask,
+        flip_x=flip_x, flip_y=flip_y, rotation=rotation,
+    )
+    # 충분히 구분되는 방향은 별도 확인 버튼 없이 품번에 자동 저장한다.
+    # 이후 같은 품번은 회전까지 동일하게 재사용하므로 대칭 부품에서 방향이
+    # 실행할 때마다 달라지는 현상을 막는다.
+    if part_number and alignment.confident and not alignment.overridden:
+        try:
+            ALIGNMENT_STORE.save(part_number, alignment)
+        except OSError as exc:
+            warnings.append(f"자동 정렬 저장 실패: {exc}")
     overlay = render_alignment_overlay(product_image, warp_scan_mask(alignment, scan_silhouette))
     return alignment, overlay, warnings + list(alignment.warnings)
-
-
-def _apply_flip(image: np.ndarray, flip_x: bool, flip_y: bool) -> np.ndarray:
-    if flip_x and flip_y:
-        return cv2.flip(image, -1)
-    if flip_x:
-        return cv2.flip(image, 1)
-    if flip_y:
-        return cv2.flip(image, 0)
-    return image
 
 
 def analyze_image(
@@ -1211,44 +1298,17 @@ def analyze_image(
 
     if product_image is not None:
         try:
-            # 라벨을 읽기 전에 방향부터 바로잡는다. 사람이 이미 확정한 방향이거나
-            # (저장된 정렬, 명시적 flipX/flipY) 자동 판정이 충분히 확실할 때만
-            # 실제 픽셀을 뒤집는다 -- 애매한 첫 추측만으로 원본을 뒤집으면 오히려
-            # 멀쩡한 스캔을 망가뜨릴 수 있다.
-            saved_alignment = (
-                ALIGNMENT_STORE.load(part_number)
-                if flip_x is None and flip_y is None and part_number
-                else None
-            )
-            probe, _, _ = _align_to_product(image, product_image, part_number, flip_x, flip_y)
-            trusted = (
-                flip_x is not None
-                or flip_y is not None
-                or saved_alignment is not None
-                or probe.confident
-            )
-            if trusted and (probe.flip_x or probe.flip_y):
-                image = _apply_flip(image, probe.flip_x, probe.flip_y)
-                # 픽셀을 이미 바로 세웠으니, 다음 정렬은 반전 없이 배율·평행이동만
-                # 다시 잡는다 -- 그러지 않으면 같은 방향을 두 번 뒤집는다.
-                flip_x, flip_y = False, False
+            # 포인트·편차·제로라인은 반드시 업로드된 원본 스캔 좌표에서
+            # 검출한다. 제품 방향은 스캔 픽셀을 먼저 뒤집지 않고 이 affine
+            # 행렬에만 담아, 제품 화면에 표시할 때 좌표를 한 번만 변환한다.
             alignment, alignment_overlay, alignment_warnings = _align_to_product(
                 image, product_image, part_number, flip_x, flip_y
             )
-            if saved_alignment is not None:
-                # flip_x/flip_y 를 여기서 False 로 확정해 버려서 _align_to_product
-                # 내부의 "저장된 방향을 불러왔다" 안내가 두 번째 호출에서는 뜨지
-                # 않는다. 어떤 방향을 썼는지는 사용자에게 그대로 알려줘야 한다.
-                alignment_warnings = list(alignment_warnings) + [
-                    f"{part_number}에 확정 저장된 방향(좌우 {saved_alignment.flip_x}, "
-                    f"상하 {saved_alignment.flip_y})을 사용했습니다."
-                ]
             product_warnings.extend(alignment_warnings)
         except Exception as exc:  # engine errors must be shown per engine
             errors["product"] = str(exc)
 
-    # 위에서 방향을 바로잡았을 수 있으니 크기는 여기서 읽는다. 순수 반전은
-    # 가로세로를 바꾸지 않지만, 그래도 최종 image 기준으로 읽는 편이 안전하다.
+    # 분석 전 과정은 업로드된 원본 스캔 크기와 좌표계를 유지한다.
     height, width = image.shape[:2]
 
     clean_image: np.ndarray | None = None
@@ -1578,6 +1638,16 @@ def _optional_flag(form: Any, name: str) -> bool | None:
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _optional_rotation(form: Any, name: str = "rotation") -> int | None:
+    raw = form.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    rotation = int(str(raw)) % 360
+    if rotation not in {0, 90}:
+        raise ValueError("rotation은 0 또는 90이어야 합니다.")
+    return rotation
+
+
 async def analyze(request: Request) -> JSONResponse:
     try:
         form = await request.form(max_files=2, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
@@ -1611,6 +1681,7 @@ def realign_image(
     product_upload: np.ndarray | None,
     flip_x: bool | None,
     flip_y: bool | None,
+    rotation: int | None,
     points: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Redo only the alignment and the point transfer.
@@ -1626,7 +1697,7 @@ def realign_image(
         raise ValueError("제품데이터 이미지가 없어 정렬을 다시 계산할 수 없습니다.")
 
     alignment, overlay, alignment_warnings = _align_to_product(
-        image, product_image, part_number, flip_x, flip_y
+        image, product_image, part_number, flip_x, flip_y, rotation
     )
     warnings.extend(alignment_warnings)
 
@@ -1690,6 +1761,7 @@ async def realign(request: Request) -> JSONResponse:
             product_image,
             _optional_flag(form, "flipX"),
             _optional_flag(form, "flipY"),
+            _optional_rotation(form),
             points,
         )
         return JSONResponse(result)
@@ -1960,9 +2032,10 @@ async def products(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
-# STEP/STL 은 이미지보다 훨씬 커서 60MB 상한을 넘길 수 있다. 실측 CATPart
-# 하나가 53.7MB 였으니 STEP export 는 그보다 크기 쉽다.
-MAX_MESH_UPLOAD_BYTES = 200 * 1024 * 1024
+# 실측 CATPart 중 67XX6 원본이 약 280MB다. 뷰어(/api/cad)는 300MB를
+# 받으면서 등록(/api/mesh)만 200MB에서 막혀 같은 파일이 한 화면에서는
+# 열리고 다른 화면에서는 등록되지 않았다. 두 경로의 상한을 하나로 맞춘다.
+MAX_MESH_UPLOAD_BYTES = MAX_CAD_UPLOAD_BYTES
 
 
 async def meshes(request: Request) -> JSONResponse:
@@ -2031,6 +2104,19 @@ async def meshes(request: Request) -> JSONResponse:
         path = await run_in_threadpool(
             MESH_LIBRARY.register, part_number, suffix, data
         )
+        # CATPart 검증은 CATIA 기동과 변환 때문에 수분이 걸릴 수 있다.
+        # 등록 요청 안에서 끝까지 기다리게 하면 브라우저에는 아무 변화가
+        # 없어 실패처럼 보이고, 연결이 끊기면 정상 저장된 파일도 실패로
+        # 오해한다. 원본 보관을 먼저 확정하고 실제 변환은 분석/3D 열기 때
+        # 캐시와 함께 수행한다. STEP/STL 등 직접 읽는 형식만 즉시 검증한다.
+        if suffix in {".catpart", ".catproduct"}:
+            return JSONResponse({
+                "partNumber": part_number,
+                "path": str(path),
+                "format": suffix.lstrip("."),
+                "validation": "deferred",
+                "message": "CATPart 등록 완료 · 형상 변환은 처음 사용할 때 수행됩니다.",
+            })
         # 등록된 mesh 가 실제로 열리는지 즉시 검증한다. 열리지 않으면
         # 지우고 오류를 반환해 사용자가 export 를 다시 하도록 유도한다.
         try:
@@ -2888,11 +2974,24 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             )
             return web
 
-    if suffix == ".catpart":
-        raise ValueError(
-            "CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다. "
-            "CATIA에서 STEP(AP214) 또는 STL로 내보내 주세요."
-        )
+        if suffix == ".catpart":
+            # CATPart 자체는 브라우저용으로 읽을 수 없으므로 설치된 CATIA를
+            # 통해 임시 메시로 변환한 뒤 동일한 웹 메시 형식으로 돌려준다.
+            mesh = mesh_io.load_any(path, cache_dir=Path(tmp) / ".cache")
+            web = mesh_io.to_web_mesh(mesh, name=path.stem, source_format="catpart")
+            web["holes"] = []
+            web["planes"] = []
+            web["counts"] = {"cylinders": 0, "holes": 0, "planes": 0}
+            web["note"] = "CATPart를 CATIA로 변환하여 표시했습니다."
+            web["cadId"] = _cache_cad({
+                "mesh": mesh,
+                "offset": np.asarray(web["summary"]["bounds"]["center"], dtype=float) if web.get("recentered") else np.zeros(3),
+                "name": path.stem,
+                "display_vertices": np.asarray(web["positions"], dtype=float).reshape(-1, 3),
+                "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
+            })
+            return web
+
     raise ValueError(
         f"지원하지 않는 형식입니다: {suffix or '확장자 없음'} "
         f"(지원: STEP/STP, STL, PLY, OBJ, GLB/GLTF, 3MF)"
@@ -2940,8 +3039,31 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
             continue
         dx = float(edit.get("dx") or 0.0)
         dy = float(edit.get("dy") or 0.0)
-        moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
-                                         for p in line["points"]]})
+        custom_vertices = edit.get("vertices")
+        source_points = (custom_vertices if isinstance(custom_vertices, list)
+                         and len(custom_vertices) >= 2 else line["points"])
+        point_edits = edit.get("points") if isinstance(edit.get("points"), dict) else {}
+        adjusted = []
+        for point_index, point in enumerate(source_points):
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            point_edit = point_edits.get(str(point_index), {})
+            point_dx = float(point_edit.get("dx") or 0.0) if isinstance(point_edit, dict) else 0.0
+            point_dy = float(point_edit.get("dy") or 0.0) if isinstance(point_edit, dict) else 0.0
+            adjusted.append([float(point[0]) + dx + point_dx,
+                             float(point[1]) + dy + point_dy])
+        adjusted_line = {**line, "points": adjusted}
+        if isinstance(edit.get("splineSegments"), list):
+            adjusted_line["splineSegments"] = [
+                int(index) for index in edit["splineSegments"]
+                if isinstance(index, (int, float)) and int(index) == index
+            ]
+        elif "spline" in edit:
+            adjusted_line["splineSegments"] = (
+                list(range(max(len(adjusted) - 1, 0)))
+                if edit.get("spline") else []
+            )
+        moved.append(adjusted_line)
     return moved
 
 
@@ -3060,13 +3182,39 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
     # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
-    def _densify(points: list, step_px: float = 4.0) -> list:
+    def _densify(points: list, step_px: float = 4.0,
+                 spline_segments: list | None = None) -> list:
         """선 위를 촘촘히 채운다.
 
         꼭짓점만 표면에 얹으면 그 사이는 공중을 가로지른다. 촘촘히
         쏴야 곡면을 그대로 따라간다 — 3D 에서 "선을 얹은 느낌" 을
         없애는 진짜 방법이다(표면을 칠하면 리브와 구멍에서 조각난다).
         """
+        spline_set = {int(index) for index in (spline_segments or [])}
+        if spline_set and len(points) >= 3:
+            curved: list = []
+            for index in range(len(points) - 1):
+                if index not in spline_set:
+                    (ax, ay), (bx, by) = points[index], points[index + 1]
+                    count = max(int(np.hypot(bx - ax, by - ay) / step_px), 1)
+                    for k in range(count):
+                        t = k / count
+                        curved.append([ax + (bx - ax) * t, ay + (by - ay) * t])
+                    continue
+                before = np.asarray(points[max(0, index - 1)], dtype=float)
+                start = np.asarray(points[index], dtype=float)
+                end = np.asarray(points[index + 1], dtype=float)
+                after = np.asarray(points[min(len(points) - 1, index + 2)], dtype=float)
+                count = max(int(np.linalg.norm(end - start) / step_px), 4)
+                for k in range(count):
+                    t = k / count
+                    t2, t3 = t * t, t * t * t
+                    spot = 0.5 * ((2 * start) + (-before + end) * t
+                                  + (2 * before - 5 * start + 4 * end - after) * t2
+                                  + (-before + 3 * start - 3 * end + after) * t3)
+                    curved.append(spot.tolist())
+            curved.append(list(points[-1]))
+            return curved
         dense: list = []
         for (ax, ay), (bx, by) in zip(points[:-1], points[1:]):
             span = float(np.hypot(bx - ax, by - ay))
@@ -3092,7 +3240,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         pts = line["points"]
         if len(pts) < 2:
             continue
-        placed = ov.unproject(_densify(pts), vertices, faces, fit, shifted)
+        placed = ov.unproject(_densify(
+            pts, spline_segments=line.get("splineSegments")), vertices, faces, fit, shifted)
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
         if len(kept) < 2:

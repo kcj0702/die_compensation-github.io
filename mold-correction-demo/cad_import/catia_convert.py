@@ -45,24 +45,23 @@ def is_catia_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in CATIA_SUFFIXES
 
 
-# CATIA ExportData 는 라이선스에 따라 특정 포맷만 허용된다. 회사마다 STEP 이
-# 없고 STL 만 되는 경우가 흔해서, 여러 포맷을 순서대로 시도하고 처음 성공한
-# 것으로 저장한다. STL 을 앞에 두면 우리 파이프라인(trimesh) 이 아무 의존성
-# 추가 없이 곧바로 로드할 수 있어 이득이다. IGES 는 우리 load_any 가 지금
-# 파싱하지 못하므로 목록에서 뺐다.
+# CATIA ExportData 는 라이선스에 따라 특정 포맷만 허용된다. 자동차 판넬의
+# 완만한 곡면은 STL 로 먼저 굳히면 CATIA의 tessellation 설정에 따라 각져
+# 보일 수 있다. STEP(B-Rep)을 우선 내보내 우리 쪽 OCCT가 표시 해상도로 다시
+# tessellate하고, STEP 라이선스가 없는 환경에서만 STL로 내려간다.
+# ``__quality_v2`` 접미사는 예전 STL 우선 캐시를 재사용하지 않게 한다.
 _EXPORT_FORMATS: tuple[tuple[str, str], ...] = (
-    ("stl",  ".stl"),
-    ("step", ".step"),
+    ("step", "__quality_v2.step"),
+    ("stl",  "__quality_v2.stl"),
 )
 
 
 def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
-    """.CATPart 를 열어 STL/STEP/IGES 순으로 변환 시도, 성공한 파일 경로를 준다.
+    """.CATPart 를 열어 STEP 우선, STL 순으로 변환해 성공한 경로를 준다.
 
-    실측: 회사 CATIA 라이선스에 STEP export 모듈이 없을 때 그 호출만 실패한다.
-    포맷마다 별도 라이선스라 여러 개를 순서대로 시도하는 게 안전하다. STL 을
-    먼저 두는 이유는 (1) 라이선스가 가장 널리 포함되어 있고 (2) 우리 파이프
-    라인이 trimesh 로 곧바로 열 수 있어 OCCT 를 우회할 수 있어서다.
+    STEP export 모듈이 없을 때는 해당 호출만 실패하며, 이어서 호환성이 높은
+    STL을 시도한다. STEP이 성공하면 곡면을 B-Rep 상태로 보존하므로 뷰어용
+    tessellation 품질을 우리 쪽에서 통제할 수 있다.
 
     Args:
         source:    변환할 .CATPart / .CATProduct.

@@ -37,7 +37,23 @@ type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_d
 type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
 /* 스캔을 제품데이터 위로 옮기는 변환. margin 은 1위와 2위 방향의 점수 차이고,
    대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
-type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; score: number }[]; warnings: string[] };
+type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; rotation?: number; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; rotation?: number; score: number }[]; warnings: string[] };
+const mapAffinePoint = (matrix: number[], x: number, y: number): [number, number] => {
+  const [a, b, tx, c, d, ty] = matrix;
+  return [a * x + b * y + tx, c * x + d * y + ty];
+};
+const invertAffinePoint = (matrix: number[], x: number, y: number): [number, number] | null => {
+  const [a, b, tx, c, d, ty] = matrix;
+  const determinant = a * d - b * c;
+  if (Math.abs(determinant) < 1e-10) return null;
+  const px = x - tx; const py = y - ty;
+  return [(d * px - b * py) / determinant, (-c * px + a * py) / determinant];
+};
+const invertAffineDelta = (matrix: number[], dx: number, dy: number): [number, number] | null => {
+  const [a, b, , c, d] = matrix;
+  const determinant = a * d - b * c;
+  return Math.abs(determinant) < 1e-10 ? null : [(d * dx - b * dy) / determinant, (-c * dx + a * dy) / determinant];
+};
 type AnalysisResult = {
   analysisId: string | null;
   partNo?: string;
@@ -97,9 +113,10 @@ type AnalysisResult = {
   errors: Partial<Record<Engine | 'product', string>>;
   valueMode: string;
 };
-type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string };
+type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; assetError?: string; assetStatus?: string };
 type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
-type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean };
+type ZeroPointOffset = { dx: number; dy: number };
+type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean; points?: Record<string, ZeroPointOffset>; vertices?: [number, number][]; spline?: boolean; splineSegments?: number[] };
 const NO_ADJUST: FitAdjust = { angle: 0, dx: 0, dy: 0, scale: 1 };
 
 function partOfCad(mesh: CadMesh | null | undefined): string {
@@ -108,16 +125,13 @@ function partOfCad(mesh: CadMesh | null | undefined): string {
   return pairs.find(([cad]) => name.includes(cad))?.[1] || '';
 }
 
-function scanFitsCad(scan: ScanItem, mesh: CadMesh): boolean {
-  if (mesh.summary.source_format === 'morph') return false;
-  const name = (mesh.summary.name || '').toUpperCase().replace(/[-_]/g, '');
-  const wanted = partOfCad(mesh);
-  const part = (scan.partNo || '').toUpperCase().replace(/[-_]/g, '');
-  return wanted ? part.includes(wanted) : Boolean(part && name.includes(part));
-}
-
 function editableZeroLineCount(result: AnalysisResult): number {
-  return result.labZeroLines?.length || result.simpleZeroLines?.length || 0;
+  /* 현재 하이브리드 엔진의 실제 응답은 zeroLines에 들어온다. 이전 엔진
+     필드만 세면 선이 화면에 보여도 수정 버튼이 비활성화된다. */
+  return result.zeroLines?.filter((line) => Array.isArray(line.points) && line.points.length >= 2).length
+    || result.labZeroLines?.length
+    || result.simpleZeroLines?.length
+    || 0;
 }
 type FolderEntry = { name: string; path: string; isDirectory: boolean; size: number | null; modified: string };
 type CorrectionMode = 'auto' | 'manual';
@@ -1022,25 +1036,107 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
 /* 시트에 얹는 제로라인 오버레이. lines 는 프레임(정면도 또는 detail 크롭이 표시하는 이미지 전체)
    에서 % 좌표로 이미 변환되어 온다. region 이 주어지면 그 크롭 영역 안으로 좌표를 다시 옮긴다.
    SVG viewBox 를 0-100 으로 고정해 부모의 절대 크기와 무관하게 % 좌표를 그대로 쓴다. */
-function ZeroLineOverlay({ lines, region }: { lines: [number, number][][]; region?: DetailRegion }) {
-  const transformed = region
-    ? lines
-        .map((line) => line.map(([x, y]) => [(x - region.x) / region.w * 100, (y - region.y) / region.h * 100] as [number, number]))
-        .filter((line) => line.length >= 2 && line.some(([x, y]) => x >= -5 && x <= 105 && y >= -5 && y <= 105))
-    : lines.filter((line) => line.length >= 2);
+function zeroLineSegmentPath(points: [number, number][], index: number, spline: boolean): string {
+  const start = points[index];
+  const end = points[index + 1];
+  if (!start || !end) return '';
+  if (!spline || points.length < 3) return `M ${start[0]} ${start[1]} L ${end[0]} ${end[1]}`;
+  const before = points[Math.max(0, index - 1)];
+  const after = points[Math.min(points.length - 1, index + 2)];
+  const control1: [number, number] = [start[0] + (end[0] - before[0]) / 6, start[1] + (end[1] - before[1]) / 6];
+  const control2: [number, number] = [end[0] - (after[0] - start[0]) / 6, end[1] - (after[1] - start[1]) / 6];
+  return `M ${start[0]} ${start[1]} C ${control1[0]} ${control1[1]} ${control2[0]} ${control2[1]} ${end[0]} ${end[1]}`;
+}
+
+function zeroLinePath(points: [number, number][], splineSegments: number[]): string {
+  if (!points.length) return '';
+  const parts = [`M ${points[0][0]} ${points[0][1]}`];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const start = points[index];
+    const end = points[index + 1];
+    if (!splineSegments.includes(index) || points.length < 3) {
+      parts.push(`L ${end[0]} ${end[1]}`);
+      continue;
+    }
+    const before = points[Math.max(0, index - 1)];
+    const after = points[Math.min(points.length - 1, index + 2)];
+    const control1: [number, number] = [start[0] + (end[0] - before[0]) / 6, start[1] + (end[1] - before[1]) / 6];
+    const control2: [number, number] = [end[0] - (after[0] - start[0]) / 6, end[1] - (after[1] - start[1]) / 6];
+    parts.push(`C ${control1[0]} ${control1[1]} ${control2[0]} ${control2[1]} ${end[0]} ${end[1]}`);
+  }
+  return parts.join(' ');
+}
+
+function nearestZeroLinePoint(points: [number, number][], splineSegments: number[], target: [number, number]): { segmentIndex: number; point: [number, number] } | null {
+  if (points.length < 2) return null;
+  let best: { segmentIndex: number; point: [number, number]; distance: number } | null = null;
+  const consider = (segmentIndex: number, point: [number, number]) => {
+    const distance = (point[0] - target[0]) ** 2 + (point[1] - target[1]) ** 2;
+    if (!best || distance < best.distance) best = { segmentIndex, point, distance };
+  };
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const before = points[Math.max(0, index - 1)];
+    const start = points[index];
+    const end = points[index + 1];
+    const after = points[Math.min(points.length - 1, index + 2)];
+    const spline = splineSegments.includes(index);
+    const steps = spline && points.length >= 3 ? 24 : 1;
+    for (let step = 0; step <= steps; step += 1) {
+      const t = step / steps;
+      if (!spline || points.length < 3) {
+        consider(index, [start[0] + (end[0] - start[0]) * t, start[1] + (end[1] - start[1]) * t]);
+        continue;
+      }
+      const t2 = t * t; const t3 = t2 * t;
+      consider(index, [
+        0.5 * ((2 * start[0]) + (-before[0] + end[0]) * t + (2 * before[0] - 5 * start[0] + 4 * end[0] - after[0]) * t2 + (-before[0] + 3 * start[0] - 3 * end[0] + after[0]) * t3),
+        0.5 * ((2 * start[1]) + (-before[1] + end[1]) * t + (2 * before[1] - 5 * start[1] + 4 * end[1] - after[1]) * t2 + (-before[1] + 3 * start[1] - 3 * end[1] + after[1]) * t3),
+      ]);
+    }
+  }
+  const nearest = best as { segmentIndex: number; point: [number, number]; distance: number } | null;
+  return nearest ? { segmentIndex: nearest.segmentIndex, point: nearest.point } : null;
+}
+
+function ZeroLineOverlay({ lines, splineSegments = [], region, editable = false, addPointMode = false, deletePointMode = false, onPointMove, onSegmentDoubleClick, onPointAdd, onPointDelete }: { lines: [number, number][][]; splineSegments?: number[][]; region?: DetailRegion; editable?: boolean; addPointMode?: boolean; deletePointMode?: boolean; onPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
+  const canEdit = editable && !region;
+  const [drag, setDrag] = useState<{ lineIndex: number; pointIndex: number; startX: number; startY: number; dx: number; dy: number; pointerId: number } | null>(null);
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (clickTimerRef.current) clearTimeout(clickTimerRef.current); }, []);
+  const transformed = lines.map((line, sourceIndex) => ({
+    sourceIndex,
+    points: region ? line.map(([x, y]) => [(x - region.x) / region.w * 100, (y - region.y) / region.h * 100] as [number, number]) : line,
+  })).filter(({ points }) => points.length >= 2 && (!region || points.some(([x, y]) => x >= -5 && x <= 105 && y >= -5 && y <= 105)));
   if (!transformed.length) return null;
-  const points = transformed.map((line) => line.map(([x, y]) => `${x},${y}`).join(' '));
-  return <svg className="zero-line-overlay" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 15, overflow: 'hidden' }}>
+  const displayed = transformed.map(({ sourceIndex, points }) => points.map(([x, y], pointIndex) => drag?.lineIndex === sourceIndex && drag.pointIndex === pointIndex ? [x + drag.dx, y + drag.dy] as [number, number] : [x, y] as [number, number]));
+  const paths = displayed.map((line, index) => zeroLinePath(line, splineSegments[transformed[index].sourceIndex] || []));
+  const pointerPosition = (event: React.PointerEvent<HTMLElement>) => {
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+    return rect?.width && rect.height ? { x: (event.clientX - rect.left) / rect.width * 100, y: (event.clientY - rect.top) / rect.height * 100 } : null;
+  };
+  return <div className={`zero-line-overlay ${canEdit ? 'zero-line-overlay--editable' : ''}${addPointMode ? ' zero-line-overlay--add-point' : ''}${deletePointMode ? ' zero-line-overlay--delete-point' : ''}`} aria-hidden={canEdit ? undefined : true}>
+    <svg className="zero-line-overlay__svg" viewBox="0 0 100 100" preserveAspectRatio="none">
     {/* 부품 재질색(초록·파랑 등)과 겹치면 안 보인다는 피드백 — "분석 결과" 화면의
         래스터 제로라인과 같은 빨강(#dc1414, zero_polyline.draw_zero_polylines 기본값)
         을 쓰고, 흰 테두리(halo)를 먼저 굵게 깐 뒤 그 위에 얹어 어떤 배경에서도
         확실히 도드라지게 한다. */}
-    {points.map((pts, idx) => <polyline key={`halo-${idx}`} points={pts} fill="none" stroke="#ffffff" strokeWidth={4.5} strokeLinejoin="round" strokeLinecap="round" strokeOpacity={0.95} vectorEffect="non-scaling-stroke" />)}
-    {points.map((pts, idx) => <polyline key={`line-${idx}`} points={pts} fill="none" stroke="#dc1414" strokeWidth={2.2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />)}
-  </svg>;
+    {paths.map((path, idx) => <path key={`halo-${idx}`} d={path} className="zero-line-path zero-line-path--halo" />)}
+    {paths.map((path, idx) => <path key={`line-${idx}`} d={path} className="zero-line-path zero-line-path--main" />)}
+    {canEdit && displayed.flatMap((line, idx) => {
+      const { sourceIndex } = transformed[idx];
+      const curved = splineSegments[sourceIndex] || [];
+      return line.slice(0, -1).map((_, segmentIndex) => {
+        const isSpline = curved.includes(segmentIndex);
+        const segmentPath = zeroLineSegmentPath(line, segmentIndex, isSpline);
+        return <path key={`hit-${sourceIndex}-${segmentIndex}`} d={segmentPath} className="zero-line-path-hit" tabIndex={0} role="button" aria-label={`제로라인 ${sourceIndex + 1}의 ${segmentIndex + 1}번 구간 · 더블클릭하여 ${isSpline ? '직선' : '스플라인'}으로 변경${addPointMode ? ' · 클릭하여 점 추가' : ''}`} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSegmentDoubleClick?.(sourceIndex, segmentIndex); } }} onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); if (clickTimerRef.current) clearTimeout(clickTimerRef.current); clickTimerRef.current = null; onSegmentDoubleClick?.(sourceIndex, segmentIndex); }} onClick={(event) => { if (!addPointMode) return; const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect(); if (!rect?.width || !rect.height) return; const target: [number, number] = [(event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100]; if (clickTimerRef.current) clearTimeout(clickTimerRef.current); clickTimerRef.current = setTimeout(() => { const nearest = nearestZeroLinePoint(displayed[idx], curved, target); if (nearest) onPointAdd?.(sourceIndex, nearest.segmentIndex, nearest.point[0], nearest.point[1]); clickTimerRef.current = null; }, 280); }} />;
+      });
+    })}
+    </svg>
+    {canEdit && transformed.flatMap(({ sourceIndex }, linePosition) => displayed[linePosition].map(([x, y], pointIndex) => <button type="button" key={`handle-${sourceIndex}-${pointIndex}`} className="zero-line-handle" style={{ left: `${x}%`, top: `${y}%` }} aria-label={`제로라인 ${sourceIndex + 1}의 ${pointIndex + 1}번 점`} title={deletePointMode ? '클릭하여 꼭짓점 삭제' : '끌어서 꼭짓점 이동'} onClick={(event) => { if (!deletePointMode) return; event.preventDefault(); event.stopPropagation(); onPointDelete?.(sourceIndex, pointIndex); }} onKeyDown={(event) => { if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); onPointDelete?.(sourceIndex, pointIndex); } }} onPointerDown={(event) => { if (deletePointMode) { event.preventDefault(); event.stopPropagation(); return; } const point = pointerPosition(event); if (!point) return; event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setDrag({ lineIndex: sourceIndex, pointIndex, startX: point.x, startY: point.y, dx: 0, dy: 0, pointerId: event.pointerId }); }} onPointerMove={(event) => { if (!drag || drag.pointerId !== event.pointerId || drag.lineIndex !== sourceIndex || drag.pointIndex !== pointIndex) return; const point = pointerPosition(event); if (point) setDrag({ ...drag, dx: point.x - drag.startX, dy: point.y - drag.startY }); }} onPointerUp={(event) => { if (!drag || drag.pointerId !== event.pointerId) return; event.currentTarget.releasePointerCapture(event.pointerId); if (Math.abs(drag.dx) + Math.abs(drag.dy) > 0.01) onPointMove?.(sourceIndex, pointIndex, drag.dx, drag.dy); setDrag(null); }} onPointerCancel={() => setDrag(null)} />))}
+  </div>;
 }
 
-function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, onLayoutsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], showZero = false }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; showZero?: boolean }) {
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange, onLayoutsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], zeroSplineSegments = [], showZero = false, zeroEditable = false, zeroPointAddMode = false, zeroPointDeleteMode = false, onZeroPointMove, onZeroSegmentDoubleClick, onZeroPointAdd, onZeroPointDelete }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; zeroSplineSegments?: number[][]; showZero?: boolean; zeroEditable?: boolean; zeroPointAddMode?: boolean; zeroPointDeleteMode?: boolean; onZeroPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onZeroSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onZeroPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onZeroPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
   /* 정렬 합성 이미지는 스캔 원본과 크기가 다를 수 있어 프레임 치수를 직접 받는다. */
   const sourceAspect = frameWidth / frameHeight;
   /* 시트 폭·높이 상한을 62/64 -> 42/44 로 낮췄다. 50/52 로 한 번 줄여
@@ -1106,8 +1202,8 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange,
         else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
       };
       return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
-        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}</div>
-          : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} />}</div>
+          : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} editable={zeroEditable} addPointMode={zeroPointAddMode} deletePointMode={zeroPointDeleteMode} onPointMove={onZeroPointMove} onSegmentDoubleClick={onZeroSegmentDoubleClick} onPointAdd={onZeroPointAdd} onPointDelete={onZeroPointDelete} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
             onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onRemoveAddedPoint(added.id); }}
@@ -1173,20 +1269,12 @@ function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset,
   </div></header>;
 }
 
-/* 파일명에서 품번을 뽑는다. 백엔드 file_naming.py 와 같은 규칙이며
-   짧은 형태(64XX2)를 준다 — 컬러바 표와 제로라인 라이브러리의 열쇠다.
-
-   순수 숫자 여섯 자리는 **날짜**라 품번으로 보지 않는다. NC 데이터가
-   `260825_JDZ_DASH LWR_OP10_...ZIP` 처럼 날짜를 앞에 달고 오는데,
-   예전 규칙은 이걸 품번이라고 집어냈다. */
+/* 파일명 어디에 있든 회사 표준 전체 품번(예: 67XX6-DR000)을 뽑는다.
+   프런트에서 67XX6까지만 잘라 서버로 보내면, 전체 품번을 요구하는 등록
+   API가 "품번 형식이 올바르지 않습니다"로 거부하므로 백엔드와 동일한
+   정규식으로 유지한다. */
 function partNoFromName(name: string): string | null {
-  for (const token of name.toUpperCase().split(/[_\s]+/)) {
-    const head = token.split(/[-/]/)[0];
-    if (!/^[0-9]{2}[A-Z0-9]{2,4}$/.test(head)) continue;
-    if (/^[0-9]+$/.test(head) && !/[-/]/.test(token)) continue;   // 날짜
-    return head;
-  }
-  return null;
+  return name.toUpperCase().match(/[0-9A-Z]{5}-[A-Z]{2}[0-9]{3}/)?.[0] || null;
 }
 
 /* 컬러바 범위가 등록된 품번. 백엔드 PRODUCT_COLORBAR_MM 과 같은 표이며
@@ -1229,15 +1317,46 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
   const removeScan = (id: string) => setScans((current) => { const target = current.find((item) => item.id === id); if (target) { URL.revokeObjectURL(target.url); if (target.productUrl) URL.revokeObjectURL(target.productUrl); } return current.filter((item) => item.id !== id); });
   /* 제품데이터는 품번당 한 장이라 보통은 서버에 등록된 걸 자동으로 쓴다. 아직 등록이
      없는 품번만 여기서 직접 붙여 주면 되고, 붙인 뒤에는 서버가 등록해 다음부터 자동이다. */
-  const attachProduct = (id: string, file: File) => setScans((current) => current.map((scan) => {
-    if (scan.id !== id) return scan;
-    if (scan.productUrl) URL.revokeObjectURL(scan.productUrl);
-    return { ...scan, productFile: file, productUrl: URL.createObjectURL(file), status: scan.status === 'done' ? 'ready' : scan.status };
-  }));
+  const attachReferenceFiles = async (id: string, files: FileList | File[]) => {
+    const selected = Array.from(files);
+    const image = selected.find((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(file.name));
+    const cadFiles = selected.filter((file) => /\.(catpart|step|stp|stl)$/i.test(file.name));
+    const scan = scans.find((item) => item.id === id);
+    if (!scan) return;
+    if (image) setScans((current) => current.map((item) => {
+      if (item.id !== id) return item;
+      if (item.productUrl) URL.revokeObjectURL(item.productUrl);
+      return { ...item, productFile: image, productUrl: URL.createObjectURL(image), status: item.status === 'done' ? 'ready' : item.status, assetError: undefined };
+    }));
+    if (!cadFiles.length) return;
+    setScans((current) => current.map((item) => item.id === id ? { ...item, assetError: undefined, assetStatus: 'CAD 업로드 준비 중…' } : item));
+    for (const file of cadFiles) {
+      try {
+        const partNumber = partNoFromName(scan.partNo) || partNoFromName(file.name);
+        if (!partNumber) throw new Error('스캔 또는 CAD 파일명에서 전체 품번(예: 64XX2-DR000)을 찾지 못했습니다.');
+        setScans((current) => current.map((item) => item.id === id ? { ...item, assetStatus: `${file.name} 등록·변환 확인 중…` } : item));
+        const form = new FormData();
+        form.append('file', file, file.name);
+        form.append('partNumber', partNumber);
+        const response = await fetch(`${API_BASE}/api/mesh`, { method: 'POST', body: form });
+        const data = await response.json() as { error?: string; message?: string };
+        if (!response.ok) throw new Error(data.error || `${file.name} 등록 실패`);
+        setScans((current) => current.map((item) => item.id === id ? { ...item, assetError: undefined, assetStatus: data.message || `${file.name} 등록 완료` } : item));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setScans((current) => current.map((item) => item.id === id ? { ...item, assetError: message, assetStatus: undefined } : item));
+      }
+    }
+    /* 라이브러리 저장이나 파일명 판정 실패가 뷰어 추가를 막아서는 안 된다.
+       형상은 먼저 열고 실제 정합 결과로 맞는 파일인지 판단한다. */
+    setScans((current) => current.map((item) => item.id === id
+      ? { ...item, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
+      : item));
+  };
   const detachProduct = (id: string) => setScans((current) => current.map((scan) => {
     if (scan.id !== id) return scan;
     if (scan.productUrl) URL.revokeObjectURL(scan.productUrl);
-    return { ...scan, productFile: undefined, productUrl: undefined };
+      return { ...scan, productFile: undefined, productUrl: undefined };
   }));
   return <section className="page page--workspace">
     <div className="page-heading"><div><h2>3D 스캔 데이터 분석</h2></div></div>
@@ -1250,7 +1369,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
       </div>
       <div className="upload-panel card"><div className="card-title"><div><h3>스캔 이미지 등록</h3><p>PNG, JPG, WEBP · 여러 파일 동시 선택 가능</p></div><span className="count-chip">{scans.length}개 등록</span></div>
       <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} /><span className="dropzone__icon"><UploadCloud size={29} /></span><b>스캔 이미지를 여기에 놓으세요</b><span>또는 클릭하여 파일 선택</span><em>여러 품번의 이미지를 동시에 올릴 수 있습니다</em></label>
-      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span><span className="product-slot">{scan.productFile ? <><ImageIcon size={12} /> 제품데이터 {scan.productFile.name}<button type="button" onClick={() => detachProduct(scan.id)} aria-label="제품데이터 해제">해제</button></> : <label><input type="file" accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files?.[0] && attachProduct(scan.id, event.target.files[0])} /><UploadCloud size={12} /> 제품데이터 직접 지정 (없으면 품번으로 자동)</label>}</span></div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
+      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span><span className="product-slot"><label><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,.catpart,.step,.stp,.stl" onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} /><UploadCloud size={12} /> 기준 시트·CAD 등록</label>{scan.productFile && <><ImageIcon size={12} /> {scan.productFile.name}</>}{scan.cadFiles?.map((file) => <span className="product-slot__cad" key={file.name}><Layers3 size={12} /> {file.name}</span>)}{(scan.productFile || scan.cadFiles?.length) ? <button type="button" onClick={() => detachProduct(scan.id)} aria-label="기준 시트 이미지 해제">이미지 해제</button> : null}</span>{scan.assetStatus && <span className="asset-status">{scan.assetStatus}</span>}{scan.assetError && <span className="asset-error">CAD 등록 오류: {scan.assetError}</span>}</div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
       <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '대기 이미지 전체 분석 시작'}<ArrowRight size={18} /></button>
       </div>
     </div>
@@ -1273,12 +1392,14 @@ function engineSummary(engine: Engine, result: AnalysisResult) {
 
 /* 방향 판정은 상하좌우가 대칭인 부품에서는 갈리지 않는다. 그래서 근거 수치와 반전
    버튼을 함께 두고, 사람이 확정한 방향만 품번에 저장해 다음 스캔부터 다시 묻지 않는다. */
-function AlignmentBar({ alignment, partNumber, source, transferred, total, busy, confirmed, onFlip, onConfirm }: { alignment: AlignmentInfo; partNumber: string | null; source: string | null; transferred: number; total: number; busy: boolean; confirmed: boolean; onFlip?: (flipX?: boolean, flipY?: boolean) => void; onConfirm?: () => void }) {
+function AlignmentBar({ alignment, partNumber, source, transferred, total, busy, confirmed, onFlip, onConfirm }: { alignment: AlignmentInfo; partNumber: string | null; source: string | null; transferred: number; total: number; busy: boolean; confirmed: boolean; onFlip?: (flipX?: boolean, flipY?: boolean, rotation?: number) => void; onConfirm?: () => void }) {
+  return null;
+  /* 정렬은 엔진이 자동 결정하며 일반 사용자 화면에는 조작 옵션을 노출하지 않는다. */
   const trusted = alignment.confident;
   return <div className={`alignment-bar ${trusted ? '' : 'alignment-bar--check'}`}>
     <span className="alignment-bar__state">{trusted ? <><ShieldCheck size={14} /> 자동 판정 신뢰 가능</> : <><MoveRight size={14} /> 방향 확인 필요</>}</span>
     <span className="alignment-bar__facts"><b>{partNumber || '품번 미확인'}</b><small>{source || '제품데이터 없음'}</small><small>외형 {(alignment.outlineIou * 100).toFixed(1)}% · 구멍 {(alignment.holeIou * 100).toFixed(1)}% · 2위와 격차 {alignment.margin.toFixed(3)}</small><small>전사 {transferred}/{total}개</small></span>
-    {onFlip && <span className="alignment-bar__actions">{/* 분석 결과는 화면에 남아 있으므로, 엔진이 바뀌면 좌표만 다시 받아 온다. Qwen 판독은 다시 하지 않는다. */}<button type="button" disabled={busy} onClick={() => onFlip()} title="정렬만 다시 계산합니다. 방향은 자동 판정과 확정 저장분을 따릅니다">정렬 다시 계산</button><button type="button" disabled={busy} onClick={() => onFlip(!alignment.flipX, alignment.flipY)}>좌우 뒤집기</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, !alignment.flipY)}>상하 뒤집기</button>{onConfirm && <button type="button" className="primary" disabled={busy || confirmed || !partNumber} onClick={onConfirm}>{confirmed ? <><Check size={13} /> 품번에 저장됨</> : '이 방향으로 확정'}</button>}</span>}
+    {onFlip && <span className="alignment-bar__actions">{/* 분석 결과는 화면에 남아 있으므로, 엔진이 바뀌면 좌표만 다시 받아 온다. Qwen 판독은 다시 하지 않는다. */}<button type="button" disabled={busy} onClick={() => onFlip()} title="정렬만 다시 계산합니다. 방향은 자동 판정과 확정 저장분을 따릅니다">정렬 다시 계산</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, alignment.flipY, alignment.rotation === 90 ? 0 : 90)}>90° 회전</button><button type="button" disabled={busy} onClick={() => onFlip(!alignment.flipX, alignment.flipY, alignment.rotation ?? 0)}>좌우 뒤집기</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, !alignment.flipY, alignment.rotation ?? 0)}>상하 뒤집기</button>{onConfirm && <button type="button" className="primary" disabled={busy || confirmed || !partNumber} onClick={onConfirm}>{confirmed ? <><Check size={13} /> 품번에 저장됨</> : '이 방향으로 확정'}</button>}</span>}
   </div>;
 }
 
@@ -1303,7 +1424,7 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
   const runRealign = async (flipX?: boolean, flipY?: boolean) => {
     if (!onRealign || busy) return;
     setBusy(true); setConfirmed(false);
-    try { await onRealign(flipX, flipY); } finally { setBusy(false); }
+    try { await onRealign(flipX, flipY); } catch { /* 연결 실패는 전역 오류창으로 전파하지 않는다. */ } finally { setBusy(false); }
   };
   const runConfirm = async () => {
     if (!onConfirmAlignment || busy) return;
@@ -1769,6 +1890,8 @@ function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, del
 function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [zeroPanel, setZeroPanel] = useState(false);
+  const [zeroPointAddMode, setZeroPointAddMode] = useState(false);
+  const [zeroPointDeleteMode, setZeroPointDeleteMode] = useState(false);
   const [draftZeroEdits, setDraftZeroEdits] = useState<ZeroEdit[]>(zeroEdits);
   useEffect(() => { setDraftZeroEdits(zeroEdits); }, [scan.id, zeroEdits]);
   /* 보정치 수치 라벨(+1.5 등) 글꼴 — "선택하면 자유롭게" 가 아니라 시트 전체 한 번에 바뀌는 값이라 여기 하나로 둔다. */
@@ -1808,12 +1931,12 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
          가능하므로, 제품데이터를 보고 있으면 변환을 되짚어 스캔 좌표로 보낸다. */
       let sampleX = xNorm; let sampleY = yNorm;
       if (onProduct && alignment) {
-        const [a, , tx, , d, ty] = alignment.matrix;
         const [productW, productH] = alignment.productSize;
         const [scanW, scanH] = alignment.scanSize;
-        if (!a || !d) { setSampleError('정렬 정보가 올바르지 않습니다.'); return; }
-        sampleX = ((xNorm / 100 * productW - tx) / a) / scanW * 100;
-        sampleY = ((yNorm / 100 * productH - ty) / d) / scanH * 100;
+        const mapped = invertAffinePoint(alignment.matrix, xNorm / 100 * productW, yNorm / 100 * productH);
+        if (!mapped) { setSampleError('정렬 정보가 올바르지 않습니다.'); return; }
+        sampleX = mapped[0] / scanW * 100;
+        sampleY = mapped[1] / scanH * 100;
         if (sampleX < 0 || sampleX > 100 || sampleY < 0 || sampleY > 100) {
           setSampleError('스캔 범위를 벗어난 지점입니다.'); return;
         }
@@ -1838,11 +1961,11 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
       /* 응답은 스캔 좌표다. 엔진 포인트와 같은 규칙으로 제품 좌표도 함께 담아 둔다. */
       let productCoords: { xProduct?: number; yProduct?: number } = {};
       if (alignment) {
-        const [a, , tx, , d, ty] = alignment.matrix;
         const [productW, productH] = alignment.productSize;
+        const [productX, productY] = mapAffinePoint(alignment.matrix, data.xPx, data.yPx);
         productCoords = {
-          xProduct: (a * data.xPx + tx) / productW * 100,
-          yProduct: (d * data.yPx + ty) / productH * 100,
+          xProduct: productX / productW * 100,
+          yProduct: productY / productH * 100,
         };
       }
       setAddedPoints((current) => {
@@ -1924,31 +2047,143 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   /* 제로 폴리라인도 포인트와 같은 규칙으로 프레임 % 로 옮긴다. 스캔 원본은 픽셀 좌표라
      [scanW, scanH] 로 나눠 %, 제품데이터는 alignment 행렬로 옮긴 뒤 [productW, productH] 로 % 를 낸다.
      알림: 여기서 알고 있는 alignment 는 shear=0 (b=c=0) 인 축정렬 아핀이라 add point 와 같은 형태를 쓴다. */
+  const editedZeroLinePixels = useMemo<[number, number][][]>(() => (result.zeroLines || []).map((line, lineIndex) => {
+    const edit = draftZeroEdits.find((item) => item.index === lineIndex);
+    if (edit?.hidden) return [];
+    const source = Array.isArray(edit?.vertices) && edit.vertices.length >= 2 ? edit.vertices : (line.points || []);
+    return source
+      .filter((point) => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]))
+      .map(([x, y], pointIndex) => {
+        const point = edit?.points?.[String(pointIndex)];
+        return [x + (edit?.dx || 0) + (point?.dx || 0), y + (edit?.dy || 0) + (point?.dy || 0)] as [number, number];
+      });
+  }), [result.zeroLines, draftZeroEdits]);
+  const zeroLineSplineSegments = useMemo(() => (result.zeroLines || []).map((line, lineIndex) => {
+    const edit = draftZeroEdits.find((item) => item.index === lineIndex);
+    if (Array.isArray(edit?.splineSegments)) return edit.splineSegments;
+    return edit?.spline ? Array.from({ length: Math.max((line.points || []).length - 1, 0) }, (_, index) => index) : [];
+  }), [result.zeroLines, draftZeroEdits]);
   const sheetZeroLines = useMemo<[number, number][][]>(() => {
     if (!showZero || !hasZeroVector) return [];
     const scanW = result.source.width;
     const scanH = result.source.height;
     if (onProduct && alignment) {
-      const [a, , tx, , d, ty] = alignment.matrix;
       const [productW, productH] = alignment.productSize;
-      return (result.zeroLines || [])
-        .map((line) => (line.points || [])
-          .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+      return editedZeroLinePixels
+        .map((line) => line
           .map(([xPx, yPx]) => {
-            const productXPct = (a * xPx + tx) / productW * 100;
-            const productYPct = (d * yPx + ty) / productH * 100;
+            const [productX, productY] = mapAffinePoint(alignment.matrix, xPx, yPx);
+            const productXPct = productX / productW * 100;
+            const productYPct = productY / productH * 100;
             return [productXPct, productYPct] as [number, number];
-          })
-          /* 제품데이터 밖으로 나간 세그먼트는 잘라내고 유효 부분만 남긴다. */
-          .filter(([xPct, yPct]) => xPct >= -1 && xPct <= 101 && yPct >= -1 && yPct <= 101))
-        .filter((line) => line.length >= 2);
+          }));
     }
-    return (result.zeroLines || [])
-      .map((line) => (line.points || [])
-        .filter((pt) => Array.isArray(pt) && pt.length >= 2 && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
-        .map(([xPx, yPx]) => [xPx / scanW * 100, yPx / scanH * 100] as [number, number]))
-      .filter((line) => line.length >= 2);
-  }, [showZero, hasZeroVector, result.zeroLines, result.source.width, result.source.height, onProduct, alignment]);
+    return editedZeroLinePixels.map((line) => line.map(([xPx, yPx]) => [xPx / scanW * 100, yPx / scanH * 100] as [number, number]));
+  }, [showZero, hasZeroVector, result.source.width, result.source.height, onProduct, alignment, editedZeroLinePixels]);
+  const moveZeroPoint = (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => {
+    const scanW = result.source.width;
+    const scanH = result.source.height;
+    let dx = dxPercent * scanW / 100;
+    let dy = dyPercent * scanH / 100;
+    if (onProduct && alignment) {
+      const [productW, productH] = alignment.productSize;
+      const mapped = invertAffineDelta(alignment.matrix, dxPercent * productW / 100, dyPercent * productH / 100);
+      if (!mapped) return;
+      [dx, dy] = mapped;
+    }
+    setDraftZeroEdits((current) => {
+      const previous = current.find((item) => item.index === lineIndex) || { index: lineIndex, dx: 0, dy: 0 };
+      if (Array.isArray(previous.vertices) && previous.vertices[pointIndex]) {
+        const vertices = previous.vertices.map((point, index) => index === pointIndex ? [point[0] + dx, point[1] + dy] as [number, number] : point);
+        const next: ZeroEdit = { ...previous, vertices };
+        return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
+      }
+      const key = String(pointIndex);
+      const oldPoint = previous.points?.[key] || { dx: 0, dy: 0 };
+      const next: ZeroEdit = { ...previous, points: { ...previous.points, [key]: { dx: oldPoint.dx + dx, dy: oldPoint.dy + dy } } };
+      return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
+    });
+  };
+  const toggleZeroSplineSegment = (lineIndex: number, segmentIndex: number) => setDraftZeroEdits((current) => {
+    const previous = current.find((item) => item.index === lineIndex) || { index: lineIndex, dx: 0, dy: 0 };
+    const fallbackCount = Math.max(editedZeroLinePixels[lineIndex]?.length - 1, 0);
+    const existing = Array.isArray(previous.splineSegments)
+      ? previous.splineSegments
+      : (previous.spline ? Array.from({ length: fallbackCount }, (_, index) => index) : []);
+    const splineSegments = existing.includes(segmentIndex)
+      ? existing.filter((index) => index !== segmentIndex)
+      : [...existing, segmentIndex].sort((left, right) => left - right);
+    const next: ZeroEdit = { ...previous, spline: undefined, splineSegments };
+    return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
+  });
+  const addZeroPoint = (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => {
+    const scanW = result.source.width;
+    const scanH = result.source.height;
+    let x = xPercent * scanW / 100;
+    let y = yPercent * scanH / 100;
+    if (onProduct && alignment) {
+      const [productW, productH] = alignment.productSize;
+      const mapped = invertAffinePoint(alignment.matrix, xPercent * productW / 100, yPercent * productH / 100);
+      if (!mapped) return;
+      [x, y] = mapped;
+    }
+    const visible = editedZeroLinePixels[lineIndex];
+    if (!visible || visible.length < 2) return;
+    setDraftZeroEdits((current) => {
+      const previous = current.find((item) => item.index === lineIndex) || { index: lineIndex, dx: 0, dy: 0 };
+      const vertices = visible.map((point) => [...point] as [number, number]);
+      vertices.splice(Math.min(segmentIndex + 1, vertices.length), 0, [x, y]);
+      const oldSegments = Array.isArray(previous.splineSegments)
+        ? previous.splineSegments
+        : (previous.spline ? Array.from({ length: Math.max(visible.length - 1, 0) }, (_, index) => index) : []);
+      const splineSegments = oldSegments.flatMap((index) => index < segmentIndex ? [index] : index > segmentIndex ? [index + 1] : [index, index + 1]);
+      const next: ZeroEdit = { ...previous, dx: 0, dy: 0, points: undefined, vertices, spline: undefined, splineSegments };
+      return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
+    });
+  };
+  const deleteZeroPoint = (lineIndex: number, pointIndex: number) => {
+    const visible = editedZeroLinePixels[lineIndex];
+    if (!visible || visible.length < 2) return;
+    const first = visible[0];
+    const last = visible[visible.length - 1];
+    const closed = (first[0] - last[0]) ** 2 + (first[1] - last[1]) ** 2 < 1e-8;
+    const uniqueVertices = closed ? visible.slice(0, -1) : visible;
+    if (uniqueVertices.length <= (closed ? 3 : 2)) return;
+    const deleteIndex = closed && pointIndex === visible.length - 1 ? 0 : pointIndex;
+    if (deleteIndex < 0 || deleteIndex >= uniqueVertices.length) return;
+    setDraftZeroEdits((current) => {
+      const previous = current.find((item) => item.index === lineIndex) || { index: lineIndex, dx: 0, dy: 0 };
+      const segmentCount = closed ? uniqueVertices.length : uniqueVertices.length - 1;
+      const oldSegments = new Set(Array.isArray(previous.splineSegments)
+        ? previous.splineSegments
+        : (previous.spline ? Array.from({ length: segmentCount }, (_, index) => index) : []));
+      const remainingIndices = uniqueVertices.map((_, index) => index).filter((index) => index !== deleteIndex);
+      const vertices = remainingIndices.map((index) => [...uniqueVertices[index]] as [number, number]);
+      const splineSegments: number[] = [];
+      if (closed) {
+        for (let index = 0; index < remainingIndices.length; index += 1) {
+          const start = remainingIndices[index];
+          const end = remainingIndices[(index + 1) % remainingIndices.length];
+          const curved = end === (start + 1) % uniqueVertices.length
+            ? oldSegments.has(start)
+            : oldSegments.has((deleteIndex - 1 + uniqueVertices.length) % uniqueVertices.length) || oldSegments.has(deleteIndex);
+          if (curved) splineSegments.push(index);
+        }
+        vertices.push([...vertices[0]] as [number, number]);
+      } else {
+        for (let index = 0; index < vertices.length - 1; index += 1) {
+          const curved = deleteIndex === 0 ? oldSegments.has(index + 1)
+            : deleteIndex === uniqueVertices.length - 1 ? oldSegments.has(index)
+              : index < deleteIndex - 1 ? oldSegments.has(index)
+                : index === deleteIndex - 1 ? oldSegments.has(deleteIndex - 1) || oldSegments.has(deleteIndex)
+                  : oldSegments.has(index + 1);
+          if (curved) splineSegments.push(index);
+        }
+      }
+      const next: ZeroEdit = { ...previous, dx: 0, dy: 0, points: undefined, vertices, spline: undefined, splineSegments };
+      return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
+    });
+  };
   const visiblePointIds = new Set(sheetPoints.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
   const createAnnotation = (annotation: Annotation) => setAnnotations((current) => [...current, annotation]);
   const commitAnnotation = (annotation: Annotation) => setAnnotations((current) => current.map((item) => item.id === annotation.id ? annotation : item));
@@ -2255,17 +2490,12 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => setZeroPanel((current) => !current)} disabled={!editableZeroLineCount(result)}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => { setZeroPanel((current) => { const next = !current; if (!next) { setZeroPointAddMode(false); setZeroPointDeleteMode(false); } return next; }); setShowZero(true); }} disabled={!editableZeroLineCount(result)} title={editableZeroLineCount(result) ? '제로라인의 꼭짓점과 위치를 수정합니다' : '편집 가능한 제로라인 좌표가 없습니다'}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
-      {zeroPanel && <div className="zero-edit"><div className="zero-edit__head"><b>제로라인 수정</b><span>적용하면 3D 오버레이가 같은 위치로 다시 계산됩니다.</span></div>
-        {Array.from({ length: editableZeroLineCount(result) }, (_, index) => {
-          const edit = draftZeroEdits.find((item) => item.index === index) || { index, dx: 0, dy: 0 };
-          const put = (next: ZeroEdit) => setDraftZeroEdits((current) => [...current.filter((item) => item.index !== index), next].sort((a, b) => a.index - b.index));
-          return <div className={`zero-edit__row${edit.hidden ? ' is-off' : ''}`} key={index}><b>제로라인 {index + 1}</b><span className="zero-edit__axis">가로 <button onClick={() => put({ ...edit, dx: edit.dx - 5 })}>−</button><i>{edit.dx}</i><button onClick={() => put({ ...edit, dx: edit.dx + 5 })}>+</button></span><span className="zero-edit__axis">세로 <button onClick={() => put({ ...edit, dy: edit.dy - 5 })}>−</button><i>{edit.dy}</i><button onClick={() => put({ ...edit, dy: edit.dy + 5 })}>+</button></span><button onClick={() => put({ ...edit, hidden: !edit.hidden })}>{edit.hidden ? '다시 보이기' : '숨기기'}</button><button onClick={() => setDraftZeroEdits((current) => current.filter((item) => item.index !== index))}>되돌리기</button></div>;
-        })}
-        <div className="zero-edit__foot"><button className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>전부 되돌리기</button>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>아직 3D에 적용하지 않았습니다.</em>}</div>
+      {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
+        <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} showZero={showZero} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
@@ -2292,7 +2522,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   zonesByPart: Record<string, CadRegion[]>;
   setZonesByPart: React.Dispatch<React.SetStateAction<Record<string, CadRegion[]>>>;
 }) {
-  type OpenCad = { key: string; mesh: CadMesh };
+  type OpenCad = { key: string; mesh: CadMesh; scanId?: string };
   const [opened, setOpened] = useState<OpenCad[]>([]);
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const fileStore = useRef<Record<string, File>>({});
@@ -2302,6 +2532,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [overlay, setOverlay] = useState<CadOverlay | null>(null);
   const [overlayBusy, setOverlayBusy] = useState(false);
   const [overlayError, setOverlayError] = useState<string | null>(null);
+  const [shapeMatchWarning, setShapeMatchWarning] = useState<string | null>(null);
   const overlayCache = useRef<Record<string, CadOverlay>>({});
   const [morph, setMorph] = useState<CadMorph | null>(null);
   const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
@@ -2316,8 +2547,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [sheetBusy, setSheetBusy] = useState(false);
   const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
   const [showAlign, setShowAlign] = useState(false);
+  const importedReferenceFiles = useRef<Set<string>>(new Set());
 
-  const uploadCad = async (file: File) => {
+  const uploadCad = async (file: File, scanId?: string) => {
     setLoadingCount((count) => count + 1);
     setError(null);
     const form = new FormData();
@@ -2328,7 +2560,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       if (!response.ok) throw new Error(data.error || `${file.name} 파일을 읽지 못했습니다.`);
       const key = data.cadId || `${file.name}-${Date.now()}-${Math.random()}`;
       fileStore.current[data.summary.name] = file;
-      setOpened((current) => [...current.filter((item) => item.mesh.summary.name !== data.summary.name), { key, mesh: data }]);
+      setOpened((current) => [...current.filter((item) => item.mesh.summary.name !== data.summary.name), { key, mesh: data, scanId }]);
       setActiveKey(key);
     } catch (err) {
       setError(String((err as Error).message || err));
@@ -2340,6 +2572,17 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const uploadMany = async (files: FileList | File[]) => {
     for (const file of Array.from(files)) await uploadCad(file);
   };
+
+  useEffect(() => {
+    for (const scan of scans) {
+      for (const file of scan.cadFiles || []) {
+        const identity = `${scan.id}:${file.name}:${file.size}:${file.lastModified}`;
+        if (importedReferenceFiles.current.has(identity)) continue;
+        importedReferenceFiles.current.add(identity);
+        void uploadCad(file, scan.id);
+      }
+    }
+  }, [scans]);
 
   const removeCad = (key: string) => {
     setOpened((current) => {
@@ -2376,20 +2619,22 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const reopenCad = useCallback(async (name: string): Promise<CadMesh | null> => {
     const file = fileStore.current[name];
     if (!file) return null;
+    const linkedScanId = opened.find((item) => item.mesh.summary.name === name)?.scanId;
     const form = new FormData();
     form.append('file', file, file.name);
     const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: form });
     const data = await response.json() as CadMesh & { error?: string };
     if (!response.ok) return null;
     const key = data.cadId || name;
-    setOpened((current) => [...current.filter((item) => item.mesh.summary.name !== name), { key, mesh: data }]);
+    setOpened((current) => [...current.filter((item) => item.mesh.summary.name !== name), { key, mesh: data, scanId: linkedScanId }]);
     setActiveKey(key);
     return data;
-  }, []);
+  }, [opened]);
 
   const requestOverlay = useCallback(async (scanId: string, cad = selected?.mesh, moved?: FitAdjust, retried = false): Promise<void> => {
     setOverlayScanId(scanId);
     setOverlayError(null);
+    setShapeMatchWarning(null);
     const scan = scans.find((item) => item.id === scanId);
     const cadId = cad?.cadId;
     const analysisId = scan?.result?.analysisId;
@@ -2405,6 +2650,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     const cached = overlayCache.current[cacheKey];
     if (cached) {
       setOverlay(cached);
+      setShapeMatchWarning(cached.fit.reliable === false || (cached.fit.hit_rate ?? 1) < 0.5
+        ? `등록한 CAD와 스캔 형상의 정합률이 낮습니다 (${Math.round((cached.fit.hit_rate ?? 0) * 100)}%). 파일을 확인하거나 수동 정합을 사용하세요.`
+        : null);
       return;
     }
     setOverlayBusy(true);
@@ -2419,6 +2667,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       if (!response.ok) throw new Error(data.error || '3D 표시 결과를 만들지 못했습니다.');
       overlayCache.current[cacheKey] = data;
       setOverlay(data);
+      setShapeMatchWarning(data.fit.reliable === false || (data.fit.hit_rate ?? 1) < 0.5
+        ? `등록한 CAD와 스캔 형상의 정합률이 낮습니다 (${Math.round((data.fit.hit_rate ?? 0) * 100)}%). 파일을 확인하거나 수동 정합을 사용하세요.`
+        : null);
     } catch (err) {
       const message = String((err as Error).message || err);
       if (!retried && message.includes('만료')) {
@@ -2590,27 +2841,24 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       setOverlayScanId('');
       return;
     }
+    const linked = selected.scanId && analysed.find((scan) => scan.id === selected.scanId);
     const chosen = analysed.find((scan) => scan.id === overlayScanId);
-    if (chosen && scanFitsCad(chosen, selected.mesh)) void requestOverlay(chosen.id, selected.mesh);
-    else {
-      const suggested = analysed.find((scan) => scanFitsCad(scan, selected.mesh));
-      if (suggested) void requestOverlay(suggested.id, selected.mesh);
-      else if (chosen) void requestOverlay(chosen.id, selected.mesh);
-      else if (analysed.length === 1) void requestOverlay(analysed[0].id, selected.mesh);
-    }
+    if (linked) void requestOverlay(linked.id, selected.mesh);
+    else if (chosen) void requestOverlay(chosen.id, selected.mesh);
+    else if (analysed.length === 1) void requestOverlay(analysed[0].id, selected.mesh);
   }, [selected?.key]); // CAD 탭을 바꾸면 해당 CAD 좌표로 다시 투영한다.
 
   return <section className="page page--workspace">
     <div className="page-heading"><div><span className="breadcrumb">ADC WORKSPACE</span><h2>3D CAD 뷰어</h2><p>STEP과 메시 파일을 여러 개 열어 비교하고 측정·주석·공정 영역을 유지합니다.</p></div></div>
     <div className="card upload-panel">
       <label className="dropzone">
-        <input type="file" multiple accept=".step,.stp,.stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => {
+        <input type="file" multiple accept=".catpart,.step,.stp,.stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => {
           if (event.target.files?.length) void uploadMany(event.target.files);
           event.currentTarget.value = '';
         }} />
         <span className="dropzone__icon"><Layers3 size={29} /></span>
         <b>{loadingCount ? `CAD ${loadingCount}개 읽는 중…` : 'CAD 파일을 선택하세요'}</b>
-        <span>STEP · STL · PLY · OBJ · GLB · 3MF · 여러 파일 동시 선택 가능</span>
+        <span>CATPart · STEP · STL · PLY · OBJ · GLB · 3MF · 여러 파일 동시 선택 가능</span>
       </label>
       {error && <p className="sheet-note__error">{error}</p>}
     </div>
@@ -2654,6 +2902,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
           <span className="cad-overlay-bar__note">최대 {morph.stats.max_shift.toFixed(2)}mm · 평균 {morph.stats.mean_shift.toFixed(2)}mm · 포인트 {morph.points}개</span>
         </>}
         {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
+        {shapeMatchWarning && <span className="cad-overlay-bar__err">{shapeMatchWarning}</span>}
         {morphError && <span className="cad-overlay-bar__err">{morphError}</span>}
         {!analysed.length && <span className="cad-overlay-bar__err">먼저 엔진 결과에서 스캔 분석을 완료하세요.</span>}
       </div>
@@ -2789,7 +3038,7 @@ export default function Home() {
     }
   }, [sessionLoaded, scans, coefficientByScan, pointOverridesByScan, hiddenPointIdsByScan, sheetTitlesByScan, zonesByPart, zeroEditsByScan]);
   /* 방향만 다시 계산한다. Qwen 판독은 그대로 두고 좌표만 옮겨 받는다. */
-  const realign = async (flipX?: boolean, flipY?: boolean) => {
+  const realign = async (flipX?: boolean, flipY?: boolean, rotation?: number) => {
     if (!completedScan?.result) return;
     const target = completedScan;
     const form = new FormData();
@@ -2798,6 +3047,7 @@ export default function Home() {
     /* 반전을 지정하지 않으면 서버가 자동 판정과 확정 저장분을 따른다. 단순 재계산이 그 경우다. */
     if (flipX !== undefined) form.append('flipX', String(flipX));
     if (flipY !== undefined) form.append('flipY', String(flipY));
+    if (rotation !== undefined) form.append('rotation', String(rotation));
     form.append('points', JSON.stringify(target.result!.points.map((point) => ({ id: point.id, xPx: point.xPx, yPx: point.yPx }))));
     const response = await fetch(`${API_BASE}/api/realign`, { method: 'POST', body: form });
     const data = await response.json() as { alignment?: AlignmentInfo; alignmentOverlay?: string; productImage?: string; productSource?: string; points?: { id: string; xProduct: number; yProduct: number }[]; warnings?: string[]; error?: string };
