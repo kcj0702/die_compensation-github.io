@@ -308,3 +308,37 @@ def test_빈_그림도_한_장으로_돌려준다():
 
     page = fit_on_page(np.zeros((0, 0, 3), np.uint8))
     assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+
+
+def test_뷰_이름표와_회사_표기가_그림_안에_들어간다():
+    """OpenCV 는 한글을 못 그려 PIL 로 얹는다. 글꼴이 없는 PC 도 있으므로
+    글자를 못 넣더라도 그림 자체는 나와야 한다."""
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        BAR_HEIGHT, IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    page = fit_on_page(np.full((300, 600, 3), 180, np.uint8),
+                       caption="3D 형상 · 정면")
+    assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+    # 이름표 띠는 밝은 회색으로 깔린다(글자가 없는 오른쪽에서 본다).
+    assert page[BAR_HEIGHT // 2, IMAGE_WIDTH_PX - 40].min() > 200
+    # 부품(회색 180)은 띠 아래에만 놓인다 — 띠 오른쪽은 바탕뿐이다.
+    오른쪽띠 = page[1:BAR_HEIGHT - 2, IMAGE_WIDTH_PX // 2:-2]
+    assert 오른쪽띠.min() > 200
+    # 글자는 띠 왼쪽에 들어간다.
+    왼쪽띠 = page[1:BAR_HEIGHT - 2, 1:IMAGE_WIDTH_PX // 3]
+    assert 왼쪽띠.min() < 150
+
+
+def test_글꼴이_없어도_그림은_나온다(monkeypatch):
+    import numpy as np
+    from pathlib import Path
+    from zero_line_detection import sheet_excel
+
+    monkeypatch.setattr(sheet_excel, "FONT_BOLD", Path("없는글꼴.ttf"))
+    monkeypatch.setattr(sheet_excel, "FONT_BOOK", Path("없는글꼴.ttf"))
+    page = sheet_excel.fit_on_page(np.full((100, 200, 3), 120, np.uint8),
+                                   caption="정면")
+    assert page.shape[:2] == (sheet_excel.IMAGE_HEIGHT_PX,
+                              sheet_excel.IMAGE_WIDTH_PX)

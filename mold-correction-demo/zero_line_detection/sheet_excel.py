@@ -147,8 +147,48 @@ def trim_border(image, slack: int = 12):
     return image[top:bottom, left:right]
 
 
-def fit_on_page(image, width: int = IMAGE_WIDTH_PX,
-                height: int = IMAGE_HEIGHT_PX, pad: int = 16):
+# 한글을 그리려면 트루타입 글꼴이 있어야 한다. OpenCV 의 putText 는
+# 아스키만 그리므로 PIL 로 얹는다. 윈도우에 늘 있는 맑은 고딕을 쓴다 —
+# 사내망에서 도는 게 전제라 밖에서 받아 오지 않는다.
+FONT_BOLD = Path(r"C:\Windows\Fonts\malgunbd.ttf")
+FONT_BOOK = Path(r"C:\Windows\Fonts\malgun.ttf")
+
+BAR_HEIGHT = 38           # 뷰 이름표 띠
+BAR_FILL = (243, 245, 247)
+BAR_LINE = (214, 218, 222)
+INK = (58, 66, 78)
+FAINT = (140, 148, 158)
+
+
+def _font(path: Path, size: int):
+    """글꼴을 연다. 없으면 None 을 주고 글자를 건너뛴다."""
+    try:
+        from PIL import ImageFont
+
+        return ImageFont.truetype(str(path), size)
+    except Exception:
+        return None
+
+
+def _write(canvas, spot, text: str, size: int, colour, bold: bool = False):
+    """BGR 그림 위에 한글을 얹는다. 글꼴이 없으면 아무것도 안 한다."""
+    if not text:
+        return canvas
+    face = _font(FONT_BOLD if bold else FONT_BOOK, size)
+    if face is None:
+        return canvas
+    from PIL import Image, ImageDraw
+
+    sheet = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    ImageDraw.Draw(sheet).text(spot, text, font=face,
+                               fill=(colour[2], colour[1], colour[0]))
+    canvas[:] = cv2.cvtColor(np.array(sheet), cv2.COLOR_RGB2BGR)
+    return canvas
+
+
+def fit_on_page(image, caption: str = "", width: int = IMAGE_WIDTH_PX,
+                height: int = IMAGE_HEIGHT_PX, pad: int = 16,
+                footer: bool = True):
     """그림을 양식의 그림 자리에 꼭 맞는 한 장으로 앉힌다.
 
     [왜 필요한가 — 지금 엑셀이 못 쓸 물건이었다]
@@ -157,32 +197,42 @@ def fit_on_page(image, width: int = IMAGE_WIDTH_PX,
     시트는 40행 묶음이 되풀이되는 물건이라 **쪽마다 그림 자리가 같아야**
     넘길 때 눈이 안 흔들린다.
 
-    그래서 자리 크기(A~AD x 8~40행, 실측 1670x591)의 흰 종이를 먼저 깔고,
-    부품을 비율 그대로 최대한 키워 가운데 놓는다. 엑셀에는 늘 같은 크기로
-    붙으므로 쪽이 몇 장이든 줄이 맞는다. 테두리를 얇게 둘러 화면의
-    "정면도 · FRONT VIEW" 틀과 같은 인상을 준다.
-
-    글자는 여기서 넣지 않는다 — OpenCV 는 한글을 못 그린다. 쪽 이름은
-    엑셀 칸에 적는다(CAPTION_ROW).
+    자리 크기(A~AD x 8~40행, 실측 1670x591)의 흰 종이를 먼저 깔고, 부품을
+    비율 그대로 최대한 키워 가운데 놓는다. 위에는 뷰 이름표 띠를, 오른쪽
+    아래에는 회사 표기를 넣어 화면의 작업 지시도와 같은 틀로 만든다.
     """
-    if image is None or image.size == 0:
-        return np.full((height, width, 3), 255, np.uint8)
-
     paper = np.full((height, width, 3), 255, np.uint8)
-    room_w, room_h = width - pad * 2, height - pad * 2
-    high, wide = image.shape[:2]
-    scale = min(room_w / wide, room_h / high)
-    # 작은 그림을 억지로 키우면 뭉갠다. 3배까지만 키운다.
-    scale = min(scale, 3.0)
-    new_w, new_h = max(1, int(wide * scale)), max(1, int(high * scale))
-    shrunk = cv2.resize(image, (new_w, new_h),
-                        interpolation=(cv2.INTER_AREA if scale < 1
-                                       else cv2.INTER_CUBIC))
-    left = (width - new_w) // 2
-    top = (height - new_h) // 2
-    paper[top:top + new_h, left:left + new_w] = shrunk
-    # 얇은 테두리 — 인쇄했을 때 그림 자리가 어디까지인지 보인다.
-    cv2.rectangle(paper, (0, 0), (width - 1, height - 1), (214, 218, 222), 1)
+
+    # ── 뷰 이름표 띠 ─────────────────────────────────────────
+    cv2.rectangle(paper, (0, 0), (width - 1, BAR_HEIGHT), BAR_FILL, -1)
+    cv2.line(paper, (0, BAR_HEIGHT), (width - 1, BAR_HEIGHT), BAR_LINE, 1)
+    if caption:
+        _write(paper, (18, 9), caption, 19, INK, bold=True)
+
+    if image is not None and image.size:
+        room_w = width - pad * 2
+        room_h = height - BAR_HEIGHT - pad * 2
+        high, wide = image.shape[:2]
+        # 작은 그림을 억지로 키우면 뭉갠다. 3배까지만 키운다.
+        scale = min(room_w / wide, room_h / high, 3.0)
+        new_w, new_h = max(1, int(wide * scale)), max(1, int(high * scale))
+        shrunk = cv2.resize(image, (new_w, new_h),
+                            interpolation=(cv2.INTER_AREA if scale < 1
+                                           else cv2.INTER_CUBIC))
+        left = (width - new_w) // 2
+        top = BAR_HEIGHT + (room_h + pad * 2 - new_h) // 2
+        paper[top:top + new_h, left:left + new_w] = shrunk
+
+    # ── 회사 표기 ────────────────────────────────────────────
+    if footer:
+        box_w, box_h = 232, 56
+        x0, y0 = width - box_w - 18, height - box_h - 16
+        cv2.rectangle(paper, (x0, y0), (x0 + box_w, y0 + box_h), (255, 255, 255), -1)
+        cv2.rectangle(paper, (x0, y0), (x0 + box_w, y0 + box_h), BAR_LINE, 1)
+        _write(paper, (x0 + 12, y0 + 7), "AJIN INDUSTRIAL", 11, FAINT)
+        _write(paper, (x0 + 12, y0 + 24), "DIE CORRECTION SHEET", 15, INK, bold=True)
+
+    cv2.rectangle(paper, (0, 0), (width - 1, height - 1), BAR_LINE, 1)
     return paper
 
 
@@ -235,7 +285,9 @@ def build_workbook(
 
         # 빈 바탕을 잘라내고, 양식의 그림 자리에 꼭 맞는 한 장으로 앉힌다.
         # 쪽마다 같은 크기라야 넘길 때 줄이 맞는다.
-        image = fit_on_page(trim_border(image))
+        here = (captions[index] if captions and index < len(captions)
+                else "")
+        image = fit_on_page(trim_border(image), caption=here)
         box_width, box_height_here = IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX
         ok, buffer = cv2.imencode(".png", image)
         if not ok:
@@ -246,13 +298,8 @@ def build_workbook(
         anchor_col = "".join(ch for ch in IMAGE_ANCHOR if ch.isalpha())
         page.add_image(picture, f"{anchor_col}{anchor_row}")
 
-        # 그림 바로 위에 그 쪽이 무슨 그림인지 적는다 — "3D 형상 · 우측"
-        # 처럼. 3D 는 돌려 놓고 찍으므로 방향을 안 적으면 나중에 못 가린다.
-        if captions and index < len(captions) and captions[index]:
-            head = page.cell(CAPTION_ROW + offset, CAPTION_COL)
-            head.value = str(captions[index])
-            head.font = Font(size=9, bold=True)
-            head.alignment = Alignment(horizontal="left", vertical="center")
+        # 쪽 이름은 그림 안 띠에 넣는다(fit_on_page). 예전에는 칸에 적었는데
+        # 그림과 따로 놀아 어수선했다.
 
     if len(pages) > 1:
         page.print_area = f"A1:AD{PAGE_ROWS * len(pages)}"
