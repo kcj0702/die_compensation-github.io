@@ -234,3 +234,36 @@ def test_칠한_색이_없으면_그대로_둔다():
     out_faces, out_groups = spread_through_thickness(vertices, faces, groups)
     assert out_groups == groups
     assert np.array_equal(out_faces, faces)
+
+
+def test_시트_그림의_빈_바탕을_잘라낸다():
+    """3D 화면은 가로로 넓고 부품은 가운데만 차지한다.
+
+    그대로 시트에 실으면 부품이 작게 떠 있고 둘레가 허옇게 남는다.
+    """
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    canvas = np.full((940, 2000, 3), 255, np.uint8)
+    canvas[300:640, 700:1300] = (120, 130, 140)      # 부품 340 x 600
+    cut = trim_border(canvas, slack=12)
+    assert cut.shape[0] == 340 + 24
+    assert cut.shape[1] == 600 + 24
+
+
+def test_어두운_바탕도_같은_방법으로_잘린다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    canvas = np.full((400, 800, 3), 22, np.uint8)
+    canvas[100:300, 200:600] = (200, 200, 200)
+    cut = trim_border(canvas, slack=0)
+    assert cut.shape[:2] == (200, 400)
+
+
+def test_잘라낼_것이_없으면_그대로_둔다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    plain = np.full((50, 60, 3), 255, np.uint8)
+    assert trim_border(plain).shape == plain.shape

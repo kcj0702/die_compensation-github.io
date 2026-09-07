@@ -55,6 +55,9 @@ ROW_POINTS = 14.0         # 양식의 행 높이(pt)
 PAGE_ROWS = 40            # 한 페이지가 40행. 실제 시트도 이만큼씩 반복된다
 PROCESS_ROW = 36          # 공정 표기가 들어갈 자리(그림 아래)
 PROCESS_COL = 2           # B 열
+# 양식의 A~AD 열을 실측한 폭(px). 가로로 긴 3D 화면이 인쇄영역 밖으로
+# 나가지 않게 여기에 맞춘다.
+IMAGE_WIDTH_PX = 1670
 CAPTION_ROW = 7           # 그림 바로 위 줄 — 어느 시점 그림인지 적는다
 CAPTION_COL = 2           # B 열
 
@@ -109,6 +112,40 @@ def draw_sheet_image(base_bgr: np.ndarray, points: list) -> np.ndarray:
     return canvas
 
 
+def trim_border(image, slack: int = 12):
+    """그림 둘레의 빈 바탕을 잘라낸다.
+
+    [왜 필요한가]
+    3D 화면은 가로로 넓은데(실측 캔버스가 2.1:1) 부품은 가운데만 차지한다.
+    그대로 시트에 실으면 부품이 작게 떠 있고 둘레가 허옇게 남아, 현업
+    시트처럼 "부품이 자리를 채운" 그림이 안 나온다.
+
+    네 귀퉁이 색을 바탕으로 보고, 그와 다른 화소가 처음 나오는 자리까지
+    자른다. 흰 바탕이든 어두운 바탕이든 같은 방법으로 된다. 여백을 조금
+    남겨야 콜아웃 글자가 잘리지 않는다.
+    """
+    if image is None or image.size == 0:
+        return image
+    high, wide = image.shape[:2]
+    corners = np.array([image[0, 0], image[0, wide - 1],
+                        image[high - 1, 0], image[high - 1, wide - 1]],
+                       dtype=np.int16)
+    paper = np.median(corners, axis=0)
+    # 바탕과 얼마나 다른가. 8 이면 눈에 안 보이는 그라데이션은 넘긴다.
+    unlike = np.abs(image.astype(np.int16) - paper).max(axis=2) > 8
+    rows = np.flatnonzero(unlike.any(axis=1))
+    cols = np.flatnonzero(unlike.any(axis=0))
+    if not len(rows) or not len(cols):
+        return image
+    top = max(0, int(rows[0]) - slack)
+    bottom = min(high, int(rows[-1]) + 1 + slack)
+    left = max(0, int(cols[0]) - slack)
+    right = min(wide, int(cols[-1]) + 1 + slack)
+    if bottom - top < 8 or right - left < 8:
+        return image
+    return image[top:bottom, left:right]
+
+
 def build_workbook(
     pages: list,
     points: list,
@@ -156,13 +193,22 @@ def build_workbook(
             row = int("".join(ch for ch in cell if ch.isdigit())) + offset
             page[f"{column}{row}"] = values[key]
 
+        # 둘레의 빈 바탕을 잘라 부품이 자리를 채우게 한다.
+        image = trim_border(image)
         height, width = image.shape[:2]
         box_width = int(box_height * width / height)
+        # 양식의 그림 자리(A~AD, 실측 약 1670px)를 넘으면 폭에 맞춘다.
+        # 안 그러면 가로로 긴 화면이 인쇄영역 밖으로 삐져나간다.
+        if box_width > IMAGE_WIDTH_PX:
+            box_width = IMAGE_WIDTH_PX
+            box_height_here = int(IMAGE_WIDTH_PX * height / width)
+        else:
+            box_height_here = box_height
         ok, buffer = cv2.imencode(".png", image)
         if not ok:
             raise ValueError("시트 그림을 PNG 로 만들지 못했습니다.")
         picture = XlImage(io.BytesIO(buffer.tobytes()))
-        picture.width, picture.height = box_width, box_height
+        picture.width, picture.height = box_width, box_height_here
         anchor_row = int("".join(ch for ch in IMAGE_ANCHOR if ch.isdigit())) + offset
         anchor_col = "".join(ch for ch in IMAGE_ANCHOR if ch.isalpha())
         page.add_image(picture, f"{anchor_col}{anchor_row}")
