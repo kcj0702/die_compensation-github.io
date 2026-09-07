@@ -267,3 +267,44 @@ def test_잘라낼_것이_없으면_그대로_둔다():
 
     plain = np.full((50, 60, 3), 255, np.uint8)
     assert trim_border(plain).shape == plain.shape
+
+
+def test_쪽마다_그림_자리가_같다():
+    """시트는 40행 묶음이 되풀이되는 물건이라 쪽마다 그림이 같은 자리여야 한다.
+
+    예전에는 비율을 지키느라 폭이나 높이 하나만 맞춰서, 납작한 부품은
+    가로로 늘어지고 길쭉한 부품은 구석에 작게 박혔다.
+    """
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    납작 = np.full((180, 1900, 3), 200, np.uint8)
+    길쭉 = np.full((880, 260, 3), 200, np.uint8)
+    for 원본 in (납작, 길쭉):
+        page = fit_on_page(원본)
+        assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+
+
+def test_부품을_비율_그대로_키운다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import fit_on_page
+
+    원본 = np.full((100, 200, 3), 0, np.uint8)     # 2:1
+    page = fit_on_page(원본, width=800, height=400, pad=0)
+    # 검은 부분의 가로세로 비가 그대로여야 한다.
+    dark = np.argwhere((page < 50).all(axis=2))
+    high = dark[:, 0].max() - dark[:, 0].min() + 1
+    wide = dark[:, 1].max() - dark[:, 1].min() + 1
+    assert abs(wide / high - 2.0) < 0.05
+
+
+def test_빈_그림도_한_장으로_돌려준다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    page = fit_on_page(np.zeros((0, 0, 3), np.uint8))
+    assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)

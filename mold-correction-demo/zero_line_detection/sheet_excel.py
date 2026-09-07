@@ -58,6 +58,7 @@ PROCESS_COL = 2           # B 열
 # 양식의 A~AD 열을 실측한 폭(px). 가로로 긴 3D 화면이 인쇄영역 밖으로
 # 나가지 않게 여기에 맞춘다.
 IMAGE_WIDTH_PX = 1670
+IMAGE_HEIGHT_PX = 591     # 8~40행을 실측한 높이(px)
 CAPTION_ROW = 7           # 그림 바로 위 줄 — 어느 시점 그림인지 적는다
 CAPTION_COL = 2           # B 열
 
@@ -146,6 +147,45 @@ def trim_border(image, slack: int = 12):
     return image[top:bottom, left:right]
 
 
+def fit_on_page(image, width: int = IMAGE_WIDTH_PX,
+                height: int = IMAGE_HEIGHT_PX, pad: int = 16):
+    """그림을 양식의 그림 자리에 꼭 맞는 한 장으로 앉힌다.
+
+    [왜 필요한가 — 지금 엑셀이 못 쓸 물건이었다]
+    쪽마다 그림 크기가 제각각이라 어떤 쪽은 가로로 늘어지고 어떤 쪽은
+    구석에 작게 박혔다. 비율을 지키느라 폭이나 높이 하나만 맞췄기 때문이다.
+    시트는 40행 묶음이 되풀이되는 물건이라 **쪽마다 그림 자리가 같아야**
+    넘길 때 눈이 안 흔들린다.
+
+    그래서 자리 크기(A~AD x 8~40행, 실측 1670x591)의 흰 종이를 먼저 깔고,
+    부품을 비율 그대로 최대한 키워 가운데 놓는다. 엑셀에는 늘 같은 크기로
+    붙으므로 쪽이 몇 장이든 줄이 맞는다. 테두리를 얇게 둘러 화면의
+    "정면도 · FRONT VIEW" 틀과 같은 인상을 준다.
+
+    글자는 여기서 넣지 않는다 — OpenCV 는 한글을 못 그린다. 쪽 이름은
+    엑셀 칸에 적는다(CAPTION_ROW).
+    """
+    if image is None or image.size == 0:
+        return np.full((height, width, 3), 255, np.uint8)
+
+    paper = np.full((height, width, 3), 255, np.uint8)
+    room_w, room_h = width - pad * 2, height - pad * 2
+    high, wide = image.shape[:2]
+    scale = min(room_w / wide, room_h / high)
+    # 작은 그림을 억지로 키우면 뭉갠다. 3배까지만 키운다.
+    scale = min(scale, 3.0)
+    new_w, new_h = max(1, int(wide * scale)), max(1, int(high * scale))
+    shrunk = cv2.resize(image, (new_w, new_h),
+                        interpolation=(cv2.INTER_AREA if scale < 1
+                                       else cv2.INTER_CUBIC))
+    left = (width - new_w) // 2
+    top = (height - new_h) // 2
+    paper[top:top + new_h, left:left + new_w] = shrunk
+    # 얇은 테두리 — 인쇄했을 때 그림 자리가 어디까지인지 보인다.
+    cv2.rectangle(paper, (0, 0), (width - 1, height - 1), (214, 218, 222), 1)
+    return paper
+
+
 def build_workbook(
     pages: list,
     points: list,
@@ -193,17 +233,10 @@ def build_workbook(
             row = int("".join(ch for ch in cell if ch.isdigit())) + offset
             page[f"{column}{row}"] = values[key]
 
-        # 둘레의 빈 바탕을 잘라 부품이 자리를 채우게 한다.
-        image = trim_border(image)
-        height, width = image.shape[:2]
-        box_width = int(box_height * width / height)
-        # 양식의 그림 자리(A~AD, 실측 약 1670px)를 넘으면 폭에 맞춘다.
-        # 안 그러면 가로로 긴 화면이 인쇄영역 밖으로 삐져나간다.
-        if box_width > IMAGE_WIDTH_PX:
-            box_width = IMAGE_WIDTH_PX
-            box_height_here = int(IMAGE_WIDTH_PX * height / width)
-        else:
-            box_height_here = box_height
+        # 빈 바탕을 잘라내고, 양식의 그림 자리에 꼭 맞는 한 장으로 앉힌다.
+        # 쪽마다 같은 크기라야 넘길 때 줄이 맞는다.
+        image = fit_on_page(trim_border(image))
+        box_width, box_height_here = IMAGE_WIDTH_PX, IMAGE_HEIGHT_PX
         ok, buffer = cv2.imencode(".png", image)
         if not ok:
             raise ValueError("시트 그림을 PNG 로 만들지 못했습니다.")
