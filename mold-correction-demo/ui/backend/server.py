@@ -1314,9 +1314,13 @@ def analyze_image(
     clean_image: np.ndarray | None = None
     points_removed_image: np.ndarray | None = None
     label_count = 0
+    image_analysis_context: dict[str, Any] = {}
     try:
-        label_count = len(detect_label_boxes(image))
-        label_versions = create_versions(image)
+        label_versions = create_versions(image, context=image_analysis_context)
+        if "label_boxes" in image_analysis_context:
+            label_count = len(image_analysis_context["label_boxes"])
+        else:
+            label_count = len(detect_label_boxes(image))
         clean_image = label_versions["2_labels_inpainted"]
         points_removed_image = label_versions["4_labels_points_inpainted"]
     except Exception as exc:  # engine errors must be shown per engine
@@ -1378,7 +1382,7 @@ def analyze_image(
             )
         # UI 응답은 합의한 하이브리드 엔진 결과를 우선한다. 위의 기존
         # 결과는 후보/앵커 호환 필드를 유지하기 위한 보조 계산이다.
-        hybrid_zero = detect_hybrid_zero_line(image, filename)
+        hybrid_zero = detect_hybrid_zero_line(image, filename, base=zero_output)
         zero_datum_mask = hybrid_zero.mask
         zero_overlay = hybrid_zero.overlay_rgb
         zero_lines = hybrid_zero.lines
@@ -1398,7 +1402,10 @@ def analyze_image(
     valid_candidates_count = 0
     deviation_warnings: list[str] = []
     try:
-        candidates = detect_labels(image)
+        if "deviation_candidates" in image_analysis_context:
+            candidates = image_analysis_context["deviation_candidates"]
+        else:
+            candidates = detect_labels(image)
         if clean_image is not None and points_removed_image is not None:
             _refine_candidates_from_removed_markers(
                 image,
@@ -2916,6 +2923,30 @@ def _shift_centers(features: list[dict], offset) -> list[dict]:
     return moved
 
 
+def _load_step_cad_path(path: Path, display_name: str | None = None) -> dict[str, Any]:
+    """STEP 경로를 복사하지 않고 파싱해 브라우저용 메시를 만든다."""
+    from cad_import import mesh_io, step_reader
+
+    parsed = step_reader.read_step_full(path)
+    web = mesh_io.to_web_mesh(
+        parsed["mesh"], name=display_name or path.stem, source_format="step"
+    )
+    offset = web["summary"]["bounds"]["center"] if web.get("recentered") else None
+    web["holes"] = _shift_centers(parsed["holes"], offset)
+    web["planes"] = _shift_centers(parsed["planes"][:50], offset)
+    web["counts"] = parsed["counts"]
+
+    web["cadId"] = _cache_cad({
+        "mesh": parsed["mesh"],
+        "offset": np.asarray(offset, dtype=float) if offset else np.zeros(3),
+        "name": display_name or path.stem,
+        "display_vertices": np.asarray(
+            web["positions"], dtype=float).reshape(-1, 3),
+        "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
+    })
+    return web
+
+
 def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
     """업로드된 3D 파일을 읽어 뷰어용 메시 + RPS 후보를 만든다.
 
@@ -2996,6 +3027,42 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
         f"지원하지 않는 형식입니다: {suffix or '확장자 없음'} "
         f"(지원: STEP/STP, STL, PLY, OBJ, GLB/GLTF, 3MF)"
     )
+
+
+def load_registered_cad(part_number: str) -> dict[str, Any]:
+    """품번에 등록된 CAD를 영구 캐시를 사용해 뷰어 데이터로 만든다.
+
+    CATIA 원본은 반드시 STEP으로 변환한 뒤 ``load_cad_payload``의 STEP
+    경로를 탄다. 따라서 단순 삼각망 표시뿐 아니라 홀과 기준 평면 정보도
+    유지되고, 같은 원본을 다시 열 때 CATIA 변환을 반복하지 않는다.
+    """
+    match = MESH_LIBRARY.find(part_number)
+    if match is None:
+        raise FileNotFoundError(f"등록된 CAD가 없습니다: {part_number}")
+
+    source_path = match.path
+    display_name = match.part_number
+    viewer_path = source_path
+    converted_from: str | None = None
+    if source_path.suffix.lower() in {".catpart", ".catproduct"}:
+        from cad_import.catia_convert import convert_to_step
+
+        viewer_path = convert_to_step(source_path, _cad_cache_dir())
+        converted_from = source_path.suffix.lower().lstrip(".")
+
+    if viewer_path.suffix.lower() in {".step", ".stp"}:
+        result = _load_step_cad_path(viewer_path, display_name)
+    else:
+        result = load_cad_payload(viewer_path.read_bytes(), viewer_path.name)
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        summary["name"] = display_name
+    result["registered"] = True
+    result["registeredPartNumber"] = display_name
+    if converted_from is not None:
+        result["convertedFrom"] = converted_from
+        result["note"] = "등록된 CATIA 파일을 STEP으로 변환하여 표시했습니다."
+    return result
 
 
 # CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
@@ -3087,7 +3154,9 @@ def reset_overlay_cache() -> None:
 
 def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
                  fit_adjust=None) -> str:
-    return "|".join([cad_id, analysis_id,
+    # Keep stale 0%-hit results from the former optional-ray implementation
+    # out of both hot-reloaded development sessions and long-lived servers.
+    return "|".join(["surface-v2", cad_id, analysis_id,
                      json.dumps(zero_edits or [], sort_keys=True),
                      json.dumps(fit_adjust or {}, sort_keys=True)])
 
@@ -3703,6 +3772,17 @@ async def cad_overlay(request: Request) -> JSONResponse:
 async def cad(request: Request) -> JSONResponse:
     try:
         form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_CAD_UPLOAD_BYTES)
+        source = str(form.get("source", "")).strip().lower()
+        if source == "registered":
+            part_number = str(form.get("partNumber", "")).strip().upper()
+            if not part_number:
+                return JSONResponse({"error": "등록 CAD를 열려면 품번이 필요합니다."}, status_code=400)
+            try:
+                result = await run_in_threadpool(load_registered_cad, part_number)
+            except FileNotFoundError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=404)
+            return JSONResponse(result)
+
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             return JSONResponse({"error": "3D 파일이 필요합니다."}, status_code=400)

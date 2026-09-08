@@ -375,9 +375,23 @@ def find_endpoint_anchor(
     for radius in range(1, maximum_radius + 1):
         x0, x1 = max(0, x - radius), min(width - 1, x + radius)
         y0, y1 = max(0, y - radius), min(height - 1, y + radius)
-        free_y, free_x = np.where(planning_obstacles[y0 : y1 + 1, x0 : x1 + 1] == 0)
+
+        # Only inspect pixels that entered the square at this radius.  The old
+        # implementation rescanned and re-sorted the entire square on every
+        # iteration, testing the same rejected segments millions of times.
+        # A previously rejected segment cannot become clear because neither
+        # obstacle mask changes, so the perimeter gives the identical answer.
+        candidates_set: set[tuple[int, int]] = set()
+        if 0 <= y - radius < height:
+            candidates_set.update((candidate_x, y - radius) for candidate_x in range(x0, x1 + 1))
+        if 0 <= y + radius < height:
+            candidates_set.update((candidate_x, y + radius) for candidate_x in range(x0, x1 + 1))
+        if 0 <= x - radius < width:
+            candidates_set.update((x - radius, candidate_y) for candidate_y in range(y0, y1 + 1))
+        if 0 <= x + radius < width:
+            candidates_set.update((x + radius, candidate_y) for candidate_y in range(y0, y1 + 1))
         candidates = sorted(
-            ((int(local_x + x0), int(local_y + y0)) for local_x, local_y in zip(free_x, free_y)),
+            (point for point in candidates_set if planning_obstacles[point[1], point[0]] == 0),
             key=lambda point: ((point[0] - x) ** 2 + (point[1] - y) ** 2, point[1], point[0]),
         )
         for candidate in candidates:
@@ -452,10 +466,20 @@ def route_pair(
     second_point: tuple[int, int],
     planning_obstacles: np.ndarray,
     strict_obstacles: np.ndarray,
+    anchor_cache: dict | None = None,
 ) -> dict:
+    if anchor_cache is None:
+        anchor_cache = {}
+
     def plan(obstacles: np.ndarray, mode: str):
-        first_anchor = find_endpoint_anchor(first_point, obstacles, strict_obstacles)
-        second_anchor = find_endpoint_anchor(second_point, obstacles, strict_obstacles)
+        def anchor(point: tuple[int, int]) -> tuple[int, int]:
+            key = (id(obstacles), id(strict_obstacles), point)
+            if key not in anchor_cache:
+                anchor_cache[key] = find_endpoint_anchor(point, obstacles, strict_obstacles)
+            return anchor_cache[key]
+
+        first_anchor = anchor(first_point)
+        second_anchor = anchor(second_point)
         if rasterized_segment_is_clear(obstacles, first_anchor, second_anchor):
             return first_anchor, second_anchor, [first_anchor, second_anchor], f"direct_{mode}"
         try:
@@ -593,6 +617,7 @@ def validate_closed_enclosure(
     route_cache: dict,
     baseline_component_count: int,
     barrier_thickness: int,
+    anchor_cache: dict | None = None,
 ) -> dict:
     cache_key = (first["label"], second["label"])
     if cache_key not in route_cache:
@@ -604,6 +629,7 @@ def validate_closed_enclosure(
                 second_point,
                 planning_obstacles,
                 strict_obstacles,
+                anchor_cache,
             )
         except ValueError as error:
             route_cache[cache_key] = {"routing_error": str(error)}
@@ -829,6 +855,7 @@ def select_along_outer_contour(
     baseline_component_count = cv2.connectedComponents(product_mask, connectivity=8)[0] - 1
     barrier_thickness = max(3, int(round(min(height, width) * 0.004)))
     route_cache: dict = {}
+    anchor_cache: dict = {}
     directional_candidate_limit = min(4, len(zero_points))
 
     selections: list[dict] = []
@@ -913,6 +940,7 @@ def select_along_outer_contour(
                 route_cache,
                 baseline_component_count,
                 barrier_thickness,
+                anchor_cache,
             )
             print(
                 f"  result={validation['reason']}, "

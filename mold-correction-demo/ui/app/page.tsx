@@ -174,6 +174,74 @@ type AnnotationTool = 'select' | AnnotationKind;
 type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; fontFamily?: string; color?: string };
 type DetailRegion = { id: string; x: number; y: number; w: number; h: number; label: string };
 type SheetLayout = { id: string; kind: 'front' | 'detail'; x: number; y: number; w: number; h: number; regionId?: string };
+type SheetRotation = 0 | 90 | 180 | 270;
+type SheetImageTransform = { rotation: SheetRotation; flipX: boolean; flipY: boolean };
+
+const IDENTITY_SHEET_TRANSFORM: SheetImageTransform = { rotation: 0, flipX: false, flipY: false };
+
+function sheetTransformKey(transform: SheetImageTransform) {
+  return `${transform.rotation}-${transform.flipX ? 1 : 0}-${transform.flipY ? 1 : 0}`;
+}
+
+function transformSheetPoint(transform: SheetImageTransform, x: number, y: number): [number, number] {
+  const flippedX = transform.flipX ? 100 - x : x;
+  const flippedY = transform.flipY ? 100 - y : y;
+  if (transform.rotation === 90) return [100 - flippedY, flippedX];
+  if (transform.rotation === 180) return [100 - flippedX, 100 - flippedY];
+  if (transform.rotation === 270) return [flippedY, 100 - flippedX];
+  return [flippedX, flippedY];
+}
+
+function invertSheetPoint(transform: SheetImageTransform, x: number, y: number): [number, number] {
+  let rotatedX = x; let rotatedY = y;
+  if (transform.rotation === 90) [rotatedX, rotatedY] = [y, 100 - x];
+  else if (transform.rotation === 180) [rotatedX, rotatedY] = [100 - x, 100 - y];
+  else if (transform.rotation === 270) [rotatedX, rotatedY] = [100 - y, x];
+  return [transform.flipX ? 100 - rotatedX : rotatedX, transform.flipY ? 100 - rotatedY : rotatedY];
+}
+
+function invertSheetDelta(transform: SheetImageTransform, dx: number, dy: number): [number, number] {
+  const origin = invertSheetPoint(transform, 50, 50);
+  const moved = invertSheetPoint(transform, 50 + dx, 50 + dy);
+  return [moved[0] - origin[0], moved[1] - origin[1]];
+}
+
+function renderSheetImage(source: string, transform: SheetImageTransform): Promise<string> {
+  if (sheetTransformKey(transform) === sheetTransformKey(IDENTITY_SHEET_TRANSFORM)) return Promise.resolve(source);
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => {
+      const quarterTurn = transform.rotation === 90 || transform.rotation === 270;
+      const canvas = document.createElement('canvas');
+      canvas.width = quarterTurn ? image.naturalHeight : image.naturalWidth;
+      canvas.height = quarterTurn ? image.naturalWidth : image.naturalHeight;
+      const context = canvas.getContext('2d');
+      if (!context) { reject(new Error('이미지를 회전할 수 없습니다.')); return; }
+      context.translate(canvas.width / 2, canvas.height / 2);
+      context.rotate(transform.rotation * Math.PI / 180);
+      context.scale(transform.flipX ? -1 : 1, transform.flipY ? -1 : 1);
+      context.drawImage(image, -image.naturalWidth / 2, -image.naturalHeight / 2);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    image.onerror = () => reject(new Error('보정시트 이미지를 불러오지 못했습니다.'));
+    image.src = source;
+  });
+}
+
+function useTransformedSheetImage(source: string, requested: SheetImageTransform) {
+  const [rendered, setRendered] = useState({ url: source, transform: IDENTITY_SHEET_TRANSFORM, busy: false, error: null as string | null });
+  useEffect(() => {
+    let cancelled = false;
+    setRendered((current) => ({ ...current, busy: true, error: null }));
+    void renderSheetImage(source, requested).then((url) => {
+      if (!cancelled) setRendered({ url, transform: requested, busy: false, error: null });
+    }).catch((error: unknown) => {
+      if (!cancelled) setRendered({ url: source, transform: IDENTITY_SHEET_TRANSFORM, busy: false, error: error instanceof Error ? error.message : '이미지 방향을 바꾸지 못했습니다.' });
+    });
+    return () => { cancelled = true; };
+  }, [source, requested.rotation, requested.flipX, requested.flipY]);
+  return rendered;
+}
 
 const engineMeta: Record<Engine, { name: string; short: string; color: string }> = {
   label: { name: '라벨 제거 및 복원', short: 'label_removal', color: '#7058e8' },
@@ -1908,6 +1976,33 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const zeroReady = hasZeroVector || (Boolean(result.zeroOverlay) && !onProduct);
   const frameWidth = onProduct ? alignment!.productSize[0] : result.source.width;
   const frameHeight = onProduct ? alignment!.productSize[1] : result.source.height;
+  const sheetImageSource = onProduct
+    ? result.productImage!
+    : showZero && result.zeroOverlay && !hasZeroVector ? result.zeroOverlay : result.cleanImage || scan.url;
+  const [sheetTransform, setSheetTransform] = useState<SheetImageTransform>(IDENTITY_SHEET_TRANSFORM);
+  useEffect(() => { setSheetTransform(IDENTITY_SHEET_TRANSFORM); }, [scan.id]);
+  const renderedSheetImage = useTransformedSheetImage(sheetImageSource, sheetTransform);
+  const activeSheetTransform = renderedSheetImage.transform;
+  const sheetQuarterTurn = activeSheetTransform.rotation === 90 || activeSheetTransform.rotation === 270;
+  const sheetFrameWidth = sheetQuarterTurn ? frameHeight : frameWidth;
+  const sheetFrameHeight = sheetQuarterTurn ? frameWidth : frameHeight;
+  const rotateSheet = () => setSheetTransform((current) => ({
+    ...current,
+    rotation: ((current.rotation + 90) % 360) as SheetRotation,
+  }));
+  const flipSheetHorizontal = () => setSheetTransform((current) => (
+    current.rotation === 90 || current.rotation === 270
+      ? { ...current, flipY: !current.flipY }
+      : { ...current, flipX: !current.flipX }
+  ));
+  const flipSheetVertical = () => setSheetTransform((current) => (
+    current.rotation === 90 || current.rotation === 270
+      ? { ...current, flipX: !current.flipX }
+      : { ...current, flipY: !current.flipY }
+  ));
+  const requestedQuarterTurn = sheetTransform.rotation === 90 || sheetTransform.rotation === 270;
+  const sheetHorizontalFlipped = requestedQuarterTurn ? sheetTransform.flipY : sheetTransform.flipX;
+  const sheetVerticalFlipped = requestedQuarterTurn ? sheetTransform.flipX : sheetTransform.flipY;
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엑셀 내보내기가 실제 UI 배치(정면도·디테일 뷰의 캔버스 % 좌표)를
      알아야 주석·창 위치를 시트에 그대로 옮길 수 있다. SheetCanvas 안에
@@ -1927,6 +2022,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   const addPointAt = async (xNorm: number, yNorm: number) => {
     setSampling(true); setSampleError(null);
     try {
+      [xNorm, yNorm] = invertSheetPoint(activeSheetTransform, xNorm, yNorm);
       /* 클릭 좌표는 화면에 보이는 이미지 기준이다. 색 역산은 편차 스캔에서만
          가능하므로, 제품데이터를 보고 있으면 변환을 되짚어 스캔 좌표로 보낸다. */
       let sampleX = xNorm; let sampleY = yNorm;
@@ -2043,7 +2139,11 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     if (!onProduct) return [point];
     if (point.xProduct === undefined || point.yProduct === undefined) return [];
     return [{ ...point, x: point.xProduct, y: point.yProduct }];
+  }).map((point) => {
+    const [x, y] = transformSheetPoint(activeSheetTransform, point.x, point.y);
+    return { ...point, x, y };
   });
+  const sheetAddedPoints = sheetPoints.filter((point) => point.source === 'colormap');
   /* 제로 폴리라인도 포인트와 같은 규칙으로 프레임 % 로 옮긴다. 스캔 원본은 픽셀 좌표라
      [scanW, scanH] 로 나눠 %, 제품데이터는 alignment 행렬로 옮긴 뒤 [productW, productH] 로 % 를 낸다.
      알림: 여기서 알고 있는 alignment 는 shear=0 (b=c=0) 인 축정렬 아핀이라 add point 와 같은 형태를 쓴다. */
@@ -2075,12 +2175,13 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
             const [productX, productY] = mapAffinePoint(alignment.matrix, xPx, yPx);
             const productXPct = productX / productW * 100;
             const productYPct = productY / productH * 100;
-            return [productXPct, productYPct] as [number, number];
+            return transformSheetPoint(activeSheetTransform, productXPct, productYPct);
           }));
     }
-    return editedZeroLinePixels.map((line) => line.map(([xPx, yPx]) => [xPx / scanW * 100, yPx / scanH * 100] as [number, number]));
-  }, [showZero, hasZeroVector, result.source.width, result.source.height, onProduct, alignment, editedZeroLinePixels]);
+    return editedZeroLinePixels.map((line) => line.map(([xPx, yPx]) => transformSheetPoint(activeSheetTransform, xPx / scanW * 100, yPx / scanH * 100)));
+  }, [showZero, hasZeroVector, result.source.width, result.source.height, onProduct, alignment, editedZeroLinePixels, activeSheetTransform]);
   const moveZeroPoint = (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => {
+    [dxPercent, dyPercent] = invertSheetDelta(activeSheetTransform, dxPercent, dyPercent);
     const scanW = result.source.width;
     const scanH = result.source.height;
     let dx = dxPercent * scanW / 100;
@@ -2117,6 +2218,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     return [...current.filter((item) => item.index !== lineIndex), next].sort((left, right) => left.index - right.index);
   });
   const addZeroPoint = (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => {
+    [xPercent, yPercent] = invertSheetPoint(activeSheetTransform, xPercent, yPercent);
     const scanW = result.source.width;
     const scanH = result.source.height;
     let x = xPercent * scanW / 100;
@@ -2284,7 +2386,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
     try {
       // 제품데이터가 없으면 현재 스캔(라벨 제거본 우선)을 시트 정면도로 쓴다.
       // 이 경우 포인트도 스캔 좌표계로 이미 계산되어 있어 별도 변환이 필요 없다.
-      const sheetImageUrl = onProduct ? result.productImage : result.cleanImage || scan.url;
+      const sheetImageUrl = renderedSheetImage.url;
       if (!sheetImageUrl) throw new Error('시트에 넣을 이미지를 찾을 수 없습니다.');
       const productBlob = await (await fetch(sheetImageUrl)).blob();
 
@@ -2484,18 +2586,25 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
   /* 보정시트에 들어가는 그림 — 정렬된 제품데이터가 있으면 그쪽을 우선한다.
      스캔 모드에서 zeroOverlay(래스터)만 있고 벡터가 없으면 종전대로 오버레이를 그림 자체에 굽는다.
      벡터가 있으면 굳이 굽지 않고 깨끗한 이미지를 쓰고, 위에 SVG 폴리라인으로 얹는다. */
-  const baseImage = onProduct
-    ? result.productImage!
-    : showZero && result.zeroOverlay && !hasZeroVector ? result.zeroOverlay : result.cleanImage || scan.url;
+  const baseImage = renderedSheetImage.url;
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => { setZeroPanel((current) => { const next = !current; if (!next) { setZeroPointAddMode(false); setZeroPointDeleteMode(false); } return next; }); setShowZero(true); }} disabled={!editableZeroLineCount(result)} title={editableZeroLineCount(result) ? '제로라인의 꼭짓점과 위치를 수정합니다' : '편집 가능한 제로라인 좌표가 없습니다'}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="sheet-image-toolbar" role="toolbar" aria-label="보정시트 이미지 방향">
+        <b>이미지 방향</b>
+        <button type="button" onClick={rotateSheet} title="이미지와 보정 위치를 함께 시계 방향으로 90° 회전">90° 회전</button>
+        <button type="button" className={sheetHorizontalFlipped ? 'is-active' : ''} onClick={flipSheetHorizontal} aria-pressed={sheetHorizontalFlipped}>좌우 뒤집기</button>
+        <button type="button" className={sheetVerticalFlipped ? 'is-active' : ''} onClick={flipSheetVertical} aria-pressed={sheetVerticalFlipped}>상하 뒤집기</button>
+        <button type="button" onClick={() => setSheetTransform(IDENTITY_SHEET_TRANSFORM)} disabled={sheetTransformKey(sheetTransform) === sheetTransformKey(IDENTITY_SHEET_TRANSFORM)}>원래 방향</button>
+        <span>{renderedSheetImage.busy ? '이미지 변환 중…' : `${activeSheetTransform.rotation}°`}</span>
+        {renderedSheetImage.error && <em>{renderedSheetImage.error}</em>}
+      </div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
       {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}`} scan={scan} imageUrl={baseImage} frameWidth={frameWidth} frameHeight={frameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={addedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
@@ -2549,13 +2658,30 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [showAlign, setShowAlign] = useState(false);
   const importedReferenceFiles = useRef<Set<string>>(new Set());
 
-  const uploadCad = async (file: File, scanId?: string) => {
+  const requestCadMesh = useCallback(async (file: File, registeredPartNumber?: string) => {
+    const form = new FormData();
+    if (registeredPartNumber) {
+      form.append('source', 'registered');
+      form.append('partNumber', registeredPartNumber);
+    } else {
+      form.append('file', file, file.name);
+    }
+    let response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: form });
+    /* 등록 직후의 서버 재시작이나 이전 작업 파일처럼 라이브러리에 원본이
+       남아 있지 않은 경우에만 기존 직접 업로드 경로로 안전하게 되돌아간다. */
+    if (response.status === 404 && registeredPartNumber) {
+      const fallback = new FormData();
+      fallback.append('file', file, file.name);
+      response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: fallback });
+    }
+    return response;
+  }, []);
+
+  const uploadCad = async (file: File, scanId?: string, registeredPartNumber?: string) => {
     setLoadingCount((count) => count + 1);
     setError(null);
-    const form = new FormData();
-    form.append('file', file, file.name);
     try {
-      const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: form });
+      const response = await requestCadMesh(file, registeredPartNumber);
       const data = await response.json() as CadMesh & { error?: string };
       if (!response.ok) throw new Error(data.error || `${file.name} 파일을 읽지 못했습니다.`);
       const key = data.cadId || `${file.name}-${Date.now()}-${Math.random()}`;
@@ -2574,14 +2700,21 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   };
 
   useEffect(() => {
-    for (const scan of scans) {
-      for (const file of scan.cadFiles || []) {
-        const identity = `${scan.id}:${file.name}:${file.size}:${file.lastModified}`;
-        if (importedReferenceFiles.current.has(identity)) continue;
-        importedReferenceFiles.current.add(identity);
-        void uploadCad(file, scan.id);
+    let cancelled = false;
+    const importRegisteredCads = async () => {
+      for (const scan of scans) {
+        for (const file of scan.cadFiles || []) {
+          if (cancelled) return;
+          const identity = `registered-step-v2:${scan.id}:${file.name}:${file.size}:${file.lastModified}`;
+          if (importedReferenceFiles.current.has(identity)) continue;
+          importedReferenceFiles.current.add(identity);
+          const registeredPartNumber = partNoFromName(scan.partNo) || partNoFromName(file.name) || undefined;
+          await uploadCad(file, scan.id, registeredPartNumber);
+        }
       }
-    }
+    };
+    void importRegisteredCads();
+    return () => { cancelled = true; };
   }, [scans]);
 
   const removeCad = (key: string) => {
@@ -2620,16 +2753,18 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     const file = fileStore.current[name];
     if (!file) return null;
     const linkedScanId = opened.find((item) => item.mesh.summary.name === name)?.scanId;
-    const form = new FormData();
-    form.append('file', file, file.name);
-    const response = await fetch(`${API_BASE}/api/cad`, { method: 'POST', body: form });
+    const linkedScan = scans.find((item) => item.id === linkedScanId);
+    const registeredPartNumber = linkedScan
+      ? partNoFromName(linkedScan.partNo) || partNoFromName(file.name) || undefined
+      : undefined;
+    const response = await requestCadMesh(file, registeredPartNumber);
     const data = await response.json() as CadMesh & { error?: string };
     if (!response.ok) return null;
     const key = data.cadId || name;
     setOpened((current) => [...current.filter((item) => item.mesh.summary.name !== name), { key, mesh: data, scanId: linkedScanId }]);
     setActiveKey(key);
     return data;
-  }, [opened]);
+  }, [opened, requestCadMesh, scans]);
 
   const requestOverlay = useCallback(async (scanId: string, cad = selected?.mesh, moved?: FitAdjust, retried = false): Promise<void> => {
     setOverlayScanId(scanId);
@@ -2646,7 +2781,9 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     const placed = moved || adjustByCad[cad.summary.name] || NO_ADJUST;
     const sameAsAuto = placed.angle === 0 && placed.dx === 0 && placed.dy === 0 && placed.scale === 1;
     const appliedZeroEdits = zeroEditsByScan[scanId] || [];
-    const cacheKey = `${cadId}:${analysisId}${sameAsAuto ? '' : `:${JSON.stringify(placed)}`}${appliedZeroEdits.length ? `:${JSON.stringify(appliedZeroEdits)}` : ''}`;
+    // surface-v2 invalidates browser-memory overlays produced while the
+    // optional trimesh ray backend silently returned a 0% hit rate.
+    const cacheKey = `surface-v2:${cadId}:${analysisId}${sameAsAuto ? '' : `:${JSON.stringify(placed)}`}${appliedZeroEdits.length ? `:${JSON.stringify(appliedZeroEdits)}` : ''}`;
     const cached = overlayCache.current[cacheKey];
     if (cached) {
       setOverlay(cached);
@@ -2869,6 +3006,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       </div>)}
     </div>}
     {selected && <>
+      {selected.mesh.note && <div className="cad-overlay-bar">
+        <span className="cad-overlay-bar__note">{selected.mesh.note}</span>
+        <span className="count-chip">{selected.mesh.summary.source_format.toUpperCase()}</span>
+      </div>}
       <div className="cad-overlay-bar">
         <label htmlFor="cad-overlay-scan">스캔 결과 표시</label>
         <select id="cad-overlay-scan" value={overlayScanId} onChange={(event) => {

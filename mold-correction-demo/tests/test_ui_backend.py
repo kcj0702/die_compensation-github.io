@@ -1522,6 +1522,68 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         self.assertFalse(backend_server._optional_flag({"flipX": "false"}, "flipX"))
 
 
+class RegisteredCadViewerTest(unittest.TestCase):
+    def test_rpc_failure_retries_with_a_fresh_catia_instance(self) -> None:
+        from cad_import import catia_convert
+
+        expected = Path("cached.step")
+        with (
+            patch.object(
+                catia_convert,
+                "_convert_to_mesh_once",
+                side_effect=[
+                    ValueError("stp((-2147023170, '원격 프로시저를 호출하지 못했습니다.'))"),
+                    expected,
+                ],
+            ) as convert,
+            patch.object(catia_convert.time, "sleep"),
+        ):
+            result = catia_convert.convert_to_mesh(
+                "source.CATPart", "cache", step_only=True,
+            )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(convert.call_count, 2)
+        self.assertFalse(convert.call_args_list[0].kwargs.get("force_new_instance", False))
+        self.assertTrue(convert.call_args_list[1].kwargs["force_new_instance"])
+
+    def test_step_converter_does_not_fall_back_to_stl(self) -> None:
+        from cad_import import catia_convert
+
+        self.assertEqual(catia_convert._EXPORT_FORMATS[0], ("stp", "__quality_v3.step"))
+        expected = Path("cached.step")
+        with patch.object(catia_convert, "convert_to_mesh", return_value=expected) as convert:
+            result = catia_convert.convert_to_step("source.CATPart", "cache")
+
+        self.assertEqual(result, expected)
+        convert.assert_called_once_with("source.CATPart", "cache", step_only=True)
+
+    def test_registered_catpart_is_converted_to_step_before_viewer_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            library = backend_server.MeshLibrary(root / "mesh")
+            source = library.register("64XX2-DR000", ".catpart", b"CATIA")
+            converted = root / "converted.step"
+            converted.write_bytes(b"STEP")
+            parsed = {
+                "summary": {"name": "converted", "source_format": "step"},
+                "cadId": "cad-1",
+            }
+            with (
+                patch.object(backend_server, "MESH_LIBRARY", library),
+                patch("cad_import.catia_convert.convert_to_step", return_value=converted) as convert,
+                patch.object(backend_server, "_load_step_cad_path", return_value=parsed) as load,
+            ):
+                result = backend_server.load_registered_cad("64XX2-DR000")
+
+        convert.assert_called_once_with(source, library.directory / ".cache")
+        load.assert_called_once_with(converted, "64XX2-DR000")
+        self.assertEqual(result["summary"]["name"], "64XX2-DR000")
+        self.assertEqual(result["summary"]["source_format"], "step")
+        self.assertEqual(result["convertedFrom"], "catpart")
+        self.assertTrue(result["registered"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

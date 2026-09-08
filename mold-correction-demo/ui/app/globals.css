@@ -484,6 +484,14 @@ button { cursor: pointer; }
 .annotation-toolbar button.active { color:#b8620f; border-color:#f0cfa4; background:#fff6e9; box-shadow:0 1px 3px rgba(184,98,15,.14); }
 .annotation-toolbar button:disabled { opacity:.32; cursor:not-allowed; }
 .annotation-toolbar__divider { width:1px; height:17px; margin:0 5px; background:#e2e5e8; }
+.sheet-image-toolbar { display:flex; align-items:center; gap:5px; padding:6px 10px; border-bottom:1px solid var(--line); background:#f7f9fb; }
+.sheet-image-toolbar b { margin-right:4px; color:#536275; font-size:8px; }
+.sheet-image-toolbar button { height:27px; padding:0 9px; border:1px solid #d8dee5; border-radius:6px; color:#667487; background:#fff; font-size:8px; font-weight:700; cursor:pointer; }
+.sheet-image-toolbar button:hover:not(:disabled) { color:#235f91; border-color:#9fc1dd; background:#f2f8fd; }
+.sheet-image-toolbar button.is-active { color:#fff; border-color:#2f78ad; background:#337faf; }
+.sheet-image-toolbar button:disabled { opacity:.4; cursor:default; }
+.sheet-image-toolbar span { margin-left:auto; color:#7f8a98; font-size:8px; font-variant-numeric:tabular-nums; }
+.sheet-image-toolbar em { color:#b44b3e; font-size:8px; font-style:normal; }
 
 /* 포인트 레이어와 시트 도장은 이미지 전체 또는 모서리를 덮고 있어서, 그대로 두면
    그 아래(z-index 6)에 있는 주석 도형과 핸들을 클릭할 수 없다. 레이어 자체는
@@ -645,7 +653,7 @@ button { cursor: pointer; }
   body.adc-printing .sheet-title-block__heading strong { font-size:22px; letter-spacing:.12em!important; }
   body.adc-printing .sheet-title-block__label,body.adc-printing .sheet-title-block__value { font-size:10px; }
 
-  .sheet-print,.sheet-print__clear,.annotation-toolbar,.zoom-controls,.annotation-delete,.annotation-fontsize,.measure-point__label__reset,
+  .sheet-print,.sheet-print__clear,.annotation-toolbar,.sheet-image-toolbar,.zoom-controls,.annotation-delete,.annotation-fontsize,.measure-point__label__reset,
   .layout-size-control,.detail-mode-guide,.cell-font-picker,.sheet-layout__bar,.measure-point__dot,.add-point-remove { display:none!important; }
   .sheet-canvas:before { display:none!important; }
   * { -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; }
@@ -656,7 +664,7 @@ button { cursor: pointer; }
    같은 목록을 미디어 쿼리 밖에서도 한 번 더 감춰야 캡처 이미지에 도구·컨트롤이 안 찍힌다. */
 .adc-printing .layout-size-control,.adc-printing .cell-font-picker,.adc-printing .annotation-delete,
 .adc-printing .annotation-fontsize,.adc-printing .measure-point__label__reset,.adc-printing .detail-mode-guide,
-.adc-printing .annotation-toolbar,.adc-printing .zoom-controls,.adc-printing .sheet-layout__bar { display:none!important; }
+.adc-printing .annotation-toolbar,.adc-printing .sheet-image-toolbar,.adc-printing .zoom-controls,.adc-printing .sheet-layout__bar { display:none!important; }
 .adc-printing .sheet-canvas:before { display:none!important; }
 /* 웹 편집 화면에서는 기준점을 유지하되 엑셀 캡처와 PDF 인쇄 결과에서는 원형 점만 제외한다. */
 .adc-printing .measure-point__dot,.adc-printing .add-point-remove,
