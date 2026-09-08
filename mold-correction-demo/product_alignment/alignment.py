@@ -1,11 +1,4 @@
-"""Estimate the transform that puts scan coordinates onto a product-data image.
-
-Both inputs are axis-aligned orthographic renders of the same panel, so the
-transform is a per-axis scale and translation plus one of four flips. The flip
-is the only part that cannot be read off the bounding boxes, and on a symmetric
-panel it cannot be decided from the masks at all -- that case is reported
-instead of guessed.
-"""
+"""Estimate the affine transform from scan coordinates to product data."""
 
 from __future__ import annotations
 
@@ -27,19 +20,20 @@ from .masks import (
 
 @dataclass(frozen=True)
 class OrientationScore:
-    """How well one of the four flip candidates matches the product data."""
+    """How well one rotation/flip candidate matches the product data."""
 
     flip_x: bool
     flip_y: bool
     outline_iou: float
     hole_iou: float
     band_iou: float
+    rotation: int = 0
 
     @property
     def score(self) -> float:
         return (
             self.outline_iou
-            + self.hole_iou
+            + config.HOLE_WEIGHT * self.hole_iou
             + config.BOUNDARY_BAND_WEIGHT * self.band_iou
         )
 
@@ -47,6 +41,7 @@ class OrientationScore:
         return {
             "flipX": self.flip_x,
             "flipY": self.flip_y,
+            "rotation": self.rotation,
             "outlineIou": round(self.outline_iou, 4),
             "holeIou": round(self.hole_iou, 4),
             "bandIou": round(self.band_iou, 4),
@@ -70,12 +65,13 @@ class Alignment:
     overridden: bool = False
     candidates: list[OrientationScore] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    rotation: int = 0
 
     @property
     def score(self) -> float:
         return (
             self.outline_iou
-            + self.hole_iou
+            + config.HOLE_WEIGHT * self.hole_iou
             + config.BOUNDARY_BAND_WEIGHT * self.band_iou
         )
 
@@ -99,6 +95,7 @@ class Alignment:
             "matrix": [round(value, 6) for value in self.matrix],
             "flipX": self.flip_x,
             "flipY": self.flip_y,
+            "rotation": self.rotation,
             "outlineIou": round(self.outline_iou, 4),
             "holeIou": round(self.hole_iou, 4),
             "bandIou": round(self.band_iou, 4),
@@ -129,6 +126,7 @@ class Alignment:
             product_size=tuple(payload.get("productSize", (0, 0))),  # type: ignore[arg-type]
             overridden=bool(payload.get("overridden", False)),
             warnings=list(payload.get("warnings", [])),
+            rotation=int(payload.get("rotation", 0)) % 360,
         )
 
 
@@ -162,6 +160,40 @@ def _flip_matrix(
     return np.array([[a, 0.0, tx], [0.0, d, ty]], dtype=np.float64)
 
 
+def _orientation_matrix(
+    scan_box: tuple[int, int, int, int],
+    product_box: tuple[int, int, int, int],
+    flip_x: bool,
+    flip_y: bool,
+    rotation: int,
+) -> np.ndarray:
+    """Map a scan bbox to a product bbox with quarter-turn rotation and flips."""
+    sx, sy, sw, sh = scan_box
+    px, py, pw, ph = product_box
+    source = np.float32([
+        [sx - 0.5, sy - 0.5],
+        [sx + sw - 0.5, sy - 0.5],
+        [sx - 0.5, sy + sh - 0.5],
+    ])
+
+    def orient(u: float, v: float) -> tuple[float, float]:
+        angle = rotation % 360
+        if angle == 90:
+            u, v = 1.0 - v, u
+        elif angle == 180:
+            u, v = 1.0 - u, 1.0 - v
+        elif angle == 270:
+            u, v = v, 1.0 - u
+        if flip_x:
+            u = 1.0 - u
+        if flip_y:
+            v = 1.0 - v
+        return px - 0.5 + u * pw, py - 0.5 + v * ph
+
+    target = np.float32([orient(0, 0), orient(1, 0), orient(0, 1)])
+    return cv2.getAffineTransform(source, target).astype(np.float64)
+
+
 def _adjusted(
     matrix: np.ndarray,
     product_box: tuple[int, int, int, int],
@@ -174,15 +206,12 @@ def _adjusted(
     px, py, pw, ph = product_box
     centre_x = px + pw / 2.0
     centre_y = py + ph / 2.0
-    a, _, tx = matrix[0]
-    _, d, ty = matrix[1]
-    return np.array(
-        [
-            [a * scale_x, 0.0, scale_x * (tx - centre_x) + centre_x + shift_x],
-            [0.0, d * scale_y, scale_y * (ty - centre_y) + centre_y + shift_y],
-        ],
-        dtype=np.float64,
-    )
+    adjusted = matrix.copy()
+    adjusted[0, :2] *= scale_x
+    adjusted[1, :2] *= scale_y
+    adjusted[0, 2] = scale_x * (matrix[0, 2] - centre_x) + centre_x + shift_x
+    adjusted[1, 2] = scale_y * (matrix[1, 2] - centre_y) + centre_y + shift_y
+    return adjusted
 
 
 def _overlap(
@@ -197,7 +226,7 @@ def _overlap(
     warped_holes = cv2.warpAffine(scan_holes, matrix, (width, height))
     return intersection_over_union(
         warped_solid, product_solid
-    ) + intersection_over_union(warped_holes, product_holes)
+    ) + config.HOLE_WEIGHT * intersection_over_union(warped_holes, product_holes)
 
 
 def _refine(
@@ -242,9 +271,9 @@ def _refine(
 
 
 def score_orientations(
-    scan_mask: np.ndarray, product_mask: np.ndarray
+    scan_mask: np.ndarray, product_mask: np.ndarray, *, include_rotations: bool = False
 ) -> list[OrientationScore]:
-    """Score all four flips of the scan mask against the product mask."""
+    """Score all quarter-turn and flip orientations against the product mask."""
     scan_solid = fill_silhouette(scan_mask)
     product_solid = fill_silhouette(product_mask)
     scan_holes = hole_mask(scan_mask, scan_solid)
@@ -258,8 +287,12 @@ def score_orientations(
     )
 
     scores: list[OrientationScore] = []
-    for flip_x, flip_y in config.FLIP_CANDIDATES:
-        matrix = _flip_matrix(scan_box, product_box, flip_x, flip_y)
+    # 0/90 degrees combined with four flips covers all eight distinct
+    # rectangle symmetries.  Adding 180/270 would duplicate candidates and
+    # incorrectly collapse the decision margin to zero.
+    for rotation in ((0, 90) if include_rotations else (0,)):
+      for flip_x, flip_y in config.FLIP_CANDIDATES:
+        matrix = _orientation_matrix(scan_box, product_box, flip_x, flip_y, rotation)
         warped_solid = cv2.warpAffine(scan_solid, matrix, (width, height))
         warped_holes = cv2.warpAffine(scan_holes, matrix, (width, height))
         warped_band = cv2.bitwise_or(
@@ -272,6 +305,7 @@ def score_orientations(
                 outline_iou=intersection_over_union(warped_solid, product_solid),
                 hole_iou=intersection_over_union(warped_holes, product_holes),
                 band_iou=intersection_over_union(warped_band, product_band),
+                rotation=rotation,
             )
         )
     return scores
@@ -283,6 +317,7 @@ def estimate_alignment(
     *,
     flip_x: bool | None = None,
     flip_y: bool | None = None,
+    rotation: int | None = None,
 ) -> Alignment:
     """Return the best scan-to-product transform, or the requested orientation.
 
@@ -291,14 +326,18 @@ def estimate_alignment(
     number. Pinning only one axis constrains that axis and still decides the
     other automatically, so the ambiguity check keeps applying to it.
     """
-    scores = score_orientations(scan_mask, product_mask)
+    scores = score_orientations(scan_mask, product_mask, include_rotations=True)
     ranked = sorted(scores, key=lambda item: item.score, reverse=True)
     allowed = [
         item
         for item in ranked
         if (flip_x is None or item.flip_x == flip_x)
         and (flip_y is None or item.flip_y == flip_y)
+        and (rotation is None or item.rotation == rotation % 360)
     ]
+
+    if not allowed:
+        raise ValueError(f"지원하지 않는 정렬 회전값입니다: {rotation}")
 
     chosen = allowed[0]
     overridden = flip_x is not None and flip_y is not None
@@ -314,7 +353,7 @@ def estimate_alignment(
     product_box = bounding_box(product_solid)
 
     matrix = _refine(
-        _flip_matrix(scan_box, product_box, chosen.flip_x, chosen.flip_y),
+        _orientation_matrix(scan_box, product_box, chosen.flip_x, chosen.flip_y, chosen.rotation),
         product_box,
         scan_solid,
         scan_holes,
@@ -361,6 +400,7 @@ def estimate_alignment(
         overridden=overridden,
         candidates=ranked,
         warnings=warnings,
+        rotation=chosen.rotation,
     )
 
 

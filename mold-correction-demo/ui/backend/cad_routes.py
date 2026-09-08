@@ -216,8 +216,31 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
             continue
         dx = float(edit.get("dx") or 0.0)
         dy = float(edit.get("dy") or 0.0)
-        moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
-                                         for p in line["points"]]})
+        custom_vertices = edit.get("vertices")
+        source_points = (custom_vertices if isinstance(custom_vertices, list)
+                         and len(custom_vertices) >= 2 else line["points"])
+        point_edits = edit.get("points") if isinstance(edit.get("points"), dict) else {}
+        adjusted = []
+        for point_index, point in enumerate(source_points):
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            point_edit = point_edits.get(str(point_index), {})
+            point_dx = float(point_edit.get("dx") or 0.0) if isinstance(point_edit, dict) else 0.0
+            point_dy = float(point_edit.get("dy") or 0.0) if isinstance(point_edit, dict) else 0.0
+            adjusted.append([float(point[0]) + dx + point_dx,
+                             float(point[1]) + dy + point_dy])
+        adjusted_line = {**line, "points": adjusted}
+        if isinstance(edit.get("splineSegments"), list):
+            adjusted_line["splineSegments"] = [
+                int(index) for index in edit["splineSegments"]
+                if isinstance(index, (int, float)) and int(index) == index
+            ]
+        elif "spline" in edit:
+            adjusted_line["splineSegments"] = (
+                list(range(max(len(adjusted) - 1, 0)))
+                if edit.get("spline") else []
+            )
+        moved.append(adjusted_line)
     return moved
 
 
@@ -337,13 +360,39 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
     # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
-    def _densify(points: list, step_px: float = 4.0) -> list:
+    def _densify(points: list, step_px: float = 4.0,
+                 spline_segments: list | None = None) -> list:
         """선 위를 촘촘히 채운다.
 
         꼭짓점만 표면에 얹으면 그 사이는 공중을 가로지른다. 촘촘히
         쏴야 곡면을 그대로 따라간다 — 3D 에서 "선을 얹은 느낌" 을
         없애는 진짜 방법이다(표면을 칠하면 리브와 구멍에서 조각난다).
         """
+        spline_set = {int(index) for index in (spline_segments or [])}
+        if spline_set and len(points) >= 3:
+            curved: list = []
+            for index in range(len(points) - 1):
+                if index not in spline_set:
+                    (ax, ay), (bx, by) = points[index], points[index + 1]
+                    count = max(int(np.hypot(bx - ax, by - ay) / step_px), 1)
+                    for k in range(count):
+                        t = k / count
+                        curved.append([ax + (bx - ax) * t, ay + (by - ay) * t])
+                    continue
+                before = np.asarray(points[max(0, index - 1)], dtype=float)
+                start = np.asarray(points[index], dtype=float)
+                end = np.asarray(points[index + 1], dtype=float)
+                after = np.asarray(points[min(len(points) - 1, index + 2)], dtype=float)
+                count = max(int(np.linalg.norm(end - start) / step_px), 4)
+                for k in range(count):
+                    t = k / count
+                    t2, t3 = t * t, t * t * t
+                    spot = 0.5 * ((2 * start) + (-before + end) * t
+                                  + (2 * before - 5 * start + 4 * end - after) * t2
+                                  + (-before + 3 * start - 3 * end + after) * t3)
+                    curved.append(spot.tolist())
+            curved.append(list(points[-1]))
+            return curved
         dense: list = []
         for (ax, ay), (bx, by) in zip(points[:-1], points[1:]):
             span = float(np.hypot(bx - ax, by - ay))
@@ -369,7 +418,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         pts = line["points"]
         if len(pts) < 2:
             continue
-        placed = ov.unproject(_densify(pts), vertices, faces, fit, shifted)
+        placed = ov.unproject(_densify(
+            pts, spline_segments=line.get("splineSegments")), vertices, faces, fit, shifted)
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
         if len(kept) < 2:

@@ -1393,7 +1393,7 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         self.assertAlmostEqual(point["yProduct"], 25.0, delta=2.0)
         self.assertEqual(result["stats"]["pointsTransferred"], 1)
 
-    def test_upside_down_scan_is_righted_before_ocr_reads_it(self) -> None:
+    def test_ocr_reads_the_original_scan_coordinate_frame(self) -> None:
         """product_alignment 는 좌표 행렬만 만든다 -- 라벨의 인쇄된 숫자는
 
         건드리지 않는다. 그래서 스캔이 제품데이터 대비 뒤집혀 있으면(이 픽스처는
@@ -1429,10 +1429,9 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
             backend_server.analyze_image(self.scan, "JD_64XX2-DR000 3D 스캔.png", self.product)
 
         self.assertEqual(len(captured), 1)
-        righted = cv2.flip(self.scan, -1)  # self.scan 은 product 를 180도 뒤집은 것이니, 되돌리면 이거다.
         np.testing.assert_array_equal(
             captured[0],
-            righted,
+            self.scan,
             "라벨을 찾기 전에 스캔을 바로 세워야 OCR 이 뒤집힌 숫자를 오독하지 않는다.",
         )
 
@@ -1523,6 +1522,68 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         self.assertFalse(backend_server._optional_flag({"flipX": "false"}, "flipX"))
 
 
+class RegisteredCadViewerTest(unittest.TestCase):
+    def test_rpc_failure_retries_with_a_fresh_catia_instance(self) -> None:
+        from cad_import import catia_convert
+
+        expected = Path("cached.step")
+        with (
+            patch.object(
+                catia_convert,
+                "_convert_to_mesh_once",
+                side_effect=[
+                    ValueError("stp((-2147023170, '원격 프로시저를 호출하지 못했습니다.'))"),
+                    expected,
+                ],
+            ) as convert,
+            patch.object(catia_convert.time, "sleep"),
+        ):
+            result = catia_convert.convert_to_mesh(
+                "source.CATPart", "cache", step_only=True,
+            )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(convert.call_count, 2)
+        self.assertFalse(convert.call_args_list[0].kwargs.get("force_new_instance", False))
+        self.assertTrue(convert.call_args_list[1].kwargs["force_new_instance"])
+
+    def test_step_converter_does_not_fall_back_to_stl(self) -> None:
+        from cad_import import catia_convert
+
+        self.assertEqual(catia_convert._EXPORT_FORMATS[0], ("stp", "__quality_v3.step"))
+        expected = Path("cached.step")
+        with patch.object(catia_convert, "convert_to_mesh", return_value=expected) as convert:
+            result = catia_convert.convert_to_step("source.CATPart", "cache")
+
+        self.assertEqual(result, expected)
+        convert.assert_called_once_with("source.CATPart", "cache", step_only=True)
+
+    def test_registered_catpart_is_converted_to_step_before_viewer_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            library = backend_server.MeshLibrary(root / "mesh")
+            source = library.register("64XX2-DR000", ".catpart", b"CATIA")
+            converted = root / "converted.step"
+            converted.write_bytes(b"STEP")
+            parsed = {
+                "summary": {"name": "converted", "source_format": "step"},
+                "cadId": "cad-1",
+            }
+            with (
+                patch.object(backend_server, "MESH_LIBRARY", library),
+                patch("cad_import.catia_convert.convert_to_step", return_value=converted) as convert,
+                patch.object(backend_server, "_load_step_cad_path", return_value=parsed) as load,
+            ):
+                result = backend_server.load_registered_cad("64XX2-DR000")
+
+        convert.assert_called_once_with(source, library.directory / ".cache")
+        load.assert_called_once_with(converted, "64XX2-DR000")
+        self.assertEqual(result["summary"]["name"], "64XX2-DR000")
+        self.assertEqual(result["summary"]["source_format"], "step")
+        self.assertEqual(result["convertedFrom"], "catpart")
+        self.assertTrue(result["registered"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1538,6 +1599,42 @@ class ZeroLineEditTest(unittest.TestCase):
         self.assertEqual(moved[0]["points"], [[15.0, 7.0], [25.0, 7.0]])
         self.assertEqual(moved[1]["points"], lines[1]["points"],
                          "손대지 않은 선은 그대로여야 한다")
+
+    def test_개별_꼭짓점_이동은_그_점에만_더해진다(self) -> None:
+        lines = [{"line_id": 1, "points": [[10.0, 10.0], [20.0, 15.0], [30.0, 20.0]]}]
+        edits = [{
+            "index": 0, "dx": 2.0, "dy": -1.0,
+            "points": {"1": {"dx": 4.5, "dy": 3.0}},
+        }]
+
+        moved = backend_server.apply_zero_edits(lines, edits)
+
+        self.assertEqual(moved[0]["points"], [
+            [12.0, 9.0],
+            [26.5, 17.0],
+            [32.0, 19.0],
+        ])
+
+    def test_분할한_꼭짓점과_스플라인_설정이_3d로_전달된다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [20.0, 0.0]]}]
+        edits = [{
+            "index": 0, "dx": 1.0, "dy": -2.0, "splineSegments": [1],
+            "vertices": [[0.0, 0.0], [10.0, 4.0], [20.0, 0.0]],
+        }]
+
+        moved = backend_server.apply_zero_edits(lines, edits)
+
+        self.assertEqual(moved[0]["points"], [
+            [1.0, -2.0], [11.0, 2.0], [21.0, -2.0],
+        ])
+        self.assertEqual(moved[0]["splineSegments"], [1])
+
+    def test_기존_전체_스플라인_저장값도_모든_구간으로_호환된다(self) -> None:
+        lines = [{"line_id": 1, "points": [[0.0, 0.0], [10.0, 5.0], [20.0, 0.0]]}]
+        moved = backend_server.apply_zero_edits(
+            lines, [{"index": 0, "dx": 0, "dy": 0, "spline": True}]
+        )
+        self.assertEqual(moved[0]["splineSegments"], [0, 1])
 
     def test_숨긴_선은_빠진다(self) -> None:
         lines = [{"line_id": 1, "points": [[0.0, 0.0], [1.0, 1.0]]},

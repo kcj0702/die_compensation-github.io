@@ -1,6 +1,6 @@
 # 단일 하이브리드 제로라인 엔진
 
-`generate_final_hybrid_zero_line.py`가 외부에서 호출하는 단일 실행 파일입니다.
+`zero_line_detection/generate_final_hybrid_zero_line.py`가 외부에서 호출하는 단일 실행 파일입니다.
 엔진 내부의 `detect_zero_line()`이 공통 보정영역을 입력받아 1번 또는 2번
 방식을 자동으로 선택합니다. 현재는 검토용 엔진이며 정식 UI 엔진에는 연결하지
 않았습니다.
@@ -45,18 +45,18 @@
 ```powershell
 cd mold-correction-demo
 ..\.venv\Scripts\python.exe `
-  experiments\zero_line_area_edge_preview\generate_final_hybrid_zero_line.py
+  zero_line_detection\generate_final_hybrid_zero_line.py
 ```
 
 특정 이미지만 실행하려면 다음과 같이 지정합니다.
 
 ```powershell
 ..\.venv\Scripts\python.exe `
-  experiments\zero_line_area_edge_preview\generate_final_hybrid_zero_line.py `
+  zero_line_detection\generate_final_hybrid_zero_line.py `
   --spec JD_67XX6-DR000
 ```
 
-결과는 `results_final_hybrid_zero_line/<제품 키>/`에 생성됩니다.
+결과는 `experiments/zero_line_area_edge_preview/results_final_hybrid_zero_line/<제품 키>/`에 생성됩니다.
 
 - `review_board.png`: 보정영역, 방식 판정, 구성 과정, 최종 결과
 - `final_zero_line_overlay.png`: 원본 위 최종 제로라인

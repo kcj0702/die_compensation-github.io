@@ -760,7 +760,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // ── 스캔에서 옮겨온 것들 (제로라인·보정량) ───────────────
     const overlayRoot = new THREE.Group();
     const labelPicks: THREE.Sprite[] = [];
-    if (overlay?.fit.reliable) {
+    // 정합 신뢰도는 경고 여부만 결정한다. 서버가 표면 투영에 성공해 돌려준
+    // 포인트와 제로라인까지 숨기면 사용자는 수동 보정조차 할 수 없다.
+    if (overlay) {
       // 제로라인.
       //
       // 선은 **선으로** 그린다. 표면 삼각형을 칠해 봤더니 리브와 구멍이

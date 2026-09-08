@@ -164,6 +164,8 @@ button { cursor: pointer; }
 .file-thumb.tone-1 { background: linear-gradient(135deg,#6b52ab,#358bb4 48%,#e5c343 71%,#e34c4c); }.file-thumb.tone-2 { background: linear-gradient(135deg,#275f87,#4da97a 47%,#df913c 71%,#ba3446); }
 .file-thumb img { width: 100%; height: 100%; object-fit: cover; }
 .file-row__name { min-width: 0; display: flex; flex-direction: column; gap: 3px; }.file-row__name b { display:-webkit-box; overflow:hidden; color:#334154; font-size:11px; line-height:1.35; overflow-wrap:anywhere; -webkit-box-orient:vertical; -webkit-line-clamp:2; }.file-row__name span { color: #939ca8; font-size: 9px; }
+.file-row__name .asset-status { color:#28784f; font-weight:600; }
+.file-row__name .asset-error { color:#bd4650; font-weight:600; white-space:normal; }
 .status { display: inline-flex; align-items: center; justify-content: center; gap: 4px; width: max-content; padding: 5px 8px; border-radius: 12px; color: #677382; background: #f0f2f5; font-size: 9px; font-weight: 750; white-space:nowrap; }
 .status--done { color: #107863; background: #eaf7f3; }.status--analyzing { color: #ca582f; background: #fff0ea; }.status--analyzing svg { animation: pulse 1s infinite; }
 .text-button { display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; border: 0; color: #d85b2e; background: none; font-size: 10px; font-weight: 750; }
@@ -180,6 +182,42 @@ button { cursor: pointer; }
 .engine-panel { display: flex; flex-direction: column; gap: 15px; }.engine-overview { padding: 20px; }.live-dot { display: flex; align-items: center; gap: 5px; color: #12816c; font-size: 9px; font-weight: 750; }.live-dot:before { content:""; width: 6px; height: 6px; border-radius: 50%; background: #16a085; box-shadow: 0 0 0 4px #e9f7f4; }
 .engine-row { min-height: 65px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid #edf0f3; }.engine-row:last-child { border: 0; }.engine-row__number { width: 34px; height: 34px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; font-size: 10px; font-weight: 850; }.engine-row div { display: flex; flex: 1; flex-direction: column; gap: 3px; }.engine-row b { color: #354458; font-size: 10px; }.engine-row span:not(.engine-row__number) { color: #9099a5; font-size: 9px; }
 .tip-card { display: flex; gap: 12px; padding: 17px; border: 1px solid #f1d7cd; border-radius: 12px; background: #fff7f3; }.tip-card > span { width: 35px; height: 35px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 8px; color: var(--orange); background: white; }.tip-card b { color: #8a4228; font-size: 10px; }.tip-card p { margin: 5px 0 0; color: #946552; font-size: 9px; line-height: 1.55; }
+.mesh-library { padding: 17px; display: flex; flex-direction: column; gap: 10px; }
+.mesh-library__upload { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px dashed #b0b8c4; border-radius: 8px; background: #f7f9fc; color: #37475b; font-size: 10px; font-weight: 700; cursor: pointer; transition: background 120ms; }
+.mesh-library__upload:hover { background: #edf1f7; }
+.mesh-library__upload input { display: none; }
+.mesh-library__notice { margin: 0; padding: 6px 10px; border-radius: 6px; background: #eaf7f0; color: #1a6e42; font-size: 10px; font-weight: 600; }
+.mesh-library__error { margin: 0; padding: 6px 10px; border-radius: 6px; background: #fbe8e8; color: #a5252a; font-size: 10px; font-weight: 600; }
+.mesh-library__empty { margin: 0; color: #7a8598; font-size: 10px; }
+.mesh-library__reveal { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid #d5dae2; border-radius: 6px; background: #ffffff; color: #37475b; font-size: 10px; font-weight: 600; cursor: pointer; }
+.mesh-library__reveal:hover { background: #f5f7fb; border-color: #b0b8c4; }
+.mesh-library__hint { margin: 0; color: #7a8598; font-size: 9.5px; line-height: 1.5; }
+.mesh-library__source { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid #eef1f6; border-radius: 8px; background: #fafbfd; }
+.mesh-library__field { display: flex; flex-direction: column; gap: 4px; }
+.mesh-library__field span { color: #37475b; font-size: 9.5px; font-weight: 700; }
+.mesh-library__field input { padding: 6px 9px; border: 1px solid #d5dae2; border-radius: 6px; background: #ffffff; color: #1e2a3d; font-size: 10.5px; font-family: inherit; }
+.mesh-library__field input:focus { outline: none; border-color: #7fa9ff; box-shadow: 0 0 0 2px #dfe9ff; }
+.mesh-library__source-actions { display: flex; gap: 6px; }
+.mesh-library__save { padding: 6px 12px; border: none; border-radius: 6px; background: #2c7cf3; color: white; font-size: 10px; font-weight: 700; cursor: pointer; }
+.mesh-library__save:disabled { background: #b7c5da; cursor: default; }
+.mesh-library__clear { padding: 6px 10px; border: 1px solid #d5dae2; border-radius: 6px; background: #ffffff; color: #37475b; font-size: 10px; font-weight: 600; cursor: pointer; }
+.mesh-library__clear:hover:not(:disabled) { background: #f5f7fb; }
+.mesh-library__preview { padding: 6px 10px; border-radius: 6px; background: #ffffff; border: 1px solid #eef1f6; }
+.mesh-library__preview b { color: #1e2a3d; font-size: 10px; }
+.mesh-library__preview ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.mesh-library__preview li { color: #556376; font-size: 9.5px; font-family: 'Consolas', 'Monaco', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mesh-library__preview-more { color: #97a1b0 !important; font-family: inherit !important; }
+.mesh-library__manual { border: 1px solid #eef1f6; border-radius: 8px; padding: 8px 12px; background: #ffffff; }
+.mesh-library__manual summary { cursor: pointer; color: #37475b; font-size: 10px; font-weight: 700; }
+.mesh-library__manual[open] summary { margin-bottom: 8px; }
+.mesh-library__manual > * + * { margin-top: 6px; }
+.mesh-library__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.mesh-library__list li { display: flex; align-items: center; justify-content: space-between; padding: 6px 10px; border: 1px solid #eef1f6; border-radius: 6px; background: #fbfcfd; }
+.mesh-library__part { display: flex; flex-direction: column; }
+.mesh-library__part b { color: #1e2a3d; font-size: 10.5px; }
+.mesh-library__part small { color: #7a8598; font-size: 9px; }
+.mesh-library__list button { display: inline-grid; place-items: center; width: 20px; height: 20px; border: none; border-radius: 4px; background: transparent; color: #97a1b0; cursor: pointer; }
+.mesh-library__list button:hover:not(:disabled) { background: #fbe8e8; color: #a5252a; }
 .summary-card { padding: 20px; border-radius: 12px; color: white; background: linear-gradient(145deg,#243b58,#162a43); box-shadow: 0 9px 24px rgba(20,37,61,.17); }.summary-card > span { color: #aab9ca; font-size: 9px; font-weight: 700; }.summary-card strong { display: block; margin: 5px 0 11px; font-size: 30px; }.summary-card strong small { margin-left: 3px; font-size: 11px; font-weight: 500; }.summary-card > div { height: 4px; overflow: hidden; border-radius: 4px; background: rgba(255,255,255,.15); }.summary-card i { display: block; height: 100%; background: #f47e51; }.summary-card p { margin: 10px 0 0; color: #9fafc1; font-size: 9px; }.summary-card p b { color: white; }
 
 .result-tabs { display: grid; grid-template-columns: repeat(4,1fr); margin-bottom: 18px; border: 1px solid var(--line); border-radius: 11px; background: white; box-shadow: 0 3px 12px rgba(26,43,67,.035); overflow: hidden; }
@@ -408,6 +446,12 @@ button { cursor: pointer; }
 .point-leaders line { stroke:#ffb51b; }
 .measure-point__label { color:#111; border-color:#252525; background:#fff; }
 .measure-point--interactive:hover .measure-point__label { color:#111; background:#fff; box-shadow:0 4px 10px rgba(0,0,0,.3); }
+/* 보정치 부호 색 — 플러스는 빨강, 마이너스는 파랑. 수정됨/편집중/추정 상태는
+   아래에서 이 규칙 다음에 나오므로(소스 순서 동률 시 나중 규칙이 이김) 그대로 우선한다. */
+.measure-point__label--plus { color:#c0272d; border-color:#c0272d; background:#fff; }
+.measure-point--interactive:hover .measure-point__label--plus { color:#fff; background:#c0272d; box-shadow:0 4px 10px rgba(192,39,45,.35); }
+.measure-point__label--minus { color:#1a56c4; border-color:#1a56c4; background:#fff; }
+.measure-point--interactive:hover .measure-point__label--minus { color:#fff; background:#1a56c4; box-shadow:0 4px 10px rgba(26,86,196,.35); }
 .coefficient-card .card-title>span,.coefficient-input { color:#a36c00; }
 .coefficient-input input { border-color:#e8c46d; background:#fffbf1; }
 .coefficient-card input[type=range] { accent-color:#ffb51b; }
@@ -417,8 +461,12 @@ button { cursor: pointer; }
 .measure-point--interactive .measure-point__dot { cursor:pointer; }
 .measure-point__label--editable { cursor:pointer; }
 .measure-point__label--editable:active { cursor:grabbing; }
-.measure-point__label--overridden { color:#1f5e9e; border-color:#4a90e2; background:#fff; box-shadow:0 0 0 1px #4a90e2,0 3px 8px rgba(74,144,226,.28); }
-.measure-point--interactive:hover .measure-point__label--overridden { color:#1f5e9e; background:#f0f6fc; box-shadow:0 0 0 1px #4a90e2,0 4px 10px rgba(74,144,226,.4); }
+/* 수정된 값도 부호(빨강/파랑)는 그대로 유지하고, "손으로 고쳤다" 는 표시는
+   색이 아니라 점선 테두리 + 연필 표시로 따로 낸다 — 그래야 -1.5 를 수정해도
+   여전히 파랑, +1.5 를 수정해도 여전히 빨강으로 남아 부호를 한눈에 읽을 수 있다. */
+.measure-point__label--overridden { border-style:dashed; background:#fffaf0; box-shadow:0 0 0 1px #d9a441,0 3px 8px rgba(217,164,65,.28); }
+.measure-point__label--overridden::after { content:'\270E'; margin-left:3px; font-size:7px; opacity:.7; vertical-align:middle; }
+.measure-point--interactive:hover .measure-point__label--overridden { background:#fff3dc; box-shadow:0 0 0 1px #d9a441,0 4px 10px rgba(217,164,65,.4); }
 .point-leaders line.point-leader--overridden { stroke:rgba(74,144,226,.94); }
 .measure-point__label--editing { padding:2px 3px; cursor:text; background:#fff; border-color:#eb6b3d; box-shadow:0 0 0 2px rgba(235,107,61,.35); }
 .measure-point--interactive:hover .measure-point__label--editing { background:#fff; box-shadow:0 0 0 2px rgba(235,107,61,.35); }
@@ -457,6 +505,14 @@ button { cursor: pointer; }
 .annotation-toolbar button.active { color:#b8620f; border-color:#f0cfa4; background:#fff6e9; box-shadow:0 1px 3px rgba(184,98,15,.14); }
 .annotation-toolbar button:disabled { opacity:.32; cursor:not-allowed; }
 .annotation-toolbar__divider { width:1px; height:17px; margin:0 5px; background:#e2e5e8; }
+.sheet-image-toolbar { display:flex; align-items:center; gap:5px; padding:6px 10px; border-bottom:1px solid var(--line); background:#f7f9fb; }
+.sheet-image-toolbar b { margin-right:4px; color:#536275; font-size:8px; }
+.sheet-image-toolbar button { height:27px; padding:0 9px; border:1px solid #d8dee5; border-radius:6px; color:#667487; background:#fff; font-size:8px; font-weight:700; cursor:pointer; }
+.sheet-image-toolbar button:hover:not(:disabled) { color:#235f91; border-color:#9fc1dd; background:#f2f8fd; }
+.sheet-image-toolbar button.is-active { color:#fff; border-color:#2f78ad; background:#337faf; }
+.sheet-image-toolbar button:disabled { opacity:.4; cursor:default; }
+.sheet-image-toolbar span { margin-left:auto; color:#7f8a98; font-size:8px; font-variant-numeric:tabular-nums; }
+.sheet-image-toolbar em { color:#b44b3e; font-size:8px; font-style:normal; }
 
 /* 포인트 레이어와 시트 도장은 이미지 전체 또는 모서리를 덮고 있어서, 그대로 두면
    그 아래(z-index 6)에 있는 주석 도형과 핸들을 클릭할 수 없다. 레이어 자체는
@@ -528,7 +584,12 @@ button { cursor: pointer; }
 .sheet-canvas--detail-mode { cursor:crosshair; }
 .sheet-layout { position:absolute; z-index:2; min-width:60px; min-height:50px; overflow:visible; border:1px solid #89939c; background:#fff; box-shadow:0 3px 10px rgba(30,43,56,.13); }
 .sheet-layout.selected { z-index:4; outline:2px solid rgba(44,115,181,.45); outline-offset:2px; }
-.sheet-layout__bar { position:absolute; z-index:25; left:0; right:0; top:0; height:20px; display:flex; align-items:center; gap:6px; padding:0 5px 0 7px; color:#3e4953; background:rgba(243,244,243,.94); border-bottom:1px solid #b8bec2; cursor:move; font-size:7px; letter-spacing:.04em; }
+/* 항상 떠 있으면 z-index 20 인 보정치 라벨을 가린다(실측 피드백) — 마우스를
+   올리거나(hover) 레이아웃을 선택했을 때만 보이게 하고, 평소엔 투명+
+   pointer-events:none 으로 숨긴다. 자리는 그대로 차지하므로 드래그로
+   움직이는 동작 자체는 안 바뀐다. */
+.sheet-layout__bar { position:absolute; z-index:25; left:0; right:0; top:0; height:20px; display:flex; align-items:center; gap:6px; padding:0 5px 0 7px; color:#3e4953; background:rgba(243,244,243,.94); border-bottom:1px solid #b8bec2; cursor:move; font-size:7px; letter-spacing:.04em; opacity:0; pointer-events:none; transition:opacity 120ms ease; }
+.sheet-layout:hover .sheet-layout__bar, .sheet-layout.selected .sheet-layout__bar { opacity:1; pointer-events:auto; }
 .sheet-layout__bar span { overflow:hidden; font-weight:800; text-overflow:ellipsis; white-space:nowrap; }
 .sheet-layout__bar small { flex:1; color:#a0a5aa; text-align:right; font-size:6px; white-space:nowrap; }
 .sheet-layout__bar button,.detail-region button { width:16px; height:16px; display:grid; place-items:center; padding:0; border:0; border-radius:3px; color:#7c858c; background:transparent; cursor:pointer; }
@@ -618,7 +679,7 @@ button { cursor: pointer; }
   body.adc-printing .sheet-title-block__heading strong { font-size:22px; letter-spacing:.12em!important; }
   body.adc-printing .sheet-title-block__label,body.adc-printing .sheet-title-block__value { font-size:10px; }
 
-  .sheet-print,.sheet-print__clear,.annotation-toolbar,.zoom-controls,.annotation-delete,.annotation-fontsize,.measure-point__label__reset,
+  .sheet-print,.sheet-print__clear,.annotation-toolbar,.sheet-image-toolbar,.zoom-controls,.annotation-delete,.annotation-fontsize,.measure-point__label__reset,
   .layout-size-control,.detail-mode-guide,.cell-font-picker,.sheet-layout__bar,.measure-point__dot,.add-point-remove { display:none!important; }
   .sheet-canvas:before { display:none!important; }
   * { -webkit-print-color-adjust:exact!important; print-color-adjust:exact!important; }
@@ -629,7 +690,7 @@ button { cursor: pointer; }
    같은 목록을 미디어 쿼리 밖에서도 한 번 더 감춰야 캡처 이미지에 도구·컨트롤이 안 찍힌다. */
 .adc-printing .layout-size-control,.adc-printing .cell-font-picker,.adc-printing .annotation-delete,
 .adc-printing .annotation-fontsize,.adc-printing .measure-point__label__reset,.adc-printing .detail-mode-guide,
-.adc-printing .annotation-toolbar,.adc-printing .zoom-controls,.adc-printing .sheet-layout__bar { display:none!important; }
+.adc-printing .annotation-toolbar,.adc-printing .sheet-image-toolbar,.adc-printing .zoom-controls,.adc-printing .sheet-layout__bar { display:none!important; }
 .adc-printing .sheet-canvas:before { display:none!important; }
 /* 웹 편집 화면에서는 기준점을 유지하되 엑셀 캡처와 PDF 인쇄 결과에서는 원형 점만 제외한다. */
 .adc-printing .measure-point__dot,.adc-printing .add-point-remove,
@@ -837,6 +898,9 @@ button { cursor: pointer; }
 .zero-edit__head { display:flex; align-items:baseline; gap:9px; }
 .zero-edit__head b { font-size:12px; color:#1d2b3a; }
 .zero-edit__head span { font-size:10.5px; color:#6b7c8c; }
+.zero-edit__mode { margin-left:auto; padding:4px 10px; border:1px solid #b8c5d1; border-radius:5px; background:#fff; color:#3d4e5f; font-size:10.5px; font-weight:600; cursor:pointer; }
+.zero-edit__mode.is-active { border-color:#dc1414; background:#fff1f1; color:#b80f0f; }
+.zero-edit__guide { margin:0; padding:6px 9px; border-radius:5px; background:#fff4d8; color:#765519; font-size:10.5px; }
 .zero-edit__row { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
 .zero-edit__row.is-off { opacity:.5; }
 .zero-edit__row > b { min-width:78px; font-size:11px; color:#2b3b4c; }
@@ -845,10 +909,32 @@ button { cursor: pointer; }
 .zero-edit__axis button:hover { background:#eaf1f7; }
 .zero-edit__axis i { min-width:26px; text-align:center; font-style:normal; font-size:10.5px; font-variant-numeric:tabular-nums; color:#1d2b3a; }
 .zero-edit__row > button { padding:3px 9px; border:1px solid #c8d2dc; border-radius:5px; background:#fff; font-size:10.5px; color:#3d4e5f; cursor:pointer; }
+.zero-edit__row > .zero-edit__curve.is-active { border-color:#dc1414; background:#fff1f1; color:#b80f0f; font-weight:600; }
 .zero-edit__foot { display:flex; align-items:center; gap:8px; padding-top:3px; border-top:1px solid #e3e9ef; }
 .zero-edit__foot button { padding:4px 12px; border:1px solid #c8d2dc; border-radius:5px; background:#fff; font-size:11px; color:#3d4e5f; cursor:pointer; }
 .zero-edit__apply { border-color:#2f8f5b !important; background:#2f8f5b !important; color:#fff !important; font-weight:600; }
 .zero-edit__foot em { font-size:10.5px; font-style:normal; color:#b4762a; }
+.zero-edit--compact { padding:8px 10px; border-color:#dce3e9; border-radius:6px; background:#fff; box-shadow:0 2px 8px rgba(32,48,64,.06); }
+.zero-edit--compact .zero-edit__head { align-items:center; justify-content:space-between; }
+.zero-edit--compact .zero-edit__head > div:first-child { display:flex; align-items:baseline; gap:9px; min-width:0; }
+.zero-edit__tools { display:flex; align-items:center; gap:6px; margin-left:auto; }
+.zero-edit__tools button { padding:4px 10px; border:1px solid #c8d2dc; border-radius:5px; background:#fff; color:#3d4e5f; font-size:10.5px; cursor:pointer; white-space:nowrap; }
+.zero-edit__tools .zero-edit__mode { margin-left:0; }
+.zero-edit__status { display:flex; align-items:center; justify-content:space-between; gap:10px; padding-top:6px; border-top:1px solid #edf1f4; color:#6b7c8c; font-size:10px; }
+.zero-edit__status em { color:#b4762a; font-style:normal; font-weight:600; white-space:nowrap; }
+.zero-line-overlay{position:absolute;inset:0;z-index:15;overflow:hidden;pointer-events:none}
+.zero-line-overlay__svg{position:absolute;inset:0;width:100%;height:100%;overflow:hidden;pointer-events:none}
+.zero-line-path{fill:none;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
+.zero-line-path--halo{stroke:#fff;stroke-width:4.5;stroke-opacity:.95}
+.zero-line-path--main{stroke:#dc1414;stroke-width:2.2}
+.zero-line-overlay--editable{touch-action:none;pointer-events:auto}
+.zero-line-path-hit{fill:none;stroke:transparent;stroke-width:12;vector-effect:non-scaling-stroke;pointer-events:stroke;cursor:pointer}
+.zero-line-overlay--add-point .zero-line-path-hit{cursor:copy}
+.zero-line-handle{position:absolute;width:8px;height:8px;padding:0;transform:translate(-50%,-50%);border:1.5px solid #dc1414;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(20,30,40,.45);cursor:grab;transition:background .12s ease,box-shadow .12s ease;touch-action:none}
+.zero-line-handle:hover,.zero-line-handle:focus-visible{background:#fff3a8;box-shadow:0 0 0 2px rgba(220,20,20,.18);outline:none}
+.zero-line-handle:active{cursor:grabbing;background:#ffd86a}
+.zero-line-overlay--delete-point .zero-line-handle{cursor:pointer;background:#fff0ee;border-color:#a9362d;box-shadow:0 0 0 2px rgba(169,54,45,.12)}
+.zero-line-overlay--delete-point .zero-line-handle:hover,.zero-line-overlay--delete-point .zero-line-handle:focus-visible{background:#ffb7ae;box-shadow:0 0 0 3px rgba(169,54,45,.2)}
 
 @media screen and (max-width:1120px) {
   .workspace-grid,.service-grid,.results-layout { grid-template-columns:1fr; }
@@ -874,7 +960,6 @@ button { cursor: pointer; }
   .viewer-toolbar { align-items:flex-start; flex-direction:column; }
   .viewer-toolbar > div { flex-wrap:wrap; }
 }
-
 /* Engine workflow: restrained visual system for an engineering workstation. */
 @media screen {
   .page--workspace,
@@ -1607,4 +1692,8 @@ button { cursor: pointer; }
   .page--results .alignment-bar__actions {
     flex-wrap:wrap;
   }
+}
+
+.frame-toggles {
+  display: none !important;
 }

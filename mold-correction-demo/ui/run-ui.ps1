@@ -70,9 +70,25 @@ function Find-Node {
 }
 
 function Invoke-Pnpm([string[]]$Arguments) {
-  if ($script:PnpmPath) { & $script:PnpmPath @Arguments; return $LASTEXITCODE }
-  & $script:NodePath $script:CorepackPath pnpm @Arguments
-  return $LASTEXITCODE
+  # pnpm routinely writes progress/warnings to stderr. Under
+  # $ErrorActionPreference='Stop' that gets wrapped into a NativeCommandError
+  # and terminates the script even when pnpm exits 0. Relax the preference
+  # for the duration of the call and rely on $LASTEXITCODE instead.
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    if ($script:PnpmPath) { & $script:PnpmPath @Arguments }
+    else { & $script:NodePath $script:CorepackPath pnpm @Arguments }
+    return $LASTEXITCODE
+  }
+  finally { $ErrorActionPreference = $previous }
+}
+
+function Invoke-Native([scriptblock]$Block) {
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $Block; return $LASTEXITCODE }
+  finally { $ErrorActionPreference = $previous }
 }
 
 Push-Location $uiRoot
@@ -104,8 +120,11 @@ try {
   Write-Host "Python: $pythonPath"
   # 서버 시작에 반드시 필요한 모듈만 검사한다. OCP와
   # fast_simplification은 STEP/CAD 기능을 사용할 때만 지연 로드된다.
-  & $pythonPath -c "import cv2,numpy,uvicorn,starlette,trimesh,openpyxl,scipy"
-  if ($LASTEXITCODE -ne 0) {
+  # native 호출이 stderr 에 무해한 경고를 남겨도 $ErrorActionPreference='Stop'
+  # 때문에 스크립트가 죽지 않도록 Invoke-Native 로 감싼다(런처가 뜨자마자
+  # 닫히던 원인이었다 — 아래 vinext 검사도 같은 이유로 감싼다).
+  $pythonCheck = Invoke-Native { & $pythonPath -c "import cv2,numpy,uvicorn,starlette,trimesh,openpyxl,scipy" 2>&1 | Out-Null }
+  if ($pythonCheck -ne 0) {
     Fail 'Python 엔진 의존성이 누락되었습니다.' "& '$pythonPath' -m pip install -r '$uiRoot\backend\requirements.txt'"
   }
 
