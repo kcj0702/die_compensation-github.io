@@ -68,6 +68,7 @@ from label_detector import (  # noqa: E402
 from colormap_reader import build_lut  # noqa: E402
 from point_extractor import _sample_deviation_color  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
+from point_selection import select_key_points  # noqa: E402
 from label_removal.remove_labels import (  # noqa: E402
     build_scan_mask as build_label_removal_scan_mask,
     create_versions,
@@ -713,6 +714,31 @@ def _decode_image(payload: bytes) -> np.ndarray:
     return image
 
 
+def _count_restored_label_regions(
+    image: np.ndarray,
+    label_boxes: list[tuple[int, int, int, int]],
+) -> int:
+    """Count label boxes restored on the product, excluding margin labels."""
+    if not label_boxes:
+        return 0
+    scan_mask = build_label_removal_scan_mask(image)
+    # A label drawn over the product can cut a short gap in the scan mask.
+    # Reconnect only that local gap before deciding whether the box belongs
+    # to the part; this is a size-relative rule, not a product-specific count.
+    radius = max(3, int(round(min(image.shape[:2]) * 0.008)))
+    kernel_size = radius * 2 + 1
+    restored_target = cv2.dilate(
+        scan_mask,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)),
+        iterations=1,
+    )
+    return sum(
+        1
+        for x0, y0, x1, y1 in label_boxes
+        if np.any(restored_target[y0:y1, x0:x1] > 0)
+    )
+
+
 def _marker_centers_from_version_difference(
     labels_inpainted: np.ndarray,
     labels_points_inpainted: np.ndarray,
@@ -949,7 +975,8 @@ def analyze_image(
     points_removed_image: np.ndarray | None = None
     label_count = 0
     try:
-        label_count = len(detect_label_boxes(image))
+        label_boxes = detect_label_boxes(image)
+        label_count = _count_restored_label_regions(image, label_boxes)
         label_versions = create_versions(image)
         clean_image = label_versions["2_labels_inpainted"]
         points_removed_image = label_versions["4_labels_points_inpainted"]
@@ -1125,6 +1152,15 @@ def analyze_image(
     except Exception as exc:
         errors["deviation"] = str(exc)
 
+    # 팀원이 만든 기존 주요 포인트 선별기다. 국소 극값, 부호 변화,
+    # 전체 최대·최소를 고르고 나머지 포인트는 응답에 그대로 남긴다.
+    selection = select_key_points(points)
+    key_reasons = {key.point_id: list(key.reasons) for key in selection.keys}
+    for point in points:
+        reasons = key_reasons.get(point["id"])
+        if reasons:
+            point["keyReasons"] = reasons
+
     # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
     transferred = 0
     if alignment is not None:
@@ -1197,6 +1233,7 @@ def analyze_image(
             if alignment_overlay is not None
             else None
         ),
+        "keySelection": selection.to_dict(),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)
