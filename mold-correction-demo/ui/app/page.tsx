@@ -115,7 +115,7 @@ type AnalysisResult = {
   errors: Partial<Record<Engine | 'product', string>>;
   valueMode: string;
 };
-type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; assetError?: string; assetStatus?: string };
+type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; cadUploading?: boolean; assetError?: string; assetStatus?: string };
 type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
 type ZeroPointOffset = { dx: number; dy: number };
 type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean; points?: Record<string, ZeroPointOffset>; vertices?: [number, number][]; spline?: boolean; splineSegments?: number[] };
@@ -1423,7 +1423,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
   const attachReferenceFiles = async (id: string, files: FileList | File[]) => {
     const selected = Array.from(files);
     const image = selected.find((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(file.name));
-    const cadFiles = selected.filter((file) => /\.(catpart|step|stp|stl)$/i.test(file.name));
+    const cadFiles = selected.filter((file) => /\.(catpart|catproduct|step|stp|stl)$/i.test(file.name));
     const scan = scans.find((item) => item.id === id);
     if (!scan) return;
     if (image) setScans((current) => current.map((item) => {
@@ -1432,7 +1432,13 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
       return { ...item, productFile: image, productUrl: URL.createObjectURL(image), status: item.status === 'done' ? 'ready' : item.status, assetError: undefined };
     }));
     if (!cadFiles.length) return;
-    setScans((current) => current.map((item) => item.id === id ? { ...item, assetError: undefined, assetStatus: 'CAD 업로드 준비 중…' } : item));
+    setScans((current) => current.map((item) => item.id === id ? {
+      ...item,
+      status: item.status === 'done' ? 'ready' : item.status,
+      cadUploading: true,
+      assetError: undefined,
+      assetStatus: 'CAD 업로드 준비 중…',
+    } : item));
     for (const file of cadFiles) {
       try {
         const partNumber = partNoFromName(scan.partNo) || partNoFromName(file.name);
@@ -1453,7 +1459,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
     /* 라이브러리 저장이나 파일명 판정 실패가 뷰어 추가를 막아서는 안 된다.
        형상은 먼저 열고 실제 정합 결과로 맞는 파일인지 판단한다. */
     setScans((current) => current.map((item) => item.id === id
-      ? { ...item, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
+      ? { ...item, cadUploading: false, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
       : item));
   };
   const detachProduct = (id: string) => setScans((current) => current.map((scan) => {
@@ -1482,15 +1488,18 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
             <div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div>
             <div className="file-row__name">
               <b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span>
-              <span className="product-slot">
-                <label><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,.catpart,.step,.stp,.stl" onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} /><UploadCloud size={12} /> 기준 시트·CAD 등록</label>
-                {scan.productFile && <><ImageIcon size={12} /> 제품데이터 {scan.productFile.name}<button type="button" onClick={() => detachProduct(scan.id)} aria-label="제품데이터 해제">해제</button></>}
-                {scan.cadFiles?.map((file) => <span className="product-slot__cad" key={file.name}><Layers3 size={12} /> {file.name}</span>)}
-              </span>
-              {scan.assetStatus && <span className="asset-status">{scan.assetStatus}</span>}
-              {scan.assetError && <span className="asset-error">CAD 등록 오류: {scan.assetError}</span>}
             </div>
-            <div className="file-row__actions"><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : scan.status !== 'analyzing' ? <button className="icon-button icon-button--small upload-cancel-button" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 업로드 취소`} title="업로드 취소"><X size={15} /></button> : null}</div>
+            <div className="file-row__actions">
+              {scan.status === 'done'
+                ? <button type="button" className="status status--done status--result" onClick={() => onOpenResults(scan.id)} title="분석 결과 보기"><Check size={13} /> 분석 완료</button>
+                : <span className={`status status--${scan.status}`}>{scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>}
+              <label className={`cad-upload-action${scan.cadFiles?.length ? ' cad-upload-action--done' : ''}${scan.assetError ? ' cad-upload-action--error' : ''}`} title={scan.assetError ? `CAD 등록 오류: ${scan.assetError}` : scan.cadFiles?.length ? scan.cadFiles.map((file) => file.name).join(', ') : '이 스캔과 연결할 CAD 파일을 등록합니다'}>
+                <input type="file" multiple accept=".catpart,.catproduct,.step,.stp,.stl" disabled={scan.cadUploading} onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} />
+                <Layers3 size={13} /> CAD 파일 업로드
+                {scan.cadUploading ? <Activity className="cad-upload-action__progress" size={13} /> : scan.cadFiles?.length ? <Check className="cad-upload-action__check" size={14} strokeWidth={3} /> : null}
+              </label>
+              <button className="icon-button icon-button--small upload-cancel-button" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 업로드 취소`} title="업로드 취소"><X size={15} /></button>
+            </div>
           </div>)}
         </div>
         <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '3D 스캔 데이터 분석'}<ArrowRight size={18} /></button>

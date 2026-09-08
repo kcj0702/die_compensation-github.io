@@ -1262,7 +1262,7 @@ button { cursor: pointer; }
 
   .page--workspace .file-row {
     min-height:70px;
-    grid-template-columns:50px minmax(0,1fr) 86px;
+    grid-template-columns:50px minmax(0,1fr) auto;
     gap:9px;
     padding:9px 10px;
     border-top-color:#e4e6e7;
@@ -1274,8 +1274,138 @@ button { cursor: pointer; }
     border-radius:2px;
   }
 
-  .page--workspace .file-row__name .product-slot {
-    display:none;
+  .page--workspace .file-row__actions {
+    width:auto;
+    flex-direction:column;
+    align-items:flex-end;
+    gap:6px;
+  }
+
+  .page--workspace .file-row__actions .status {
+    align-self:flex-end;
+  }
+
+  .page--workspace .status--result {
+    border:0;
+    cursor:pointer;
+  }
+
+  .page--workspace .cad-upload-action {
+    min-height:28px;
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+    padding:0 9px;
+    border:1px solid #cfd4d8;
+    border-radius:4px;
+    color:#515b63;
+    background:#fff;
+    font-size:9px;
+    font-weight:720;
+    white-space:nowrap;
+    cursor:pointer;
+  }
+
+  .page--workspace .cad-upload-action:hover {
+    border-color:#aeb6bc;
+    background:#f6f7f7;
+  }
+
+  .page--workspace .cad-upload-action--done {
+    border-color:#9fcbbd;
+    color:#246c58;
+    background:#f2faf7;
+  }
+
+  .page--workspace .cad-upload-action--error {
+    border-color:#d8a3a8;
+    color:#a13e48;
+    background:#fff7f7;
+  }
+
+  .page--workspace .cad-upload-action input {
+    position:absolute;
+    width:1px;
+    height:1px;
+    opacity:0;
+    pointer-events:none;
+  }
+
+  .page--workspace .cad-upload-action__check {
+    color:#168365;
+  }
+
+  .page--workspace .cad-upload-action__progress {
+    animation:pulse 1s infinite;
+  }
+
+  .page--workspace .reference-upload {
+    min-height:25px;
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+    padding:0 8px;
+    border:1px solid #cfd4d8;
+    border-radius:4px;
+    color:#4e5962;
+    background:#fff;
+    font-size:9px;
+    font-weight:720;
+    cursor:pointer;
+  }
+
+  .page--workspace .reference-upload:hover {
+    border-color:#aeb6bc;
+    background:#f6f7f7;
+  }
+
+  .page--workspace .reference-upload--cad {
+    color:#755300;
+    border-color:#e0bd62;
+    background:#fff8df;
+  }
+
+  .page--workspace .reference-upload--cad:hover {
+    border-color:#c6961c;
+    background:#fff1bd;
+  }
+
+  .page--workspace .reference-file {
+    max-width:220px;
+    min-height:23px;
+    display:inline-flex;
+    align-items:center;
+    gap:4px;
+    padding:0 6px;
+    overflow:hidden;
+    border-radius:3px;
+    color:#687178;
+    background:#eef0f1;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+
+  .page--workspace .reference-file--cad {
+    color:#665326;
+    background:#f5eedb;
+  }
+
+  .page--workspace .reference-file button {
+    width:17px;
+    height:17px;
+    display:grid;
+    place-items:center;
+    flex:0 0 auto;
+    padding:0;
+    border:0;
+    border-radius:3px;
+    color:#747b80;
+    background:transparent;
+  }
+
+  .page--workspace .reference-file button:hover {
+    color:#9c302c;
+    background:#fff;
   }
 
   .page--workspace .primary-button.wide {
@@ -1677,12 +1807,17 @@ button { cursor: pointer; }
   }
 
   .page--workspace .file-row {
-    grid-template-columns:46px minmax(0,1fr) 82px;
+    grid-template-columns:46px minmax(0,1fr);
   }
 
   .page--workspace .file-thumb {
     width:46px;
     height:46px;
+  }
+
+  .page--workspace .file-row__actions {
+    grid-column:2;
+    justify-self:end;
   }
 
   .page--results .viewer-toolbar {
