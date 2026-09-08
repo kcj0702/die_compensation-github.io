@@ -8,6 +8,7 @@ flow intact for every later scan of the same part.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -179,11 +180,20 @@ class MeshLibrary:
         if normalized not in self.SUPPORTED_SUFFIXES:
             raise ValueError(f"지원하지 않는 mesh 확장자입니다: {suffix}")
         self.directory.mkdir(parents=True, exist_ok=True)
+        destination = self.directory / f"{part_number}{normalized}"
+        # Do not refresh the source mtime when the browser uploads the exact
+        # same CAD again. Its mtime is the invalidation key for every cache.
+        if destination.is_file() and destination.stat().st_size == len(data):
+            existing_digest = hashlib.sha256()
+            with destination.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    existing_digest.update(chunk)
+            if existing_digest.digest() == hashlib.sha256(data).digest():
+                return destination
         # 같은 품번이 다른 확장자로 남아 있으면 매칭이 갈리므로 먼저 제거.
         for existing in self.directory.glob(f"{part_number}.*"):
             if existing.suffix.lower() in self.SUPPORTED_SUFFIXES:
                 existing.unlink()
-        destination = self.directory / f"{part_number}{normalized}"
         destination.write_bytes(data)
         return destination
 

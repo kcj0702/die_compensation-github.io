@@ -496,6 +496,125 @@ def measure_hit_rate(fit: ViewFit, vertices: np.ndarray, faces: np.ndarray,
     return float(sum(1 for spot in placed if spot is not None) / len(placed))
 
 
+def _projected_surface(vertices: np.ndarray, faces: np.ndarray,
+                       u_axis: int, v_axis: int, mesh=None) -> list:
+    """Build a 2D spatial index for parallel ray intersections.
+
+    ``trimesh`` delegates ray lookup to optional packages such as ``rtree``.
+    The desktop bundle does not require those packages, so a missing optional
+    dependency used to turn every otherwise valid hit into ``None``.  This
+    index uses SciPy (already a backend dependency) and projected triangle
+    bounds instead.  Radius buckets keep queries local even for large meshes.
+    """
+    cache_key = (int(u_axis), int(v_axis), len(vertices), len(faces))
+    cache = None
+    if mesh is not None:
+        cache = getattr(mesh, "_die_overlay_projectors", None)
+        if cache is None:
+            cache = {}
+            setattr(mesh, "_die_overlay_projectors", cache)
+        if cache_key in cache:
+            return cache[cache_key]
+
+    from scipy.spatial import cKDTree
+
+    vertices = np.asarray(vertices, dtype=float)
+    faces = np.asarray(faces, dtype=np.int64)
+    triangles = vertices[faces]
+    uv = np.asarray(triangles[:, :, [u_axis, v_axis]], dtype=np.float32)
+    depth_axis = ({0, 1, 2} - {u_axis, v_axis}).pop()
+    depths = np.asarray(triangles[:, :, depth_axis], dtype=np.float32)
+
+    centres = uv.mean(axis=1)
+    radii = np.linalg.norm(uv - centres[:, None, :], axis=2).max(axis=1)
+    extent = float(np.ptp(vertices, axis=0).max()) if len(vertices) else 0.0
+    valid = radii > max(extent * 1e-12, 1e-12)
+    uv, depths, centres, radii = (
+        item[valid] for item in (uv, depths, centres, radii))
+
+    groups: list = []
+    if len(radii):
+        # Triangles in one bucket differ by less than 2x in projected size.
+        # A circle around every centroid then gives a complete, inexpensive
+        # candidate set; barycentric coordinates make the final test exact.
+        buckets = np.floor(np.log2(radii)).astype(np.int32)
+        for bucket in np.unique(buckets):
+            picked = buckets == bucket
+            group_uv = uv[picked]
+            group_depths = depths[picked]
+            a, b, c = group_uv[:, 0], group_uv[:, 1], group_uv[:, 2]
+            denominator = ((b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0])
+                           + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1]))
+            nondegenerate = np.abs(denominator) > 1e-12
+            if not nondegenerate.any():
+                continue
+            group_uv = group_uv[nondegenerate]
+            group_depths = group_depths[nondegenerate]
+            group_centres = centres[picked][nondegenerate]
+            group_radii = radii[picked][nondegenerate]
+            groups.append({
+                "tree": cKDTree(group_centres),
+                "uv": group_uv,
+                "depths": group_depths,
+                "denominator": denominator[nondegenerate],
+                "radius": float(group_radii.max()) * (1.0 + 1e-7) + 1e-9,
+            })
+
+    if cache is not None:
+        cache[cache_key] = groups
+    return groups
+
+
+def _unproject_projected(points_uv: np.ndarray, vertices: np.ndarray,
+                         faces: np.ndarray, u_axis: int, v_axis: int,
+                         mesh=None) -> list:
+    """Intersect axis-aligned rays without trimesh's optional ray backend."""
+    groups = _projected_surface(vertices, faces, u_axis, v_axis, mesh)
+    best_depth = np.full(len(points_uv), -np.inf, dtype=float)
+    tolerance = 2e-6
+
+    for group in groups:
+        nearby = group["tree"].query_ball_point(
+            points_uv, r=group["radius"])
+        triangle_uv = group["uv"]
+        triangle_depths = group["depths"]
+        denominator = group["denominator"]
+        for point_index, candidates in enumerate(nearby):
+            if not candidates:
+                continue
+            selected = np.asarray(candidates, dtype=np.int64)
+            tri = triangle_uv[selected]
+            p_x, p_y = points_uv[point_index]
+            a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+            den = denominator[selected]
+            weight_a = ((b[:, 1] - c[:, 1]) * (p_x - c[:, 0])
+                        + (c[:, 0] - b[:, 0]) * (p_y - c[:, 1])) / den
+            weight_b = ((c[:, 1] - a[:, 1]) * (p_x - c[:, 0])
+                        + (a[:, 0] - c[:, 0]) * (p_y - c[:, 1])) / den
+            weight_c = 1.0 - weight_a - weight_b
+            inside = ((weight_a >= -tolerance)
+                      & (weight_b >= -tolerance)
+                      & (weight_c >= -tolerance))
+            if not inside.any():
+                continue
+            selected = selected[inside]
+            depths = triangle_depths[selected]
+            hit_depths = (weight_a[inside] * depths[:, 0]
+                          + weight_b[inside] * depths[:, 1]
+                          + weight_c[inside] * depths[:, 2])
+            best_depth[point_index] = max(
+                best_depth[point_index], float(hit_depths.max()))
+
+    hits = [None] * len(points_uv)
+    depth_axis = ({0, 1, 2} - {u_axis, v_axis}).pop()
+    for index in np.nonzero(np.isfinite(best_depth))[0]:
+        location = np.zeros(3, dtype=float)
+        location[u_axis], location[v_axis] = points_uv[index]
+        location[depth_axis] = best_depth[index]
+        hits[int(index)] = [round(float(value), 3) for value in location]
+    return hits
+
+
 def unproject(points_px, vertices: np.ndarray, faces: np.ndarray,
               fit: ViewFit, mesh=None) -> list:
     """화면 좌표를 표면 위의 3D 점으로 바꾼다.
@@ -530,7 +649,9 @@ def unproject(points_px, vertices: np.ndarray, faces: np.ndarray,
     directions[:, fit.axis] = -1.0
 
     hits = [None] * len(points_px)
-    if mesh is not None:
+    ray_unavailable = bool(
+        mesh is not None and getattr(mesh, "_die_ray_unavailable", False))
+    if mesh is not None and not ray_unavailable:
         try:
             locations, ray_index, _tri = mesh.ray.intersects_location(
                 ray_origins=origins, ray_directions=directions,
@@ -538,7 +659,19 @@ def unproject(points_px, vertices: np.ndarray, faces: np.ndarray,
             for location, index in zip(locations, ray_index):
                 hits[int(index)] = [round(float(c), 3) for c in location]
         except Exception:
-            pass
+            # Avoid repeatedly importing/failing the absent optional backend
+            # during fit polishing (this function can be called hundreds of
+            # times for one overlay).
+            setattr(mesh, "_die_ray_unavailable", True)
+
+    missing = [index for index, hit in enumerate(hits) if hit is None]
+    if missing:
+        fallback = _unproject_projected(
+            origins[missing][:, [u_axis, v_axis]], vertices, faces,
+            u_axis, v_axis, mesh)
+        for index, location in zip(missing, fallback):
+            if location is not None:
+                hits[index] = location
 
     # 광선이 빗나간 점은 **비운다**(None).
     #

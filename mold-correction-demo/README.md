@@ -89,10 +89,10 @@ C:\Users\KDT033\Downloads\die_compensation-github.io-main\die_compensation-githu
 | 무엇 | 어디에 | 실측 |
 |---|---|---|
 | Qwen 라벨 판독 | `ui/backend/.label_cache.json` | 64XX2 한 장 71초 -> 0초 |
-| 현업 제로라인 파이프라인 | `zero_line_detection/.lab_cache/` | 64XX2 117초 -> 0.05초 |
+| 현업 제로라인 파이프라인 | `zero_line_detection/.lab_cache/` | 64XX2 91.3초 -> 6.4초(첫 실행) -> 0.04초(재실행) |
 | STEP 파싱 | `cad_import/_parsed/` | 113MB 57초 -> 3초 |
 
-분석 한 장이 **195초 -> 3.1초**가 된다. 열쇠는 내용 해시라 그림이나
+제로라인 캐시는 입력 이미지와 관련 스크립트의 내용 해시를 함께 사용하므로 그림이나
 스크립트가 바뀌면 저절로 다시 돈다. 자리를 옮기려면 `ADC_LABEL_CACHE`
 `ADC_LAB_CACHE` 환경변수를 쓴다(시험이 이걸로 실제 캐시를 지킨다).
 `GET /api/health` 의 `qwenLoaded` 가 분석을 돌린 뒤에도 `false` 면 라벨 판독이

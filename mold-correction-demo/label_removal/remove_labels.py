@@ -528,11 +528,14 @@ def build_annotation_masks(
 
 
 def build_labels_white_mask(
-    image: np.ndarray, scan_mask: np.ndarray
+    image: np.ndarray,
+    scan_mask: np.ndarray,
+    label_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> np.ndarray:
     """Build the labels_white mask using exact-HSV thin-line tracing."""
     height, width = image.shape[:2]
-    label_boxes = detect_label_boxes(image)
+    if label_boxes is None:
+        label_boxes = detect_label_boxes(image)
     line_mask, _ = detect_exact_hsv_leader_lines(
         image, label_boxes, scan_mask
     )
@@ -544,11 +547,15 @@ def build_labels_white_mask(
 
 
 def build_measurement_point_mask(
-    image: np.ndarray, scan_mask: np.ndarray
+    image: np.ndarray,
+    scan_mask: np.ndarray,
+    label_boxes: list[tuple[int, int, int, int]] | None = None,
+    deviation_candidates: list | None = None,
 ) -> np.ndarray:
     """Build compact masks around the non-blue point at each leader endpoint."""
     height, width = image.shape[:2]
-    label_boxes = detect_label_boxes(image)
+    if label_boxes is None:
+        label_boxes = detect_label_boxes(image)
     _, point_specs, point_boxes = detect_exact_hsv_leader_lines(
         image, label_boxes, scan_mask, return_point_boxes=True
     )
@@ -560,14 +567,15 @@ def build_measurement_point_mask(
     # Some labels placed directly beside a hole have no usable exact-blue
     # component at all. Supplement only boxes that received no exact point;
     # short 3-5 px exact-blue components are handled by the tracer above.
-    try:
-        from label_detector import detect_labels as detect_deviation_labels
-    except ImportError:  # package import used by standalone/test execution
-        from deviation_extraction.label_detector import (
-            detect_labels as detect_deviation_labels,
-        )
-
-    for candidate in detect_deviation_labels(image):
+    if deviation_candidates is None:
+        try:
+            from label_detector import detect_labels as detect_deviation_labels
+        except ImportError:  # package import used by standalone/test execution
+            from deviation_extraction.label_detector import (
+                detect_labels as detect_deviation_labels,
+            )
+        deviation_candidates = detect_deviation_labels(image)
+    for candidate in deviation_candidates:
         if candidate.point_xy is None:
             continue
         x, y, box_width, box_height = candidate.box
@@ -691,11 +699,30 @@ def create_labels_points_inpainted_from_versions(
     )
 
 
-def create_versions(image: np.ndarray) -> dict[str, np.ndarray]:
+def create_versions(
+    image: np.ndarray,
+    *,
+    context: dict | None = None,
+) -> dict[str, np.ndarray]:
     """Create the four requested label-removal versions."""
     scan_mask = build_scan_mask(image)
-    labels_white_mask = build_labels_white_mask(image, scan_mask)
-    point_mask = build_measurement_point_mask(image, scan_mask)
+    label_boxes = detect_label_boxes(image)
+    labels_white_mask = build_labels_white_mask(image, scan_mask, label_boxes)
+
+    try:
+        from label_detector import detect_labels as detect_deviation_labels
+    except ImportError:  # package import used by standalone/test execution
+        from deviation_extraction.label_detector import (
+            detect_labels as detect_deviation_labels,
+        )
+    deviation_candidates = detect_deviation_labels(image)
+    point_mask = build_measurement_point_mask(
+        image, scan_mask, label_boxes, deviation_candidates
+    )
+
+    if context is not None:
+        context["label_boxes"] = label_boxes
+        context["deviation_candidates"] = deviation_candidates
 
     labels_white = render_white_version(image, scan_mask, labels_white_mask)
     labels_inpainted = create_labels_inpainted_from_white(

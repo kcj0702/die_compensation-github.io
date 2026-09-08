@@ -96,6 +96,18 @@ class HybridCaseSelectionTests(unittest.TestCase):
         self.assertEqual(result["selections"], [long])
         self.assertEqual(result["rejected_routes"][0]["region_label"], "R1")
 
+    def test_endpoint_anchor_keeps_nearest_candidate_order(self) -> None:
+        planning = np.full((31, 31), 255, dtype=np.uint8)
+        planning[12, 15] = 0
+        planning[15, 12] = 0
+        strict = np.zeros_like(planning)
+
+        anchor = hybrid.case2_adapter.selector.find_endpoint_anchor(
+            (15, 15), planning, strict, maximum_radius=6
+        )
+
+        self.assertEqual(anchor, (15, 12))
+
 
 if __name__ == "__main__":
     unittest.main()

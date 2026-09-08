@@ -69,6 +69,28 @@ def test_되돌린_좌표가_제자리로_온다():
     assert placed and placed[0] is not None
 
 
+def test_unproject_works_when_trimesh_ray_backend_is_unavailable():
+    """The packaged app must not require trimesh's optional ``rtree`` extra."""
+    class BrokenRay:
+        def intersects_location(self, **_kwargs):
+            raise ModuleNotFoundError("No module named 'rtree'")
+
+    class MeshWithoutRayBackend:
+        ray = BrokenRay()
+
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    mesh = MeshWithoutRayBackend()
+
+    placed = ov.unproject([[200, 50], [0, 0]], vertices, faces, fit, mesh)
+
+    assert placed[0] is not None
+    assert placed[1] is None
+    assert mesh._die_ray_unavailable is True
+    assert ov.measure_hit_rate(fit, vertices, faces, mask, mesh) > 0.9
+
+
 def test_비스듬히_기울어진_스캔도_맞춘다():
     """스캔은 검사 소프트웨어에서 작업자가 놓은 각도 그대로다.
 

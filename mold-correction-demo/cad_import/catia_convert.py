@@ -33,6 +33,8 @@ CATIA 는 STL 로도 export 하지만, 그 경우 CATIA 내부의 tessellation �
 """
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 
@@ -45,24 +47,49 @@ def is_catia_file(path: str | Path) -> bool:
     return Path(path).suffix.lower() in CATIA_SUFFIXES
 
 
-# CATIA ExportData 는 라이선스에 따라 특정 포맷만 허용된다. 회사마다 STEP 이
-# 없고 STL 만 되는 경우가 흔해서, 여러 포맷을 순서대로 시도하고 처음 성공한
-# 것으로 저장한다. STL 을 앞에 두면 우리 파이프라인(trimesh) 이 아무 의존성
-# 추가 없이 곧바로 로드할 수 있어 이득이다. IGES 는 우리 load_any 가 지금
-# 파싱하지 못하므로 목록에서 뺐다.
+# CATIA ExportData 는 라이선스에 따라 특정 포맷만 허용된다. 자동차 판넬의
+# 완만한 곡면은 STL 로 먼저 굳히면 CATIA의 tessellation 설정에 따라 각져
+# 보일 수 있다. STEP(B-Rep)을 우선 내보내 우리 쪽 OCCT가 표시 해상도로 다시
+# tessellate하고, STEP 라이선스가 없는 환경에서만 STL로 내려간다.
+# CATIA Automation의 STEP ExportData 토큰은 ``step``이 아니라 ``stp``다.
+# ``__quality_v3`` 접미사는 잘못된 토큰의 실패 캐시와 예전 STL 캐시를
+# 재사용하지 않게 한다.
 _EXPORT_FORMATS: tuple[tuple[str, str], ...] = (
-    ("stl",  ".stl"),
-    ("step", ".step"),
+    ("stp", "__quality_v3.step"),
+    ("stl", "__quality_v3.stl"),
+)
+
+# CATIA Automation은 한 프로세스에 여러 ExportData 호출이 동시에 들어오면
+# RPC_S_CALL_FAILED / RPC_E_CALL_REJECTED를 내기 쉽다. 분석과 CAD 뷰어가 같은
+# 순간에 변환을 요청해도 CATIA에는 하나씩만 전달한다.
+_CATIA_EXPORT_LOCK = threading.Lock()
+_TRANSIENT_COM_MARKERS = (
+    "-2147023170",  # 0x800706BE RPC_S_CALL_FAILED
+    "-2147418111",  # 0x80010001 RPC_E_CALL_REJECTED
+    "-2147417846",  # 0x8001010A RPC_E_SERVERCALL_RETRYLATER
+    "rpc_",
+    "remote procedure",
+    "원격 프로시저",
 )
 
 
-def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
-    """.CATPart 를 열어 STL/STEP/IGES 순으로 변환 시도, 성공한 파일 경로를 준다.
+def _is_transient_com_failure(reason: object) -> bool:
+    folded = str(reason).lower()
+    return any(marker in folded for marker in _TRANSIENT_COM_MARKERS)
 
-    실측: 회사 CATIA 라이선스에 STEP export 모듈이 없을 때 그 호출만 실패한다.
-    포맷마다 별도 라이선스라 여러 개를 순서대로 시도하는 게 안전하다. STL 을
-    먼저 두는 이유는 (1) 라이선스가 가장 널리 포함되어 있고 (2) 우리 파이프
-    라인이 trimesh 로 곧바로 열 수 있어 OCCT 를 우회할 수 있어서다.
+
+def _convert_to_mesh_once(
+    source: str | Path,
+    cache_dir: str | Path,
+    *,
+    step_only: bool = False,
+    force_new_instance: bool = False,
+) -> Path:
+    """.CATPart 를 열어 STEP 우선, STL 순으로 변환해 성공한 경로를 준다.
+
+    STEP export 모듈이 없을 때는 해당 호출만 실패하며, 이어서 호환성이 높은
+    STL을 시도한다. STEP이 성공하면 곡면을 B-Rep 상태로 보존하므로 뷰어용
+    tessellation 품질을 우리 쪽에서 통제할 수 있다.
 
     Args:
         source:    변환할 .CATPart / .CATProduct.
@@ -84,12 +111,22 @@ def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
 
     cache_root = Path(cache_dir)
     cache_root.mkdir(parents=True, exist_ok=True)
+    export_formats = _EXPORT_FORMATS[:1] if step_only else _EXPORT_FORMATS
+    failure_suffix = "__quality_v3_step.failed" if step_only else "__quality_v3.failed"
+    failure_marker = cache_root / f"{source_path.stem}{failure_suffix}"
 
     # 이미 어떤 포맷으로든 캐시가 있고 원본보다 최신이면 그대로 쓴다.
-    for _fmt, ext in _EXPORT_FORMATS:
+    for _fmt, ext in export_formats:
         candidate = cache_root / f"{source_path.stem}{ext}"
         if candidate.is_file() and candidate.stat().st_mtime >= source_path.stat().st_mtime:
             return candidate
+
+    if failure_marker.is_file() and failure_marker.stat().st_mtime >= source_path.stat().st_mtime:
+        reason = failure_marker.read_text(encoding="utf-8", errors="replace").strip()
+        if _is_transient_com_failure(reason):
+            failure_marker.unlink(missing_ok=True)
+        else:
+            raise ValueError(f"이 CATPart의 이전 변환 실패를 재사용합니다: {reason}")
 
     try:
         import pythoncom  # noqa: WPS433
@@ -104,7 +141,11 @@ def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
     pythoncom.CoInitialize()
     try:
         try:
-            catia = win32com.client.Dispatch("CATIA.Application")
+            dispatch = (
+                win32com.client.DispatchEx
+                if force_new_instance else win32com.client.Dispatch
+            )
+            catia = dispatch("CATIA.Application")
         except pythoncom.com_error as exc:
             raise ValueError(
                 "CATIA 를 실행할 수 없습니다. CATIA 설치·라이선스를 확인하세요. "
@@ -131,7 +172,7 @@ def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
                     f"원인: {exc}"
                 ) from exc
 
-            for fmt, ext in _EXPORT_FORMATS:
+            for fmt, ext in export_formats:
                 target = cache_root / f"{source_path.stem}{ext}"
                 try:
                     doc.ExportData(str(target.resolve()), fmt)
@@ -157,14 +198,45 @@ def convert_to_mesh(source: str | Path, cache_dir: str | Path) -> Path:
         pythoncom.CoUninitialize()
 
     if successful_path is None:
-        raise ValueError(
-            "CATIA export 가 모든 포맷에서 실패했습니다: " + ", ".join(failures)
-        )
+        reason = "CATIA export 가 모든 포맷에서 실패했습니다: " + ", ".join(failures)
+        if _is_transient_com_failure(reason):
+            failure_marker.unlink(missing_ok=True)
+        else:
+            failure_marker.write_text(reason, encoding="utf-8")
+        raise ValueError(reason)
+    failure_marker.unlink(missing_ok=True)
     return successful_path
 
 
-# 하위 호환: 기존에 convert_to_step 를 import 하던 곳이 있다면 그대로 동작.
-convert_to_step = convert_to_mesh
+def convert_to_mesh(
+    source: str | Path,
+    cache_dir: str | Path,
+    *,
+    step_only: bool = False,
+) -> Path:
+    """CATIA 변환을 직렬 실행하고 일시적인 RPC 단절은 한 번 재시도한다."""
+    with _CATIA_EXPORT_LOCK:
+        try:
+            return _convert_to_mesh_once(
+                source, cache_dir, step_only=step_only,
+            )
+        except ValueError as exc:
+            if not _is_transient_com_failure(exc):
+                raise
+            time.sleep(0.5)
+            return _convert_to_mesh_once(
+                source, cache_dir, step_only=step_only, force_new_instance=True,
+            )
+
+
+def convert_to_step(source: str | Path, cache_dir: str | Path) -> Path:
+    """CATIA 원본을 STEP으로만 변환한다.
+
+    CAD 뷰어는 STEP의 B-Rep에서 홀과 기준 평면을 읽어야 하므로 STL로
+    조용히 내려가지 않는다. 일반 형상 렌더링은 기존 ``convert_to_mesh``의
+    STEP→STL 호환 경로를 계속 사용할 수 있다.
+    """
+    return convert_to_mesh(source, cache_dir, step_only=True)
 
 
 __all__ = [

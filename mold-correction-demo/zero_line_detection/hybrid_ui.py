@@ -7,9 +7,15 @@ here lets the UI use one engine without copying either implementation.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import sys
+import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -22,6 +28,133 @@ PROJECT_DIR = Path(__file__).resolve().parents[1]
 EXPERIMENT_DIR = PROJECT_DIR / "experiments" / "zero_line_area_edge_preview"
 if str(EXPERIMENT_DIR) not in sys.path:
     sys.path.insert(0, str(EXPERIMENT_DIR))
+
+_CACHE_SCHEMA = "hybrid-zero-v2"
+_CACHE_LIMIT = 32
+
+
+def _engine_fingerprint() -> str:
+    """Hash every source file that can change the hybrid result."""
+    files = [
+        Path(__file__),
+        PROJECT_DIR / "zero_line_detection" / "zero_line.py",
+        PROJECT_DIR / "zero_line_detection" / "colorbar.py",
+        PROJECT_DIR / "zero_line_detection" / "annotations.py",
+        PROJECT_DIR / "zero_line_detection" / "generate_final_hybrid_zero_line.py",
+        EXPERIMENT_DIR / "case2_route_adapter.py",
+        EXPERIMENT_DIR / "case2_route_selector.py",
+        EXPERIMENT_DIR / "generate_adaptive_zero_line_preview.py",
+    ]
+    files.extend(sorted((EXPERIMENT_DIR / "case2_original_pipeline").glob("*.py")))
+    digest = hashlib.sha256(_CACHE_SCHEMA.encode("ascii"))
+    for path in files:
+        try:
+            digest.update(path.relative_to(PROJECT_DIR).as_posix().encode("utf-8"))
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(str(path).encode("utf-8", errors="replace"))
+    return digest.hexdigest()[:20]
+
+
+_ENGINE_FINGERPRINT = _engine_fingerprint()
+
+
+def _cache_dir() -> Path:
+    configured = os.environ.get("ADC_LAB_CACHE", "").strip()
+    return Path(configured).expanduser() if configured else Path(__file__).resolve().parent / ".lab_cache"
+
+
+def _cache_key(image_bgr: np.ndarray, filename: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(_ENGINE_FINGERPRINT.encode("ascii"))
+    digest.update(filename.upper().encode("utf-8", errors="replace"))
+    digest.update(str(image_bgr.shape).encode("ascii"))
+    digest.update(str(image_bgr.dtype).encode("ascii"))
+    digest.update(np.ascontiguousarray(image_bgr).tobytes())
+    return digest.hexdigest()
+
+
+def _cache_path(image_bgr: np.ndarray, filename: str) -> Path:
+    return _cache_dir() / f"{_cache_key(image_bgr, filename)}.npz"
+
+
+def _load_cached(path: Path, shape: tuple[int, int]) -> "HybridZeroLineOutput | None":
+    try:
+        with np.load(path, allow_pickle=False) as payload:
+            mask = payload["mask"].astype(bool)
+            overlay = payload["overlay"].astype(np.uint8)
+            metadata = json.loads(payload["metadata"].tobytes().decode("utf-8"))
+        if mask.shape != shape or overlay.shape[:2] != shape:
+            raise ValueError("cached zero-line shape does not match the input")
+        return HybridZeroLineOutput(
+            mask=mask,
+            overlay_rgb=overlay,
+            case=int(metadata["case"]),
+            regions=int(metadata["regions"]),
+            ratio=float(metadata["ratio"]),
+            lines=list(metadata["lines"]),
+            warnings=list(metadata["warnings"]),
+        )
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        EOFError,
+        json.JSONDecodeError,
+        zipfile.BadZipFile,
+    ):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def _prune_cache(directory: Path) -> None:
+    try:
+        entries = [
+            item
+            for item in directory.glob("*.npz")
+            if len(item.stem) == 64 and all(character in "0123456789abcdef" for character in item.stem)
+        ]
+        entries.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+        for stale in entries[_CACHE_LIMIT:]:
+            stale.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _save_cached(path: Path, output: "HybridZeroLineOutput") -> None:
+    metadata: dict[str, Any] = {
+        "case": output.case,
+        "regions": output.regions,
+        "ratio": output.ratio,
+        "lines": output.lines,
+        "warnings": output.warnings,
+    }
+    temporary: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.parent / f".{path.stem}.{uuid.uuid4().hex}.tmp.npz"
+        encoded = np.frombuffer(
+            json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+            dtype=np.uint8,
+        )
+        np.savez_compressed(
+            temporary,
+            mask=output.mask.astype(np.uint8),
+            overlay=output.overlay_rgb.astype(np.uint8),
+            metadata=encoded,
+        )
+        os.replace(temporary, path)
+        _prune_cache(path.parent)
+    except OSError:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @dataclass
@@ -65,13 +198,25 @@ def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
     the first) even though the boundary is a closed loop. Consumers that draw
     this as an open polyline(<polyline> in the UI) would then show every
     region missing its last edge. Repeating the first point closes it.
+
+    Case 1 is produced from a raster area mask, so even CHAIN_APPROX_SIMPLE can
+    leave a handle at every tiny pixel stair-step.  Those points add no useful
+    editing precision.  Increase Douglas-Peucker tolerance only until the
+    editable contour has at most 32 vertices; the detection mask and raster
+    overlay remain untouched.
     """
     contours, _ = cv2.findContours(
         mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
     lines: list[dict] = []
     for index, contour in enumerate(contours, start=1):
-        points = contour.reshape(-1, 2)
+        perimeter = float(cv2.arcLength(contour, True))
+        epsilon = max(2.0, perimeter * 0.0015)
+        simplified = cv2.approxPolyDP(contour, epsilon, True)
+        while len(simplified) > 32 and epsilon < perimeter * 0.03:
+            epsilon *= 1.35
+            simplified = cv2.approxPolyDP(contour, epsilon, True)
+        points = simplified.reshape(-1, 2)
         if len(points) >= 2:
             closed = np.vstack([points, points[:1]])
             lines.append({"id": index, "points": closed.tolist()})
@@ -145,7 +290,11 @@ def _detect_from_review_inputs(
     )
 
 
-def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroLineOutput:
+def _detect_hybrid_zero_line_uncached(
+    image_bgr: np.ndarray,
+    filename: str,
+    base=None,
+) -> HybridZeroLineOutput:
     """Detect a UI-ready zero result, with a safe case-1 fallback.
 
     The distribution rule is shared with the review engine: separated zero
@@ -162,7 +311,8 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
         return review_result
 
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-    base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
+    if base is None:
+        base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
     fallback_part_px = max(1, int(base.part_mask.sum()))
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
@@ -241,3 +391,19 @@ def detect_hybrid_zero_line(image_bgr: np.ndarray, filename: str) -> HybridZeroL
             regions=len(base.result.regions), ratio=fallback_ratio, lines=fallback_lines,
             warnings=list(base.warnings) + [f"Case 2 경로 계산 실패로 Case 1 후보를 표시했습니다: {exc}"],
         )
+
+
+def detect_hybrid_zero_line(
+    image_bgr: np.ndarray,
+    filename: str,
+    base=None,
+) -> HybridZeroLineOutput:
+    """Return a content-cached result and optionally reuse basic detection."""
+    path = _cache_path(image_bgr, filename)
+    cached = _load_cached(path, image_bgr.shape[:2]) if path.is_file() else None
+    if cached is not None:
+        return cached
+
+    output = _detect_hybrid_zero_line_uncached(image_bgr, filename, base=base)
+    _save_cached(path, output)
+    return output

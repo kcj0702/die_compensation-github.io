@@ -48,3 +48,4 @@ ui/backend/file_operation_logs/
 ui/.env
 ui/backend/.label_cache.json
 cad_import/_parsed/
+zero_line_detection/.lab_cache/
