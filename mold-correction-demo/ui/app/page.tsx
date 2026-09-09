@@ -1348,29 +1348,10 @@ function AnalysisTabs({ active, result, scanReady, onSelect }: { active: Analysi
   })}</div>;
 }
 
-function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
-  const fileRef = useRef<HTMLInputElement>(null);
+function Header({ scans, activeId, setActiveId }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
   return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
-    {/* 작업 내용은 자동으로 이 PC 에 남는다. 파일로 빼두면 보관하거나
-        다른 사람에게 넘길 수 있다. */}
-    <div className="topbar__session">
-      {note && <span className="topbar__session-note">{note}</span>}
-      <button type="button" className="tool-button" onClick={onSaveFile}
-        title="고친 보정값과 설정을 파일로 내려받습니다">작업 저장</button>
-      <button type="button" className="tool-button"
-        onClick={() => fileRef.current?.click()}
-        title="저장해 둔 작업 파일을 불러옵니다">작업 불러오기</button>
-      <button type="button" className="tool-button" onClick={onReset}
-        title="이 PC 에 남은 작업 내용을 지웁니다">작업 비우기</button>
-      <input ref={fileRef} type="file" hidden accept="application/json,.json"
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onLoadFile(file);
-          event.target.value = '';
-        }} />
-    </div>
-    <button className="icon-button" aria-label="설정"><Settings2 size={19} /></button><div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
+    <div className="profile"><span>KJ</span><div><b>금형생산팀</b><small>관리자</small></div></div>
   </div></header>;
 }
 
@@ -1953,14 +1934,8 @@ function FileOrganizerPage() {
     return '01. 구조도';
   }).join(' / ');
   return <section className="page page--file-organizer">
-    <div className="page-heading"><div><h2>품번 태그로 파일을 자동 정리하세요</h2><p>파일명을 분석해 품번을 첫 폴더로 두고, 차종·카테고리·세부 하위폴더 순서로 로컬 또는 NAS에 복사·이동합니다.</p></div><div className="file-heading-actions"><button type="button" className="file-order-pill" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> {folderOrder.map(axisLabel).join(' → ')}</button><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
+    <div className="page-heading"><div><h2>품번 파일 정리</h2></div><div className="file-heading-actions"><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
     {notice && <div className={`file-organizer-notice ${notice.tone}`}>{notice.tone === 'success' ? <CheckCircle2 size={16} /> : notice.tone === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}<span>{notice.text}</span><button onClick={() => setNotice(null)} aria-label="알림 닫기"><X size={14} /></button></div>}
-    {showFolderOrder && <div className="card file-order-settings">
-      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>품번·차종·카테고리·세부 하위폴더의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 파일도 새 순서로 옮겨집니다.</small></span></div>
-      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
-      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
-      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
-    </div>}
     {showDatabase && <div className="card file-database-settings"><div><Database size={20} /><span><b>MariaDB 연결</b><small>파일은 로컬/NAS에, 태그와 작업 이력은 MariaDB에 저장됩니다.</small></span></div><input value={databaseUrl} onChange={(event) => setDatabaseUrl(event.target.value)} placeholder="mysql://사용자:비밀번호@서버:3306/file_organizer" /><button type="button" onClick={() => setDatabaseUrl('mysql://file_demo:file_demo_password@127.0.0.1:3307/file_organizer?charset=utf8mb4&connect_timeout=5')}>데모 설정</button><button type="button" className="primary-button" onClick={connectDatabase} disabled={busy}>연결 테스트·저장</button></div>}
     <div className="file-storage-strip">
       <div><Server size={18} /><span><small>원본 폴더</small><b title={status?.sourceRoot}>{status?.sourceRoot || '확인 중'}</b></span><em className={status?.sourceAvailable ? 'ok' : ''}>{status?.sourceAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('source')} title="탐색기에서 열기" aria-label="원본 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
@@ -1975,16 +1950,26 @@ function FileOrganizerPage() {
       <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
       <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
     </div>}
+    <div className="file-order-overview">
+      <div className="file-order-overview__value"><Layers3 size={22} /><span><b>폴더 정리 순서</b><strong>{folderOrder.map(axisLabel).join(' → ')}</strong></span></div>
+      <button type="button" className={showFolderOrder ? 'active' : ''} onClick={() => setShowFolderOrder((current) => !current)} aria-expanded={showFolderOrder}>{showFolderOrder ? '닫기' : '순서 변경'}<ChevronDown size={17} /></button>
+    </div>
+    {showFolderOrder && <div className="card file-order-settings">
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b></span></div>
+      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
+      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
+      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
+    </div>}
     <div className="file-organizer-grid">
       <div className="file-organizer-main">
-      <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3><p>외부 파일을 끌어 놓거나 지정된 원본 폴더를 스캔하세요.</p></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
+      <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
         <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
         <div className="file-organizer-table"><div className="file-organizer-table__head"><input type="checkbox" checked={items.length > 0 && selected.size === items.length} onChange={(event) => setSelected(event.target.checked ? new Set(items.map((item) => item.id)) : new Set())} aria-label="전체 선택" /><span>파일명 / 감지 태그</span><span>자료유형</span><span>예정 위치</span><span>신뢰도</span><span /></div>{items.map((item) => <div className="file-organizer-row" key={item.id} draggable onDragStart={(event) => { const ids = selected.has(item.id) ? [...selected] : [item.id]; event.dataTransfer.setData('text/ajin-file-ids', JSON.stringify(ids)); event.dataTransfer.effectAllowed = 'move'; }} title={item.reasons.join('\n')}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`${item.name} 선택`} /><span className="file-organizer-name"><File size={17} /><span><b>{item.name}</b><small>{[item.customer, item.itemNo, item.productName, item.process].filter(Boolean).join(' · ') || '품번 태그 미검출'} <em>{item.sourceKind === 'upload' ? '업로드' : '원본'}</em></small></span></span><span className={`file-category category-${item.categoryKey || 'unknown'}`}>{item.categoryKey || '--'} {item.categoryLabel}</span><span className="file-target-path" title={item.targetPath}>{item.targetDir || '_미분류'}</span><span className={`file-confidence ${item.confidence >= 70 ? 'good' : ''}`}>{item.confidence}%</span><button type="button" className="file-row-delete" onClick={() => removeItem(item)} aria-label={`${item.name} 대기열에서 삭제`} title="대기열에서 삭제"><Trash2 size={14} /></button></div>)}{!items.length && <div className="file-organizer-empty">분류할 파일이 아직 없습니다.</div>}</div>
         <div className="file-execute-bar"><div className="file-operation-switch"><button type="button" className={operation === 'copy' ? 'active' : ''} onClick={() => setOperation('copy')}><Copy size={14} /> 복사</button><button type="button" className={operation === 'move' ? 'active' : ''} onClick={() => setOperation('move')}><Move size={14} /> 이동</button></div><label>동명 파일<select value={conflict} onChange={(event) => setConflict(event.target.value as typeof conflict)}><option value="rename">자동 이름 변경</option><option value="skip">건너뛰기</option><option value="overwrite">덮어쓰기</option></select></label><button type="button" className="primary-button file-execute" onClick={execute} disabled={busy || !activeItems.length}>{busy ? '처리 중…' : `선택 ${activeItems.length}개 정리 실행`} <ArrowRight size={16} /></button></div>
       </div>
       <Explorer />
       </div>
-      <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3><p>파일을 끌어 놓아 위치를 바꾸세요. (실제 폴더 구조)</p></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div><div className="file-target-hint"><b>세부 자동 분류</b><span>금형도면은 LAYOUT·구조도·패턴도·완성도와 OP별로, 문서는 성형해석·보정이력으로, NC데이터는 OP10~OP50으로 나뉩니다.</span></div><div className="file-target-hint"><b>드래그 앤 드롭</b><span>파일을 폴더 위에 놓아 자동 분류 위치를 직접 수정할 수 있습니다.</span></div></aside>
+      <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div></aside>
     </div>
   </section>;
 }
@@ -2052,7 +2037,7 @@ function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, del
   onDelete: (entry: CorrectionHistoryEntry) => void;
 }) {
   return <div className="card correction-history">
-    <div className="card-title"><div><h3>보정 이력</h3><p>{partNo} 품번 수동 수정 기록입니다.</p></div><button type="button" className="correction-history__reload" onClick={onReload} disabled={loading} aria-label="이력 새로고침" title="이력 새로고침">↻</button></div>
+    <div className="card-title"><div><h3>보정 이력</h3></div><button type="button" className="correction-history__reload" onClick={onReload} disabled={loading} aria-label="이력 새로고침" title="이력 새로고침">↻</button></div>
     {error && <p className="correction-history__message correction-history__message--error" role="alert">{error}</p>}
     {entries.length === 0 ? <p className="correction-history__empty">{loading ? '불러오는 중…' : '기록된 수정 이력이 없습니다.'}</p> : <ul className="correction-history__list">{entries.map((entry) => {
       const busy = pendingPointIds.has(entry.pointId) || deletingEntryIds.has(entry.id);
@@ -2713,7 +2698,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
     setShowZero(true);
   };
   return <section className="page page--service">
-    <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
+    <div className="page-heading page-heading--compact"><div><h2>보정 시트 작성</h2></div></div>
     <div className="service-grid"><div className="correction-card card">
       <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <div className="sheet-image-toolbar" role="toolbar" aria-label="보정시트 이미지 방향">
@@ -2737,7 +2722,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
         <button type="button" className="sheet-print" onClick={() => void saveSheetExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
         <button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button>
       </div>
-    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) onCoefficientChange(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) onCoefficientChange(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
   </section>;
 }
 
@@ -3113,7 +3098,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   }, [selected?.key]); // CAD 탭을 바꾸면 해당 CAD 좌표로 다시 투영한다.
 
   return <section className="page page--workspace">
-    <div className="page-heading"><div><span className="breadcrumb">ADC WORKSPACE</span><h2>3D CAD 뷰어</h2><p>STEP과 메시 파일을 여러 개 열어 비교하고 측정·주석·공정 영역을 유지합니다.</p></div></div>
+    <div className="page-heading"><div><h2>3D CAD 뷰어</h2></div></div>
     <div className="card upload-panel">
       <label className="dropzone">
         <input type="file" multiple accept=".catpart,.step,.stp,.stl,.ply,.obj,.off,.glb,.gltf,.3mf" onChange={(event: ChangeEvent<HTMLInputElement>) => {
@@ -3211,7 +3196,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         />
       </div>
       {zoneKey && <div className="cad-zone-book card">
-        <div className="card-title"><div><h3>표준 공정 구역</h3><p>{zoneKey} 품번에 저장되어 같은 부품 CAD를 다시 열어도 표시됩니다.</p></div>
+        <div className="card-title"><div><h3>표준 공정 구역</h3></div>
           <button type="button" className="tool-button" onClick={() => setZonesByPart((current) => ({ ...current, [zoneKey]: [...(current[zoneKey] || []), { id: `S-${Date.now().toString(36)}`, standard: true, die: '하형', work: '용접', note: '', box: { min: [0, 0, 0], max: [100, 100, 100] } }] }))}>구역 추가</button>
         </div>
         {standardZones.map((zone, index) => <div className="cad-zone-row" key={zone.id}>
