@@ -3252,6 +3252,21 @@ export default function Home() {
   const [zeroEditsByScan, setZeroEditsByScan] = useState<Record<string, ZeroEdit[]>>({});
   const sessionRef = useRef<SessionSnapshot>(emptySession());
   const [sessionLoaded, setSessionLoaded] = useState(false);
+  /* 화면이 새로 붙는 순간에는 물려 있는 분석 요청이 있을 수 없다.
+   *
+   * 분석 중에 화면이 다시 그려지면(개발 중 파일 수정, 새로고침, 작업
+   * 불러오기) 돌던 반복문이 딸린 화면째 버려진다. 그런데 상태는 '분석 중'
+   * 인 채로 남고, 그 상태에서는 분석 버튼이 잠긴다 — 서버는 놀고 있는데
+   * 사람은 30분을 기다려도 아무 일이 안 일어나고 다시 누를 수도 없다.
+   * 붙는 순간 '오류' 로 돌려 이유를 보이고 다시 누를 수 있게 한다. */
+  useEffect(() => {
+    setScans((current) => current.some((scan) => scan.status === 'analyzing')
+      ? current.map((scan) => scan.status === 'analyzing'
+        ? { ...scan, status: 'error' as const,
+            error: '화면이 다시 그려지며 분석이 끊겼습니다 — 다시 눌러 주세요.' }
+        : scan)
+      : current);
+  }, []);
   /* 작업자 이름은 보정 이력에 남기는 용도라 브라우저에 저장해 다음에도 다시 입력하지 않게 한다. */
   const [worker, setWorker] = useState(() => (typeof window === 'undefined' ? '' : window.localStorage.getItem('adc-worker-name') || ''));
   useEffect(() => { if (typeof window !== 'undefined') window.localStorage.setItem('adc-worker-name', worker); }, [worker]);
