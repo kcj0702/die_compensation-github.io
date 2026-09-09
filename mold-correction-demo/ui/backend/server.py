@@ -93,6 +93,7 @@ from product_alignment.registry import (  # noqa: E402
     part_number_from_name,
     read_image,
 )
+from point_selection import select_key_points  # noqa: E402
 from sheet_export import (  # noqa: E402
     SheetAnnotation,
     SheetPoint,
@@ -1557,6 +1558,14 @@ def analyze_image(
         errors["deviation"] = str(exc)
 
     # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
+    # 검출 결과는 모두 보존하고, 표시 필터가 사용할 주요 포인트 ID만 덧붙인다.
+    selection = select_key_points(points)
+    key_reasons = {key.point_id: list(key.reasons) for key in selection.keys}
+    for point in points:
+        reasons = key_reasons.get(point["id"])
+        if reasons:
+            point["keyReasons"] = reasons
+
     transferred = 0
     if alignment is not None:
         product_width, product_height = alignment.product_size
@@ -1628,6 +1637,7 @@ def analyze_image(
             if alignment_overlay is not None
             else None
         ),
+        "keySelection": selection.to_dict(),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)
@@ -3219,6 +3229,15 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             web["holes"] = _shift_centers(parsed["holes"], offset)
             web["planes"] = _shift_centers(parsed["planes"][:50], offset)
             web["counts"] = parsed["counts"]
+            # CATIA 가 STEP 에 넣어 둔 면 색. 화면은 넓이가 가장 넓은 색을
+            # 부품 색으로 쓴다 — 시트에 실었을 때 CATIA 에서 보던 것과
+            # 같은 색으로 보이라는 것이다.
+            tone = parsed.get("colour") or {}
+            web["colour"] = tone.get("dominant")
+            web["palette"] = list(tone.get("palette", {}).keys())[:8]
+            # 한 부품이 여러 색이면 삼각형 구간으로 준다 — 실측 71XX1 은
+            # 회색 몸통(74,594)에 아랫부분만 분홍(11,581)이다.
+            web["colourGroups"] = parsed.get("colour_groups") or []
 
             # 오버레이(제로라인·보정량)를 그리려면 원본 삼각망이 필요하다.
             # 화면용 메시는 간략화돼 있어 광선 교차에 쓰면 어긋난다.
@@ -3412,6 +3431,124 @@ def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
                      json.dumps(fit_adjust or {}, sort_keys=True)])
 
 
+def scan_workspace_for(cad_id: str, path: str) -> dict[str, Any]:
+    """검사 원본(PolyWorks 워크스페이스)에서 보정 포인트를 그대로 가져온다.
+
+    [왜 정합을 하지 않나]
+    PNG 경로는 그림에서 값을 읽고, 실루엣을 맞춰 CAD 에 얹는다. 그
+    얹힘이 정합률이었다. 워크스페이스에는 검사 포인트가 **부품 좌표로**
+    들어 있어 맞출 것이 없다. 실측으로 확인했다 — 64XX2 의 포인트 79개를
+    64XX1-DR000_HDCT1860 표면까지 재니 중앙 0.49mm · 최대 1.04mm 이고,
+    남는 0.5mm 는 STEP 삼각망의 현 오차다(편차 크기와 상관이 +0.02 로
+    없다). 그래서 자리를 옮기지 않고 그대로 쓴다.
+
+    파일은 올리지 않고 경로로 읽는다. 실측 워크스페이스가 1.9GB 라
+    브라우저로 올릴 물건이 아니고, 어차피 이 PC 안에서만 도는 게 이
+    프로젝트의 전제다.
+
+    Returns:
+        cad-overlay 와 같은 모양. 화면이 그대로 쓸 수 있게 맞춘다.
+        다만 정합을 하지 않았으므로 fit 대신 source 로 알린다.
+    """
+    from cad_import import polyworks
+
+    cad_entry = _cad_cache.get(cad_id)
+    if cad_entry is None:
+        raise ValueError("CAD 가 만료됐습니다. 3D 파일을 다시 여세요.")
+
+    spot = Path(path.strip().strip('"'))
+    if not spot.exists():
+        raise ValueError(f"그 자리에 파일이 없습니다: {spot}")
+
+    found = polyworks.inspection_points(spot)
+    if not found:
+        raise ValueError("검사 포인트를 찾지 못했습니다. PolyWorks 워크스페이스가 맞나요?")
+
+    offset = np.asarray(cad_entry["offset"], dtype=float)
+    points: list = []
+    for order, item in enumerate(found):
+        if item.deviation is None:
+            continue
+        cad_spot = np.asarray(item.position, dtype=float)
+        points.append({
+            "id": item.name or f"pt {order + 1}",
+            "position": [round(float(v), 3) for v in (cad_spot - offset)],
+            "cad": [round(float(v), 3) for v in cad_spot],
+            "value": round(float(item.deviation), 3),
+        })
+
+    # 얼마나 잘 앉았는지는 재서 알려 준다 — 믿고 쓰라고만 하지 않는다.
+    away = None
+    try:
+        import trimesh
+
+        mesh = cad_entry["mesh"]
+        probe = np.asarray([p["cad"] for p in points], dtype=float)
+        _, gap, _ = trimesh.proximity.closest_point(mesh, probe)
+        away = {"median": round(float(np.median(gap)), 3),
+                "max": round(float(np.max(gap)), 3)}
+    except Exception:
+        away = None                       # 못 재도 포인트는 쓸 수 있다
+
+    # 화면은 fit 을 그냥 참조한다. 정합을 안 했다고 없애면 터지므로
+    # 자리는 채우되 **지표는 지어내지 않는다** — hit_rate·iou 를 비워
+    # 두고, 얼마나 잘 앉았는지는 surfaceGap 으로 따로 알린다.
+    #
+    # axis 는 라벨을 어느 평면에 세울지 정하는 데만 쓴다. 판금은 가장
+    # 얇은 축이 곧 판을 마주 보는 방향이라 그걸 고른다.
+    span = np.asarray(cad_entry["mesh"].bounds[1]) - np.asarray(
+        cad_entry["mesh"].bounds[0])
+    thin = int(np.argmin(span))
+
+    return {
+        "source": "workspace",
+        "sourceName": spot.name,
+        "points": points,
+        "zeroLines": [],                  # 워크스페이스는 제로라인을 주지 않는다
+        "rejected": [], "mended": [],
+        "surfaceGap": away,
+        "fit": {"axis": thin, "sign": 1, "flip_u": False, "flip_v": False,
+                "mm_per_px": 0.0, "iou": 0.0, "reliable": True},
+    }
+
+
+def _mend_decimal(value: float, limit: float,
+                  slack: float = 2.0) -> float | None:
+    """판독에서 날아간 소수점을 되살린다. 못 살리면 None.
+
+    [정답과 대 보고 알아낸 것]
+    64XX2 워크스페이스(검사 포인트 79개, 값이 확정)와 우리 판독을 견줬더니
+    컬러바(+-2.0mm) 밖의 값이 15개 나왔다 — -10, 6, 6, 6, 6, 6, 8, 9, 9,
+    9, 9, 60, 80, 80. 그런데 정답에는 -1.0, 0.6, 0.8, 0.9 가 있다.
+    **소수점이 빠진 것**이지 엉뚱한 숫자를 읽은 게 아니었다.
+
+    10 으로 나눠 범위 안에 들어오면 그 값을 쓴다. 다만 진짜로 컬러바를
+    넘는 값도 있다 — 이 부품의 정답 최솟값이 -2.79mm 로 컬러바 +-2.0 을
+    넘는다(공차를 벗어난 자리는 컬러바 밖으로도 찍힌다). 그래서 한계의
+    slack 배까지는 그대로 두고 그보다 멀 때만 손댄다.
+
+    [배수를 어떻게 정했나 — 정답 79개로 훑었다]
+        배수   일치    되살린 뒤 범위밖   진짜 값을 잘못 고침
+        1.0   52/79          0                 1   <- -2.8 을 -0.28 로 망침
+        1.5   52/79          0                 0
+        2.0   52/79          0                 0   <- 가운데를 쓴다
+        2.5   52/79          0                 0
+        3.0   49/79          0                 0   <- 되살릴 것을 놓친다
+    1.5~2.5 가 안전 구간이라 가운데인 2.0 을 쓴다. 이 고침만으로 값
+    일치가 57% 에서 66% 로 오르고 불가능한 값이 0 이 된다.
+    """
+    if not np.isfinite(value) or limit <= 0:
+        return None
+    if abs(value) <= limit * slack:
+        return None                       # 진짜로 컬러바를 넘는 값이다
+    moved = float(value)
+    for _ in range(3):                    # 소수점이 세 자리까지 밀릴 수 있다
+        moved /= 10.0
+        if abs(moved) <= limit * slack:
+            return moved
+    return None
+
+
 def cad_overlay_for(cad_id: str, analysis_id: str,
                     zero_edits: list | None = None,
                     fit_adjust: dict | None = None) -> dict[str, Any]:
@@ -3602,12 +3739,18 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     span = next((v for k, v in PRODUCT_COLORBAR_MM.items() if k in folded), None)
     limit = max(abs(span[0]), abs(span[1])) * 1.05 if span else None
 
-    wanted, rejected = [], []
+    wanted, rejected, mended = [], [], []
     for point in analysis.get("deviation_points", []):
         value = float(point.get("value", 0.0))
         if limit is not None and abs(value) > limit:
-            rejected.append({"id": point.get("id"), "value": round(value, 3)})
-            continue
+            fixed = _mend_decimal(value, limit)
+            if fixed is None:
+                rejected.append({"id": point.get("id"),
+                                 "value": round(value, 3)})
+                continue
+            mended.append({"id": point.get("id"), "was": round(value, 3),
+                           "value": round(fixed, 3)})
+            point = {**point, "value": fixed}
         wanted.append(point)
 
     # 광선은 한 번에 쏘는 게 훨씬 빠르다
@@ -3732,6 +3875,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     answer = {
             "fit": fit.to_dict(), "zeroLines": lines, "points": points,
             "rejected": rejected,
+            # 소수점을 되살린 판독. 조용히 고치면 사람이 모르므로 알린다.
+            "mended": mended,
             "zeroSurface": zero_surface,
             "zeroAreas": zero_areas,
             "zeroKind": "areas" if area_contours else (reference.get("kind") or "line"),
@@ -3749,6 +3894,120 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     while len(_overlay_cache) > _OVERLAY_CACHE_MAX:
         _overlay_cache.popitem(last=False)
     return answer
+
+
+def sheet_excel_for(analysis_id: str, corrections: dict,
+                    meta: dict, images: list | None = None,
+                    image_labels: list | None = None) -> bytes:
+    """최종 보정시트를 현업 엑셀 양식으로 만든다.
+
+    보정량은 화면이 준다 — 작업자가 고친 값과 계수가 반영된 최종값이다.
+    여기서 다시 계산하면 시트와 엑셀이 어긋난다.
+
+    [그림]
+    현업 시트("보정 적용 내용")는 스캔 히트맵이 아니라 **3D 형상 그림**을
+    쓴다. 그래서 화면에서 찍은 3D 뷰를 받으면 그걸 쓰고, 없으면 스캔에
+    콜아웃을 그려 넣은 그림으로 대신한다.
+    여러 장을 주면 페이지를 나눠 넣는다 — 실제 시트도 전체도와 확대도를
+    따로 싣는다.
+    """
+    from zero_line_detection.sheet_excel import (
+        SheetPoint, build_workbook, draw_sheet_image,
+    )
+
+    entry = _analysis_cache.get(analysis_id)
+    if entry is None:
+        raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
+
+    base_rgb = entry.get("overlay_base")
+    if base_rgb is None:
+        raise ValueError("시트에 쓸 그림이 없습니다.")
+    base_bgr = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2BGR)
+
+    points = []
+    for point in entry.get("deviation_points", []):
+        point_id = point.get("id")
+        if point_id not in corrections:      # 작업자가 숨긴 포인트
+            continue
+        points.append(SheetPoint(
+            point_id=point_id,
+            x_px=int(point.get("xPx", 0)),
+            y_px=int(point.get("yPx", 0)),
+            deviation=float(point.get("value", 0.0)),
+            correction=float(corrections[point_id]),
+        ))
+    points.sort(key=lambda p: p.point_id)
+
+    pages: list = []
+    captions: list = []
+    labels = list(image_labels or [])
+    for order, raw in enumerate(images or []):
+        text = str(raw or "")
+        if "," in text:
+            text = text.split(",", 1)[1]
+        try:
+            buffer = np.frombuffer(base64.b64decode(text), dtype=np.uint8)
+            shot = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        except Exception:
+            shot = None
+        if shot is not None:
+            pages.append(shot)
+            # 어느 시점에서 찍은 그림인지 쪽마다 적어 둔다. 3D 화면은
+            # 돌려 놓고 찍으면 나중에 방향을 못 가린다.
+            name = str(labels[order]) if order < len(labels) else ""
+            captions.append(f"3D 형상 · {name}" if name else "3D 형상")
+    # 1쪽은 **항상** 스캔에 보정치를 그린 전체도다. 예전에는 3D 화면을
+    # 담아 두면 그걸로 1쪽을 통째로 대체해서, 정합이 어긋난 CAD 캡처
+    # 한 장이 시트가 됐다 — "71XX2 로 만들었는데 다른 제품이 나온다" 는
+    # 말이 그것이었다. 현업 시트도 전체도가 먼저고 상세도가 뒤따른다.
+    pages = [draw_sheet_image(base_bgr, points)] + pages
+    captions = ["스캔 전체도 · 보정치"] + captions
+
+    return build_workbook(
+        pages, points,
+        captions=captions,
+        part_no=str(meta.get("partNo") or entry.get("part_no") or ""),
+        part_name=str(meta.get("partName") or ""),
+        process=str(meta.get("process") or ""),
+        material=str(meta.get("material") or ""),
+        control_no=str(meta.get("controlNo") or ""),
+        applied_at=str(meta.get("appliedAt") or "") or None,
+        coefficient=float(meta.get("coefficient") or 1.0),
+        processes=[str(x) for x in (meta.get("processes") or [])],
+    )
+
+
+async def sheet_excel(request: Request) -> Response:
+    try:
+        body = await request.json()
+        corrections = body.get("corrections") or {}
+        if not isinstance(corrections, dict) or not corrections:
+            return JSONResponse({"error": "보정량이 비어 있습니다."}, status_code=400)
+        images = body.get("images")
+        if isinstance(images, str):
+            images = [images]
+        image_labels = body.get("imageLabels")
+        payload = await run_in_threadpool(
+            sheet_excel_for, str(body.get("analysisId") or ""),
+            {str(k): float(v) for k, v in corrections.items()},
+            body.get("meta") or {},
+            images if isinstance(images, list) else None,
+            image_labels if isinstance(image_labels, list) else None,
+        )
+        name = str(body.get("filename") or "보정시트") + ".xlsx"
+        quoted = quote(name)
+        return Response(
+            payload,
+            media_type=("application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet"),
+            headers={"Content-Disposition":
+                     f"attachment; filename*=UTF-8''{quoted}"},
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
 
 def cad_morph_for(cad_id: str, corrections: dict, positions: dict,
                   reach_ratio: float) -> dict[str, Any]:
@@ -4003,6 +4262,21 @@ async def cad_sections(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+async def scan_workspace(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            scan_workspace_for,
+            str(body.get("cadId") or ""),
+            str(body.get("path") or ""),
+        )
+        return JSONResponse(result)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad_overlay(request: Request) -> JSONResponse:
     try:
         body = await request.json()
@@ -4071,8 +4345,12 @@ app = Starlette(
         Route("/api/mesh/reveal", mesh_reveal, methods=["POST"]),
         Route("/api/mesh/source", mesh_source, methods=["GET", "POST"]),
         Route("/api/alignment", confirm_alignment, methods=["POST"]),
+        # 보정시트 엑셀. main 은 프론트가 이 라우트를 두 곳에서 부르는데
+        # 백엔드에서 지워져 있었다 — 눌러도 아무 일도 안 일어난다.
+        Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/scan-workspace", scan_workspace, methods=["POST"]),
         Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
         Route("/api/cad-morph-open", cad_morph_open, methods=["POST"]),

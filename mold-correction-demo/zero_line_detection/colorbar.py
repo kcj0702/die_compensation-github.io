@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shared.schemas import ColorbarInfo  # noqa: E402
+from zero_line_detection.schemas import ColorbarInfo  # noqa: E402
 
 
 # 무지개 램프의 정식 양 끝 색. 이 색에서 멀면 컬러바가 잘린 것으로 본다.

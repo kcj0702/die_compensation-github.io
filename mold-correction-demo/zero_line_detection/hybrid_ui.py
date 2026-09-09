@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import uuid
 import zipfile
 from dataclasses import dataclass
@@ -24,10 +23,7 @@ from zero_line_detection.visualize import make_overlay
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
 
-PROJECT_DIR = Path(__file__).resolve().parents[1]
-EXPERIMENT_DIR = PROJECT_DIR / "experiments" / "zero_line_area_edge_preview"
-if str(EXPERIMENT_DIR) not in sys.path:
-    sys.path.insert(0, str(EXPERIMENT_DIR))
+PACKAGE_DIR = Path(__file__).resolve().parent
 
 _CACHE_SCHEMA = "hybrid-zero-v2"
 _CACHE_LIMIT = 32
@@ -37,19 +33,19 @@ def _engine_fingerprint() -> str:
     """Hash every source file that can change the hybrid result."""
     files = [
         Path(__file__),
-        PROJECT_DIR / "zero_line_detection" / "zero_line.py",
-        PROJECT_DIR / "zero_line_detection" / "colorbar.py",
-        PROJECT_DIR / "zero_line_detection" / "annotations.py",
-        PROJECT_DIR / "zero_line_detection" / "generate_final_hybrid_zero_line.py",
-        EXPERIMENT_DIR / "case2_route_adapter.py",
-        EXPERIMENT_DIR / "case2_route_selector.py",
-        EXPERIMENT_DIR / "generate_adaptive_zero_line_preview.py",
+        PACKAGE_DIR / "zero_line.py",
+        PACKAGE_DIR / "colorbar.py",
+        PACKAGE_DIR / "annotations.py",
+        PACKAGE_DIR / "generate_final_hybrid_zero_line.py",
+        PACKAGE_DIR / "case2_route_adapter.py",
+        PACKAGE_DIR / "case2_route_selector.py",
+        PACKAGE_DIR / "adaptive_bundle" / "generate_adaptive_zero_line_preview.py",
     ]
-    files.extend(sorted((EXPERIMENT_DIR / "case2_original_pipeline").glob("*.py")))
+    files.extend(sorted((PACKAGE_DIR / "case2_original_pipeline").glob("*.py")))
     digest = hashlib.sha256(_CACHE_SCHEMA.encode("ascii"))
     for path in files:
         try:
-            digest.update(path.relative_to(PROJECT_DIR).as_posix().encode("utf-8"))
+            digest.update(path.relative_to(PACKAGE_DIR).as_posix().encode("utf-8"))
             digest.update(path.read_bytes())
         except OSError:
             digest.update(str(path).encode("utf-8", errors="replace"))
@@ -183,7 +179,7 @@ def _matching_review_spec(filename: str):
     for the supplied standard scans; re-estimating those from an uploaded PNG
     changes the connected components and can select the wrong case.
     """
-    import generate_adaptive_zero_line_preview as kdt
+    from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
 
     normalized = filename.upper()
     return next(
@@ -232,7 +228,7 @@ def _detect_from_review_inputs(
     in-memory path.  A size mismatch also must not apply a mask at wrong
     pixels.
     """
-    import generate_adaptive_zero_line_preview as kdt
+    from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
     from zero_line_detection import generate_final_hybrid_zero_line as hybrid
 
     spec = _matching_review_spec(filename)
@@ -301,11 +297,13 @@ def _detect_hybrid_zero_line_uncached(
     components whose total area is below 40% choose case 1; all other inputs
     choose the original case-2 routing implementation.
     """
+    # Known reviewed parts must use the exact correction-only masks that the
+    # original Case 1/2 decision was approved against.  The data lives in the
+    # review-results directory, while every executable selection module is
+    # loaded from zero_line_detection.
     try:
         review_result = _detect_from_review_inputs(image_bgr, filename)
     except Exception:
-        # A missing review asset must not make the standard-scan shortcut a
-        # single point of failure for an otherwise valid upload.
         review_result = None
     if review_result is not None:
         return review_result
@@ -316,9 +314,9 @@ def _detect_hybrid_zero_line_uncached(
     fallback_part_px = max(1, int(base.part_mask.sum()))
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
-        import case2_route_adapter as case2  # loaded from EXPERIMENT_DIR
+        from zero_line_detection import case2_route_adapter as case2
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
-        import generate_adaptive_zero_line_preview as kdt
+        from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
 
         # UI에서도 검토 엔진과 같은 ±0.6 mm 보정영역 기준을 사용한다.
         # 기존 zero_line의 자동 tolerance(컬러바 범위의 10%)는 여기서 쓰지 않는다.

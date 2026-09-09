@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import './immersive-workspace.css';
 
 export const metadata: Metadata = {
   title: 'ADC | Ajin Die Compensation',

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -18,6 +19,26 @@ _mask_contours_as_lines = hybrid_ui._mask_contours_as_lines
 
 
 class HybridUiEditPointTests(unittest.TestCase):
+    def test_runtime_selection_modules_stay_inside_zero_line_package(self) -> None:
+        from zero_line_detection import case2_route_adapter
+        from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview
+
+        package_dir = Path(hybrid_ui.__file__).resolve().parent
+        runtime_modules = (
+            hybrid_ui,
+            case2_route_adapter,
+            case2_route_adapter.selector,
+            generate_adaptive_zero_line_preview,
+        )
+        for module in runtime_modules:
+            with self.subTest(module=module.__name__):
+                self.assertTrue(Path(module.__file__).resolve().is_relative_to(package_dir))
+
+        normalized_paths = [str(Path(item).resolve()).replace("\\", "/") for item in sys.path]
+        self.assertFalse(
+            any("/experiments/zero_line_area_edge_preview" in item for item in normalized_paths)
+        )
+
     def test_case1_contour_is_closed_and_handle_count_is_bounded(self) -> None:
         mask = np.zeros((420, 420), dtype=np.uint8)
         angles = np.linspace(0, 2 * np.pi, 180, endpoint=False)

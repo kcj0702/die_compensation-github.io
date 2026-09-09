@@ -38,7 +38,7 @@ LABEL_TEXT_NEGATIVE_COLOR = "1A56C4"
 # 측정 포인트에 찍는 작은 원. 지금까지는 지시선 끝의 tailEnd 만 있어서 눈에 잘
 # 안 띄고, 라벨/지시선과 함께 잡아 옮길 대상도 없었다. 라벨과 같은 그룹에
 # 넣어 셋이 한 덩어리로 움직이도록 만든다.
-POINT_DOT_RADIUS = 4       # px
+POINT_DOT_RADIUS = 3       # px
 POINT_DOT_COLOR = "9B1C1C"
 
 # 제로라인. 두께는 뷰 박스 폭에 대한 비율로 둔다 -- 이미지 원본 해상도가

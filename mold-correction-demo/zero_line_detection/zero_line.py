@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from shared.schemas import ZeroLineRegion, ZeroLineResult  # noqa: E402
+from zero_line_detection.schemas import ZeroLineRegion, ZeroLineResult  # noqa: E402
 from zero_line_detection.annotations import build_annotation_mask  # noqa: E402
 from zero_line_detection.colorbar import Colorbar, detect_colorbar  # noqa: E402
 

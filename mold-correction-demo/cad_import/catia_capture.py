@@ -276,6 +276,27 @@ def _isolate_part(captured: np.ndarray) -> tuple[np.ndarray, int, int]:
     foreground = (gray < 245).astype(np.uint8)
 
     long_side = max(captured.shape[:2])
+    # 오프닝 **전에** 먼저 틈을 메운다.
+    #
+    # [무엇이 잘못됐었나] CATIA 가 부품을 통칠하지 않고 가는 선으로 그려
+    # 보내는 때가 있다. 실측 64XX2 캡처(2499x1209)를 재 보니 부품 상자
+    # 안이 어두운 선 41.5% 와 흰 배경 57.8% 로 갈리고 그 사이 밝기는
+    # 거의 없었다 — 통칠이 아니라 **빗금**이다. 그 상태로 16px 오프닝을
+    # 걸면 가는 선이 전부 지워지고, 살아남는 것은 왼쪽 위 스펙 트리
+    # 아이콘(40x44)뿐이라 그 아이콘이 "가장 큰 덩어리" 로 뽑혔다.
+    # 보정시트 배경이 46x50 짜리 알록달록한 조각으로 나온 것이 이것이다.
+    #
+    # 닫기(팽창 후 침식)로 빗금 사이를 먼저 메우면 부품이 한 덩이가
+    # 되고, 그 뒤 오프닝은 원래 하려던 일(가는 UI 요소 지우기)만 한다.
+    # 캐시된 캡처 16장으로 재 보니 200 으로 나눈 커널에서 실패하던 4장이
+    # 모두 제 크기(1061x397 · 473x1064 · 1064x473)로 돌아왔고 나머지는
+    # 그대로였다. 100 으로 더 키우면 71XX2 한 장이 화면 높이를 통째로
+    # 삼켜 오히려 나빠진다.
+    close_kernel_size = max(3, long_side // 200)
+    foreground = cv2.morphologyEx(
+        foreground, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (close_kernel_size, close_kernel_size)))
     open_kernel_size = max(5, long_side // 150)
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_kernel_size, open_kernel_size))
     opened = cv2.morphologyEx(foreground, cv2.MORPH_OPEN, open_kernel)
