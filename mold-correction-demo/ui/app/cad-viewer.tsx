@@ -1805,6 +1805,25 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       return raycaster.intersectObject(surface, false)[0]?.point ?? null;
     };
 
+    /* 형상 **밖**을 눌러도 자리를 잡아 준다.
+     *
+     * 네모·동그라미를 그릴 때 시작점과 끝점이 둘 다 형상 위여야 했다.
+     * 그러면 부품 가장자리를 넘겨 끌 수가 없어서, 가리기로 바깥쪽을
+     * 훑어도 테두리가 남았다 — "좀 남는 느낌" 이 그것이다.
+     *
+     * 형상에 맞으면 그 자리를 쓰고, 빗나가면 부품 한가운데를 지나며
+     * 화면을 마주 보는 평면에 찍는다. 그리는 도형은 어차피 화면 가로·세로
+     * 축으로 만들므로 깊이는 상관이 없다. */
+    const viewPlane = new THREE.Plane();
+    const anyHit = (event: PointerEvent) => {
+      const onPart = surfaceHit(event);
+      if (onPart) return onPart;
+      viewPlane.setFromNormalAndCoplanarPoint(
+        camera.getWorldDirection(new THREE.Vector3()).negate(), target);
+      const spot = new THREE.Vector3();
+      return raycaster.ray.intersectPlane(viewPlane, spot) ? spot : null;
+    };
+
     /** 두 점으로 만든 네모/동그라미의 테두리 점들. */
     const outline = (kind: 'rect' | 'circle', middle: THREE.Vector3,
                      u: THREE.Vector3, v: THREE.Vector3,
@@ -1830,7 +1849,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         stampAt(event);
         return;
       }
-      const spot = surfaceHit(event);
+      const spot = anyHit(event);
       if (!spot) return;
       dragFrom = spot;
       // 끌기 시작 순간의 화면 가로·세로 축을 그대로 쓴다
@@ -1845,7 +1864,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         return;
       }
       if (!dragFrom) return;
-      const spot = surfaceHit(event);
+      const spot = anyHit(event);
       if (!spot) return;
       const gap = spot.clone().sub(dragFrom);
       const hu = Math.abs(gap.dot(dragU)) / 2;
@@ -1866,7 +1885,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         dragFrom = null; return;
       }
       preview.visible = false;
-      const spot = surfaceHit(event);
+      const spot = anyHit(event);
       const start = dragFrom;
       dragFrom = null;
       if (!spot) return;
