@@ -44,28 +44,13 @@ class SheetAnnotation:
 
 @dataclass
 class SheetView:
-    """One picture on the sheet with the points that belong to it.
-
-    ``label_positions`` mirrors what the UI actually drew for each point on
-    this specific view -- the label box top-left as a ratio of the picture
-    (0..1 inside, negative or > 1 when the label sits outside in the sheet
-    margin). Keyed by ``SheetPoint.point_id``. When present ``place_labels``
-    honours these positions verbatim (so a manually dragged label survives
-    the round trip to Excel); missing entries fall back to auto-placement.
-    """
+    """One picture on the sheet with the points that belong to it."""
 
     image: np.ndarray
     points: list[SheetPoint] = field(default_factory=list)
     annotations: list[SheetAnnotation] = field(default_factory=list)
     title: str = ""
     box: tuple[float, float, float, float] | None = None  # x, y, width, height
-    label_positions: dict[str, tuple[float, float]] = field(default_factory=dict)
-    # Reference zero-curve polylines, each a list of (x_ratio, y_ratio) in
-    # this view's own image (same 0..1 convention as SheetPoint). Exported as
-    # its own vector shape rather than baked into the picture, so the sheet
-    # keeps the part image and the zero-line as two independently selectable
-    # objects.
-    zero_lines: list[list[tuple[float, float]]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -145,86 +130,20 @@ def default_layout(views: Sequence[SheetView]) -> None:
         )
 
 
-def _resolve_collisions(natural: list[float], size: float, gap: float) -> list[float]:
-    """Push overlapping labels apart without leaning the whole group one way.
-
-    A forward-only pass (each label pushed past the previous one) anchors the
-    whole chain on the *first* label: when the group is too crowded to fit
-    without overlap, every later label gets shoved further and further past
-    its own point, and the group's leaders all slant the same direction
-    instead of the row looking centered on the points it labels -- a crowded
-    edge visibly runs off the side of the sheet instead of fanning out
-    around its points.
-
-    Anchoring a second chain on the *last* label (pulling each one left of
-    its right neighbour) gives the mirror-image layout -- now the first
-    label is the one shoved away from its point. Averaging the two chains
-    centers the unavoidable overlap instead of dumping it on either end.
-    Averaging can reintroduce a hair of overlap between adjacent averaged
-    positions (each was only guaranteed non-overlapping against its own
-    anchor direction), so a final forward pass over the averaged values
-    re-enforces the minimum gap -- by this point the values are already
-    balanced, so that pass rarely needs to move anything.
-    """
-    if not natural:
-        return []
-    n = len(natural)
-    forward = [natural[0]] + [0.0] * (n - 1)
-    for i in range(1, n):
-        forward[i] = max(natural[i], forward[i - 1] + size + gap)
-    backward = [0.0] * (n - 1) + [natural[-1]]
-    for i in range(n - 2, -1, -1):
-        backward[i] = min(natural[i], backward[i + 1] - size - gap)
-    centered = [(f + b) / 2 for f, b in zip(forward, backward)]
-    resolved = [centered[0]]
-    for value in centered[1:]:
-        resolved.append(max(value, resolved[-1] + size + gap))
-    return resolved
-
-
 def place_labels(view: SheetView) -> list[PlacedLabel]:
     """Push every label into the nearest margin and spread out collisions.
 
     The real sheets keep values off the part with a leader pointing in, which
     is what makes a crowded panel readable.
-
-    When a point carries ``label_x_ratio`` / ``label_y_ratio`` the UI has
-    already decided (and possibly the operator has hand-dragged) where the
-    label sits; that position is honoured verbatim so the exported sheet
-    matches what the operator saw on screen. Only points without provided
-    positions fall through to the automatic placement below.
     """
     if view.box is None:
         raise ValueError("뷰 배치가 정해지지 않았습니다.")
     box_x, box_y, box_width, box_height = view.box
 
-    placed_from_ui: list[PlacedLabel] = []
     entries = []
-    label_positions = getattr(view, "label_positions", {}) or {}
     for point in view.points:
         px = box_x + point.x_ratio * box_width
         py = box_y + point.y_ratio * box_height
-        provided = label_positions.get(point.point_id)
-        if provided is not None:
-            lx_ratio, ly_ratio = provided
-            label_x = box_x + lx_ratio * box_width
-            label_y = box_y + ly_ratio * box_height
-            # Which side of the point the label sits on decides which side of
-            # the picture the leader enters -- Excel uses that to pin the
-            # connector when the label is dragged.
-            label_cx = label_x + config.LABEL_WIDTH / 2
-            label_cy = label_y + config.LABEL_HEIGHT / 2
-            if abs(label_cx - px) >= abs(label_cy - py):
-                edge = "right" if label_cx > px else "left"
-            else:
-                edge = "bottom" if label_cy > py else "top"
-            placed_from_ui.append(
-                PlacedLabel(
-                    text=point.text, label_x=label_x, label_y=label_y,
-                    point_x=px, point_y=py, edge=edge,
-                )
-            )
-            continue
         distances = (
             (px - box_x, "left"),
             (box_x + box_width - px, "right"),
@@ -238,29 +157,32 @@ def place_labels(view: SheetView) -> list[PlacedLabel]:
         group = [item for item in entries if item["edge"] == edge]
         horizontal = edge in ("top", "bottom")
         group.sort(key=lambda item: item["px"] if horizontal else item["py"])
-        if horizontal:
-            natural = [item["px"] - config.LABEL_WIDTH / 2 for item in group]
-            resolved = _resolve_collisions(
-                natural, config.LABEL_WIDTH, config.LABEL_MIN_GAP
-            )
-            fixed_y = (
-                box_y - config.LABEL_GUTTER - config.LABEL_HEIGHT
-                if edge == "top"
-                else box_y + box_height + config.LABEL_GUTTER
-            )
-        else:
-            natural = [item["py"] - config.LABEL_HEIGHT / 2 for item in group]
-            resolved = _resolve_collisions(
-                natural, config.LABEL_HEIGHT, config.LABEL_MIN_GAP
-            )
-            fixed_x = (
-                box_x - config.LABEL_GUTTER - config.LABEL_WIDTH
-                if edge == "left"
-                else box_x + box_width + config.LABEL_GUTTER
-            )
-        for item, coord in zip(group, resolved):
-            label_x = coord if horizontal else fixed_x
-            label_y = fixed_y if horizontal else coord
+        previous: float | None = None
+        for item in group:
+            if horizontal:
+                label_x = item["px"] - config.LABEL_WIDTH / 2
+                label_y = (
+                    box_y - config.LABEL_GUTTER - config.LABEL_HEIGHT
+                    if edge == "top"
+                    else box_y + box_height + config.LABEL_GUTTER
+                )
+                if previous is not None:
+                    label_x = max(
+                        label_x, previous + config.LABEL_WIDTH + config.LABEL_MIN_GAP
+                    )
+                previous = label_x
+            else:
+                label_y = item["py"] - config.LABEL_HEIGHT / 2
+                label_x = (
+                    box_x - config.LABEL_GUTTER - config.LABEL_WIDTH
+                    if edge == "left"
+                    else box_x + box_width + config.LABEL_GUTTER
+                )
+                if previous is not None:
+                    label_y = max(
+                        label_y, previous + config.LABEL_HEIGHT + config.LABEL_MIN_GAP
+                    )
+                previous = label_y
             placed.append(
                 PlacedLabel(
                     text=item["point"].text,
@@ -271,67 +193,7 @@ def place_labels(view: SheetView) -> list[PlacedLabel]:
                     edge=edge,
                 )
             )
-    return placed_from_ui + placed
-
-
-def _clip_segment_to_rect(
-    x0: float, y0: float, x1: float, y1: float,
-    rx: float, ry: float, rw: float, rh: float,
-) -> tuple[float, float, float, float] | None:
-    """Liang-Barsky clip of one segment to the rect; ``None`` if it misses."""
-    dx, dy = x1 - x0, y1 - y0
-    t0, t1 = 0.0, 1.0
-    for p, q in (
-        (-dx, x0 - rx), (dx, rx + rw - x0),
-        (-dy, y0 - ry), (dy, ry + rh - y0),
-    ):
-        if p == 0:
-            if q < 0:
-                return None
-            continue
-        t = q / p
-        if p < 0:
-            if t > t1:
-                return None
-            t0 = max(t0, t)
-        else:
-            if t < t0:
-                return None
-            t1 = min(t1, t)
-    if t0 > t1:
-        return None
-    return (x0 + t0 * dx, y0 + t0 * dy, x0 + t1 * dx, y0 + t1 * dy)
-
-
-def _clip_polyline_to_rect(
-    points: Sequence[tuple[float, float]],
-    rx: float, ry: float, rw: float, rh: float,
-) -> list[list[tuple[float, float]]]:
-    """Split a polyline into the pieces that fall inside the rect.
-
-    A zero-line that only partly crosses a Detail region must not be
-    silently dropped (missing) or snapped whole into the crop (drawn outside
-    the picture) -- each crossing becomes its own shorter piece, the same
-    way the picture itself is cropped to the region.
-    """
-    pieces: list[list[tuple[float, float]]] = []
-    current: list[tuple[float, float]] = []
-    for (x0, y0), (x1, y1) in zip(points[:-1], points[1:]):
-        clipped = _clip_segment_to_rect(x0, y0, x1, y1, rx, ry, rw, rh)
-        if clipped is None:
-            if len(current) >= 2:
-                pieces.append(current)
-            current = []
-            continue
-        cx0, cy0, cx1, cy1 = clipped
-        if not current or current[-1] != (cx0, cy0):
-            if len(current) >= 2:
-                pieces.append(current)
-            current = [(cx0, cy0)]
-        current.append((cx1, cy1))
-    if len(current) >= 2:
-        pieces.append(current)
-    return pieces
+    return placed
 
 
 def crop_view(
@@ -339,14 +201,11 @@ def crop_view(
     points: Sequence[SheetPoint],
     region: tuple[float, float, float, float],
     title: str = "",
-    zero_lines: Sequence[list[tuple[float, float]]] = (),
 ) -> SheetView:
     """Cut a detail view out of an image and re-express its points inside it.
 
     The region is given as ratios of the source image, the same form the UI
-    uses for its detail boxes. ``zero_lines`` (also in that ratio space) are
-    clipped to the region and re-expressed the same way -- a line that only
-    partly crosses the crop is split rather than dropped or left un-cropped.
+    uses for its detail boxes.
     """
     height, width = image.shape[:2]
     rx, ry, rw, rh = region
@@ -368,17 +227,4 @@ def crop_view(
                     y_ratio=(point.y_ratio - ry) / rh,
                 )
             )
-
-    cropped_lines: list[list[tuple[float, float]]] = []
-    for polyline in zero_lines:
-        if len(polyline) < 2:
-            continue
-        for piece in _clip_polyline_to_rect(polyline, rx, ry, rw, rh):
-            cropped_lines.append([
-                ((px - rx) / rw, (py - ry) / rh) for px, py in piece
-            ])
-
-    return SheetView(
-        image=image[y0:y1, x0:x1].copy(), points=inside, title=title,
-        zero_lines=cropped_lines,
-    )
+    return SheetView(image=image[y0:y1, x0:x1].copy(), points=inside, title=title)

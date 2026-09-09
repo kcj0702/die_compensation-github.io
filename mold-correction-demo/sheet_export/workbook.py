@@ -194,38 +194,6 @@ def _apply_print_layout(sheet, max_row: int = config.PRINT_PAGE_ROWS) -> None:
     sheet.print_options.verticalCentered = False
     sheet.row_breaks = type(sheet.row_breaks)()
     sheet.row_breaks.append(Break(id=config.PRINT_PAGE_ROWS))
-    # Pin every row to the template's 13.5pt (~18px). Without this openpyxl
-    # emits no row_dimensions, so Excel falls back to its default 15pt (~20px),
-    # and stack_workbooks -- which shifts drawings by (rows * 18px) to match
-    # the assumed template height -- lands each appended block ~2px per row
-    # short of where the corresponding cell shift put it. Over a full 40-row
-    # page that adds up to about 4 rows of drift, which shows up as the
-    # second block's picture invading the second block's title cells.
-    sheet_row_class = type(sheet.row_dimensions[1])
-    for row_index in range(1, max_row + 1):
-        sheet.row_dimensions[row_index] = sheet_row_class(
-            worksheet=sheet, index=row_index,
-            ht=config.ROW_HEIGHT_PT, customHeight=True,
-        )
-    _apply_column_widths(sheet)
-
-
-def _apply_column_widths(sheet) -> None:
-    """Pin every column to the template's real width.
-
-    Even when the template file is available, openpyxl round-trips column
-    dimensions in a way that can silently drop them on some paths; when the
-    template is missing the fallback blank workbook has every column at
-    openpyxl's default 8.43 chars (~64px), which is roughly twice the
-    template's actual widths. Either way the drawing anchors keep using the
-    template-based ``SHEET_WIDTH`` (983px), so the whole sheet ends up
-    wider than the picture region and every picture crowds the left corner.
-    """
-    from openpyxl.utils import get_column_letter
-
-    for min_col, max_col, width in config.COLUMN_WIDTHS:
-        for col_index in range(min_col, max_col + 1):
-            sheet.column_dimensions[get_column_letter(col_index)].width = width
 
 
 def _open_template(template: Path | None) -> openpyxl.Workbook:
@@ -296,24 +264,6 @@ def build_sheet(
         )
         sheet.add_image(picture)
 
-        # Zero-line as its own vector shape on top of the picture, not
-        # baked into its pixels -- lets the operator select/move/delete the
-        # curve in Excel without touching the part image underneath.
-        line_width = max(1.0, box_width * config.ZERO_LINE_WIDTH_RATIO)
-        for polyline in view.zero_lines:
-            abs_points = [
-                (box_x + rx * box_width, box_y + ry * box_height)
-                for rx, ry in polyline
-            ]
-            if len(abs_points) < 2:
-                continue
-            shape_id += 1
-            anchors.append(
-                drawing.zero_line(
-                    shape_id, abs_points, config.ZERO_LINE_COLOR, line_width,
-                )
-            )
-
         if view.title:
             shape_id += 1
             anchors.append(
@@ -344,19 +294,10 @@ def build_sheet(
                     config.POINT_DOT_RADIUS,
                 )
             )
-            # UI 규칙 그대로: 값 문자열에 '-' 가 있으면 음수(파랑), 그 밖엔
-            # 0 포함 양수(빨강) -- formatCorrection() 이 양수만 '+' 를 붙이고
-            # -0 은 toFixed 가 부호를 지우므로, 이 문자열의 선행 '-' 유무가
-            # 화면의 display >= 0 판정과 정확히 같다.
-            text_color = (
-                config.LABEL_TEXT_NEGATIVE_COLOR
-                if placed.text.strip().startswith("-")
-                else config.LABEL_TEXT_POSITIVE_COLOR
-            )
             anchors.append(
                 drawing.text_box(
                     label_id, placed.text, placed.label_x, placed.label_y,
-                    font_family=point_font_family, text_color=text_color,
+                    font_family=point_font_family,
                 )
             )
 
@@ -504,28 +445,7 @@ def stack_workbooks(previous_bytes: bytes, new_bytes: bytes) -> bytes:
             if prev_drawing_rels_name in prev_names
             else _EMPTY_RELS
         )
-        workbook_xml_name = "xl/workbook.xml"
-        prev_workbook_xml = (
-            prev_zip.read(workbook_xml_name).decode("utf-8")
-            if workbook_xml_name in prev_names else None
-        )
-        # 한 블록은 표제란(1~6행, 실제 <row> 셀이 있음)과 그 아래 도면
-        # (7~40행, 그림·라벨·지시선이 전부 절대 픽셀 좌표라 셀이 하나도
-        # 없음)을 합쳐 정확히 PRINT_PAGE_ROWS(40)행을 차지한다. 그런데
-        # _sheet_max_row 는 <row> 태그만 세므로 도면 부분을 못 보고 6행
-        # 남짓으로 잰다 — 그 값으로 다음 블록을 내리면 40행 중 34행어치가
-        # 아직 안 끝난 곳에 겹쳐 앉는다("겹쳐진다"의 원인). 인쇄영역
-        # (_xlnm.Print_Area)은 이 도구가 블록 하나마다 정확히 40행 배수로
-        # 넓혀 두므로, 셀이 아니라 이 값을 읽어 몇 페이지가 쌓였는지 센다.
-        declared_rows = (
-            _existing_print_area_rows(prev_workbook_xml)
-            if prev_workbook_xml else None
-        )
-        pages_so_far = (
-            max(1, round(declared_rows / config.PRINT_PAGE_ROWS))
-            if declared_rows else 1
-        )
-        prev_row_offset = pages_so_far * config.PRINT_PAGE_ROWS
+        prev_row_offset = _sheet_max_row(prev_sheet_xml)
         prev_max_rid = _max_relationship_id(prev_drawing_rels)
         prev_media_ids = _existing_media_ids(prev_names)
 
@@ -584,16 +504,15 @@ def stack_workbooks(previous_bytes: bytes, new_bytes: bytes) -> bytes:
         # area leaves every stacked block outside it -- in pageBreakPreview
         # that whole region renders grey, so the labels (drawn on a white
         # background) become nearly invisible and the block reads as
-        # "missing annotations". Use the page-based total (this block plus
-        # the one just appended), not _sheet_max_row -- that undercounts for
-        # the same reason prev_row_offset above does.
-        merged_max_row = (pages_so_far + 1) * config.PRINT_PAGE_ROWS
+        # "missing annotations".
+        merged_max_row = _sheet_max_row(merged_sheet_xml)
         merged_sheet_xml = _expand_dimension(merged_sheet_xml, merged_max_row)
 
+        workbook_xml_name = "xl/workbook.xml"
         merged_workbook_xml: str | None = None
-        if prev_workbook_xml is not None:
+        if workbook_xml_name in prev_names:
             merged_workbook_xml = _expand_print_area(
-                prev_workbook_xml,
+                prev_zip.read(workbook_xml_name).decode("utf-8"),
                 merged_max_row,
             )
 
@@ -646,23 +565,6 @@ def _rels_for(part_name: str) -> str:
 def _sheet_max_row(sheet_xml: str) -> int:
     rows = re.findall(r'<row\b[^>]*\br="(\d+)"', sheet_xml)
     return max((int(r) for r in rows), default=0)
-
-
-def _existing_print_area_rows(workbook_xml: str) -> int | None:
-    """Read the current ``_xlnm.Print_Area`` defined name's last row, if any.
-
-    Used by ``stack_workbooks`` to count how many ``PRINT_PAGE_ROWS``-tall
-    blocks already exist -- see the comment where it is called for why this
-    beats counting populated cells.
-    """
-    match = re.search(
-        r'<definedName\b[^>]*\bname="_xlnm\.Print_Area"[^>]*>(.*?)</definedName>',
-        workbook_xml, re.DOTALL,
-    )
-    if match is None:
-        return None
-    rows = [int(r) for r in re.findall(r"\$?[A-Z]+\$?(\d+)", match.group(1))]
-    return max(rows) if rows else None
 
 
 def _expand_dimension(sheet_xml: str, max_row: int) -> str:
