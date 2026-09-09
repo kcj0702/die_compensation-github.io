@@ -208,6 +208,28 @@ function invertSheetDelta(transform: SheetImageTransform, dx: number, dy: number
   return [moved[0] - origin[0], moved[1] - origin[1]];
 }
 
+/* rotateVector/unrotateVector: transformSheetPoint 와 달리 "위치"가 아니라
+   "벡터"(방향+길이)를 돌린다 -- 회전·반전은 크기를 바꾸지 않는 등거리
+   변환이라, 입력 벡터의 길이(sqrt(dx²+dy²))가 그대로 보존된다. 라벨을
+   점에서 얼마나 떼어 놓을지를 이 벡터로 다루면, 회전해도 지시선 길이가
+   화면 비율(가로/세로 실제 픽셀 배율)에 흔들리지 않고 항상 같게 나온다. */
+function rotateVector(transform: SheetImageTransform, dx: number, dy: number): [number, number] {
+  const fx = transform.flipX ? -dx : dx;
+  const fy = transform.flipY ? -dy : dy;
+  if (transform.rotation === 90) return [-fy, fx];
+  if (transform.rotation === 180) return [-fx, -fy];
+  if (transform.rotation === 270) return [fy, -fx];
+  return [fx, fy];
+}
+
+function unrotateVector(transform: SheetImageTransform, dx: number, dy: number): [number, number] {
+  let x = dx; let y = dy;
+  if (transform.rotation === 90) [x, y] = [y, -x];
+  else if (transform.rotation === 180) [x, y] = [-x, -y];
+  else if (transform.rotation === 270) [x, y] = [-y, x];
+  return [transform.flipX ? -x : x, transform.flipY ? -y : y];
+}
+
 function renderSheetImage(source: string, transform: SheetImageTransform): Promise<string> {
   if (sheetTransformKey(transform) === sheetTransformKey(IDENTITY_SHEET_TRANSFORM)) return Promise.resolve(source);
   return new Promise((resolve, reject) => {
@@ -985,7 +1007,7 @@ function SheetLayoutFrame({ layout, imageAspect, selected, onSelect, onChange, o
   </article>;
 }
 
-function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange, labelFontFamily, initialLabelPositions, onLabelPositionsChange }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void; labelFontFamily?: string; initialLabelPositions?: Record<string, { x: number; y: number }>; onLabelPositionsChange?: (positions: Record<string, { x: number; y: number }>) => void }) {
+function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange, labelFontFamily, initialLabelPositions, rotationSeed, onLabelPositionsChange, onLayerSizeChange }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void; labelFontFamily?: string; initialLabelPositions?: Record<string, { x: number; y: number }>; rotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onLabelPositionsChange?: (positions: Record<string, { x: number; y: number }>) => void; onLayerSizeChange?: (size: { width: number; height: number }) => void }) {
   const labelHeight = 17;
   const displayFor = useCallback((point: PointResult) => overrides?.[point.id] !== undefined ? overrides[point.id]! : -(point.value * coefficient), [coefficient, overrides]);
   const formatCorrection = useCallback((value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`, []);
@@ -1009,6 +1031,14 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     observer.observe(layer);
     return () => observer.disconnect();
   }, []);
+  /* 부모(ServicePreview)가 라벨-점 오프셋을 "실제 화면 픽셀"로 저장하려면
+     이 레이어의 진짜 픽셀 크기를 알아야 한다 -- 정면도 창은 회전할 때마다
+     실제 크기가 바뀌는데(비율만 유지), % 만으로는 그 실제 크기를 부모가
+     알 수 없어 지시선 길이가 회전마다 미묘하게 달라졌다. */
+  useEffect(() => {
+    if (!layerSize.width || !layerSize.height) return;
+    onLayerSizeChange?.(layerSize);
+  }, [layerSize, onLayerSizeChange]);
   useEffect(() => {
     const previous = previousLayerSizeRef.current;
     if (previous.width > 0 && previous.height > 0 && (previous.width !== layerSize.width || previous.height !== layerSize.height)) {
@@ -1027,6 +1057,28 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
       const centerY = points.length > 1 ? points.reduce((sum, point) => sum + layerSize.height * point.y / 100, 0) / points.length : layerSize.height / 2;
       points.forEach((point) => {
         if (next[point.id]) return;
+        const labelWidth = getLabelWidth(point);
+        const pointX = layerSize.width * point.x / 100;
+        const pointY = layerSize.height * point.y / 100;
+        /* 회전마다 이 컴포넌트가 통째로 리마운트되는데(위 참고), 회전 직후엔
+           부모(ServicePreview)가 아직 "이 회전에서 실제로 몇 px 짜리 창이
+           될지"를 모른다 -- 그 값은 이 레이어가 실제로 마운트돼 측정돼야만
+           나온다. 그런데 부모가 %(initialLabelPositions)로 미리 계산해 넘긴
+           값은 회전 *직전* 창 크기로 계산된 것이라 어긋난다(부모의 리렌더가
+           이 컴포넌트의 첫 렌더보다 한 박자 늦다). 그래서 점→라벨 오프셋을
+           "회전 전 기준"의 등방(isotropic) 벡터(canonicalOffsets, 부모가
+           들고 있는 값)로 받아, 지금 막 실측한 이 레이어의 layerSize 로 직접
+           풀어낸다 -- 그러면 부모의 타이밍과 무관하게 항상 맞는 크기로 계산
+           된다(지시선 길이가 회전마다 미묘하게 달라지던 원인). */
+        const canonical = rotationSeed?.canonicalOffsets[point.id];
+        if (canonical && Number.isFinite(canonical.x) && Number.isFinite(canonical.y)) {
+          const [isoDx, isoDy] = rotateVector(rotationSeed!.transform, canonical.x, canonical.y);
+          const layerScale = Math.sqrt(layerSize.width * layerSize.height) || 1;
+          const pxDx = isoDx * (layerSize.width / layerScale);
+          const pxDy = isoDy * (layerSize.height / layerScale);
+          next[point.id] = { x: pointX + pxDx - labelWidth / 2, y: pointY + pxDy - labelHeight / 2 };
+          return;
+        }
         /* 부모가 마지막으로 기억한(사용자가 드래그해 옮긴) 위치가 있으면
            그걸 되살린다 — 이 컴포넌트는 화면(스캔/제품데이터/정렬확인)을
            바꿀 때마다 통째로 다시 마운트되는 SheetCanvas 의 자식이라, 이
@@ -1036,9 +1088,6 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
           next[point.id] = { x: seed.x / 100 * layerSize.width, y: seed.y / 100 * layerSize.height };
           return;
         }
-        const labelWidth = getLabelWidth(point);
-        const pointX = layerSize.width * point.x / 100;
-        const pointY = layerSize.height * point.y / 100;
         let dx = pointX - centerX;
         let dy = pointY - centerY;
         if (Math.abs(dx) + Math.abs(dy) < 1) { dx = 1; dy = 0; }
@@ -1054,7 +1103,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
       });
       return next;
     });
-  }, [layerSize, points, labelHeight, displayFor, formatCorrection, getLabelWidth, initialLabelPositions]);
+  }, [layerSize, points, labelHeight, displayFor, formatCorrection, getLabelWidth, initialLabelPositions, rotationSeed]);
   /* 엑셀 내보내기가 화면과 똑같은 라벨 위치를 쓰도록, 실제로 계산·드래그된
      좌표(픽셀, .point-layer 기준)를 점과 같은 규칙(레이어 대비 0~100%)으로
      정규화해 위로 올려 준다. DOM에서 나중에 다시 측정하지 않는 이유: 이
@@ -1265,15 +1314,12 @@ function ZeroLineOverlay({ lines, splineSegments = [], region, editable = false,
   </div>;
 }
 
-function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, initialLayouts, initialLabelPositionsByLayout, onRegionsChange, onLayoutsChange, onLabelPositionsChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], zeroSplineSegments = [], showZero = false, zeroEditable = false, zeroPointAddMode = false, zeroPointDeleteMode = false, onZeroPointMove, onZeroSegmentDoubleClick, onZeroPointAdd, onZeroPointDelete }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; initialRegions?: DetailRegion[]; initialLayouts?: SheetLayout[]; initialLabelPositionsByLayout?: Record<string, Record<string, { x: number; y: number }>>; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; onLabelPositionsChange?: (layoutId: string, positions: Record<string, { x: number; y: number }>) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; zeroSplineSegments?: number[][]; showZero?: boolean; zeroEditable?: boolean; zeroPointAddMode?: boolean; zeroPointDeleteMode?: boolean; onZeroPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onZeroSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onZeroPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onZeroPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, initialLayouts, initialLabelPositionsByLayout, frontRotationSeed, onRegionsChange, onLayoutsChange, onLabelPositionsChange, onLayerSizeChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], zeroSplineSegments = [], showZero = false, zeroEditable = false, zeroPointAddMode = false, zeroPointDeleteMode = false, onZeroPointMove, onZeroSegmentDoubleClick, onZeroPointAdd, onZeroPointDelete }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; initialRegions?: DetailRegion[]; initialLayouts?: SheetLayout[]; initialLabelPositionsByLayout?: Record<string, Record<string, { x: number; y: number }>>; frontRotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; onLabelPositionsChange?: (layoutId: string, positions: Record<string, { x: number; y: number }>) => void; onLayerSizeChange?: (layoutId: string, size: { width: number; height: number }) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; zeroSplineSegments?: number[][]; showZero?: boolean; zeroEditable?: boolean; zeroPointAddMode?: boolean; zeroPointDeleteMode?: boolean; onZeroPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onZeroSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onZeroPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onZeroPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
   /* 정렬 합성 이미지는 스캔 원본과 크기가 다를 수 있어 프레임 치수를 직접 받는다. */
   const sourceAspect = frameWidth / frameHeight;
-  /* 시트 폭·높이 상한을 62/64 -> 42/44 로 낮췄다. 50/52 로 한 번 줄여
-     봤지만 여전히 "화면에 꽉 찬다" 는 피드백이 있었다 — CATIA 캡처는
-     실제 촬영 PNG 보다 부품이 프레임을 더 꽉 채우게 나오는 경향이 있어
-     (여백 보정은 catia_capture._isolate_part 에서 별도로 함), 시트
-     박스 자체도 더 작게 잡아야 화면에서 여유 있게 보인다. */
-  const initialFrontSize = fitAspectSize(sourceAspect, 42, 44);
+  /* 시트 폭·높이 상한. 한 번은 62/64 -> 42/44 로 줄였다가, 이번엔 그
+     42/44 기준 디폴트 창이 너무 작다는 요청으로 1.5배(63/66) 키웠다. */
+  const initialFrontSize = fitAspectSize(sourceAspect, 42 * 1.5, 44 * 1.5);
   /* 이 컴포넌트는 스캔/제품데이터/정렬확인 화면을 오갈 때 key 가 바뀌어
      통째로 리마운트된다(다른 이미지라 내부 DOM 을 새로 만드는 게 안전
      해서). 그때 Detail 확대 영역·배치를 빈 배열로 초기화해 버리면 방금
@@ -1284,11 +1330,33 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
   const [regions, setRegions] = useState<DetailRegion[]>(() => initialRegions ?? []);
   /* 엑셀 내보내기가 Detail 영역을 알아야 해서 위로 올려 준다. */
   useEffect(() => { onRegionsChange?.(regions); }, [regions, onRegionsChange]);
-  const [layouts, setLayouts] = useState<SheetLayout[]>(() => (
-    initialLayouts && initialLayouts.length > 0
-      ? initialLayouts
-      : [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }]
-  ));
+  const [layouts, setLayouts] = useState<SheetLayout[]>(() => {
+    if (!initialLayouts || initialLayouts.length === 0) {
+      return [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }];
+    }
+    /* 90도 회전은 frameWidth/frameHeight 를 맞바꿔 sourceAspect 를 뒤집는데,
+       이어받은 정면도 창은 이전(회전 전) 비율로 맞춰진 w/h 라 화면에는 옛
+       비율 그대로 나온다 -- 사용자가 크기조절 손잡이를 한 번 눌러야("어떤
+       값으로든 다시 계산해라"라는 신호) 그제서야 새 비율로 맞춰지는 게 그
+       증상이었다. fitAspectSize 는 어느 쪽이 상한에 걸리든 항상
+       w/h = sourceAspect/SHEET_ASPECT 를 만족하는 값을 낸다 -- 그러니
+       지금 w/h 비율이 그 식과 맞으면(스캔/제품데이터 전환처럼 방향은 안
+       바뀐 리마운트) 사용자가 손으로 맞춘 크기이므로 그대로 두고, 안
+       맞으면(90/270 회전으로 실제로 뒤집힌 경우) 넓이(w*h)는 그대로 두고
+       비율만 새로 맞춘다. [버그였던 부분] 가로/세로 상한을 맞바꿔
+       fitAspectSize 를 다시 돌리는 방식은 상한 중 좁은 쪽에 맞춰
+       매번 넓이가 줄어, 90도 회전을 반복할 때마다 창이 계속 작아졌다
+       (한 바퀴 4번 돌리면 넓이가 1/4로). 넓이를 고정하고 비율만 풀면
+       (w=√(넓이×비율), h=√(넓이/비율)) 몇 번을 돌려도 크기가 그대로다. */
+    return initialLayouts.map((layout) => {
+      if (layout.kind !== 'front' || layout.h <= 0) return layout;
+      const expectedRatio = sourceAspect / SHEET_ASPECT;
+      const actualRatio = layout.w / layout.h;
+      if (Math.abs(actualRatio / expectedRatio - 1) < 0.05) return layout;
+      const area = layout.w * layout.h;
+      return { ...layout, w: Math.sqrt(area * expectedRatio), h: Math.sqrt(area / expectedRatio) };
+    });
+  });
   useEffect(() => { onLayoutsChange?.(layouts); }, [layouts, onLayoutsChange]);
   /* layout.id 별로 CorrectionPoints 에 넘길 콜백을 캐싱해 참조를 고정한다.
      .map() 렌더 안에서 매번 새 화살표 함수를 만들면, 그게 CorrectionPoints
@@ -1303,6 +1371,18 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
     let handler = cache.get(layoutId);
     if (!handler) {
       handler = (positions: Record<string, { x: number; y: number }>) => onLabelPositionsChange(layoutId, positions);
+      cache.set(layoutId, handler);
+    }
+    return handler;
+  };
+  const layerSizeHandlers = useRef<Map<string, (size: { width: number; height: number }) => void>>(new Map());
+  useEffect(() => { layerSizeHandlers.current.clear(); }, [onLayerSizeChange]);
+  const getLayerSizeHandler = (layoutId: string) => {
+    if (!onLayerSizeChange) return undefined;
+    const cache = layerSizeHandlers.current;
+    let handler = cache.get(layoutId);
+    if (!handler) {
+      handler = (size: { width: number; height: number }) => onLayerSizeChange(layoutId, size);
       cache.set(layoutId, handler);
     }
     return handler;
@@ -1359,12 +1439,12 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
         else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
       };
       return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
-        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} />}</div>
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}</div>
           : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} editable={zeroEditable} addPointMode={zeroPointAddMode} deletePointMode={zeroPointDeleteMode} onPointMove={onZeroPointMove} onSegmentDoubleClick={onZeroSegmentDoubleClick} onPointAdd={onZeroPointAdd} onPointDelete={onZeroPointDelete} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
             onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onRemoveAddedPoint(added.id); }}
-            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
+            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} rotationSeed={layout.kind === 'front' ? frontRotationSeed : undefined} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
         <LabelAreaSelector mode={labelAreaMode} points={detailPoints} onApply={applyAreaPoints} onComplete={() => setLabelAreaMode(null)} />
       </SheetLayoutFrame>;
     })}
@@ -2194,6 +2274,18 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
   const [addPointMode, setAddPointMode] = useState(false);
   const [sampling, setSampling] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
+  /* 제품데이터 위에 올릴 때는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다.
+     전사되지 않은 포인트는 제품데이터 밖으로 나간 것이라 시트에서 뺀다.
+     라벨 위치 계산(아래)이 각 점의 현재 화면 좌표를 알아야 해서, 이 계산을
+     그보다 앞으로 옮겨 뒀다(원래는 이 함수 뒤쪽에 있었다). */
+  const sheetPoints = [...points, ...addedPoints].flatMap((point) => {
+    if (!onProduct) return [point];
+    if (point.xProduct === undefined || point.yProduct === undefined) return [];
+    return [{ ...point, x: point.xProduct, y: point.yProduct }];
+  }).map((point) => {
+    const [x, y] = transformSheetPoint(activeSheetTransform, point.x, point.y);
+    return { ...point, x, y };
+  });
   /* 엑셀 내보내기. sheetLayouts 와 같은 이유로 scan.id 로 갈라 저장한다. */
   const [detailRegionsByScan, setDetailRegionsByScan] = useState<Record<string, DetailRegion[]>>({});
   const detailRegions = detailRegionsByScan[scan.id] ?? [];
@@ -2204,11 +2296,101 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
      대비 0~100% 로, point.x/y 와 같은 규칙이라 엑셀 쪽이 그대로 쓸 수 있다.
      레이아웃 id 로 한 번, scan.id 로 한 번 더 갈라 둔다 -- Detail 뷰마다
      라벨 배치가 다르고(레이아웃 id), 다른 파트의 라벨 위치가 존재할 수도
-     없어야 한다(scan.id, 위 sheetLayouts 주석 참고). */
-  const [labelPositionsByScan, setLabelPositionsByScan] = useState<Record<string, Record<string, Record<string, { x: number; y: number }>>>>({});
-  const labelPositionsByLayout = labelPositionsByScan[scan.id] ?? {};
+     없어야 한다(scan.id, 위 sheetLayouts 주석 참고).
+
+     정면도(front) 라벨은 "점에서 얼마나 떨어져 있는지"를 실제 화면
+     픽셀 벡터로 저장한다. 처음엔 위치(%) 를 원본 기준으로 저장하고 회전
+     때만 transformSheetPoint 로 돌렸는데, 그러면 위치 자체는 점을 잘
+     따라가도 지시선 "길이" 가 회전마다 미묘하게 달라졌다 -- 정면도 창은
+     회전할 때마다(위 sheetLayouts 넓이-보존 리핏) 실제 픽셀 크기가
+     바뀌는데, %는 그 레이어 크기에 상대적이라 같은 % 오프셋도 가로 축이냐
+     세로 축이냐에 따라 실제 픽셀 거리가 달라졌던 것(종이 자체의 가로:세로
+     비율로 가정한 값으로 보정해 봤지만, 실제 레이어는 제목 표시줄 같은
+     테두리 때문에 그 비율과 딱 안 맞아 여전히 어긋났다). 그래서 이론상의
+     비율 대신 CorrectionPoints 가 실측한 레이어 픽셀 크기(frontLayerSizePx,
+     아래)를 직접 받아 그 실제 픽셀 단위로 벡터를 저장한다 -- 진짜 화면
+     픽셀끼리는 가로세로가 항상 같은 척도라, rotateVector(길이를 보존하는
+     회전/반전)를 그대로 적용해도 지시선 길이가 절대 안 변한다. */
+  const [frontLabelPositionsByScan, setFrontLabelPositionsByScan] = useState<Record<string, Record<string, { x: number; y: number }>>>({});
+  const [detailLabelPositionsByScan, setDetailLabelPositionsByScan] = useState<Record<string, Record<string, Record<string, { x: number; y: number }>>>>({});
+  const [frontLayerSizePx, setFrontLayerSizePx] = useState({ width: 1, height: 1 });
+  const handleLayerSizeChange = useCallback((layoutId: string, size: { width: number; height: number }) => {
+    if (layoutId !== 'front' || !size.width || !size.height) return;
+    setFrontLayerSizePx((current) => (current.width === size.width && current.height === size.height ? current : size));
+  }, []);
+  /* CorrectionPoints 가 넘기는 위치는 라벨 박스의 "왼쪽 위 모서리" 다.
+     점→라벨 벡터를 그 모서리 기준으로 회전시키면 벡터 자체의 길이는
+     보존돼도, 사람 눈에 보이는 지시선(점 → 라벨 "가운데")의 길이는 여전히
+     달라진다 -- 라벨 박스 자체는 글자라 절대 안 돌아가는데, 모서리 기준
+     벡터를 돌리면 그 안 돌아가는 가로/세로 폭(라벨 크기)이 방향마다 다른
+     비중으로 섞여 들어간다. 그래서 점→모서리가 아니라 점→"가운데"를
+     회전시키고, 가운데에서 모서리로 뺄 때는 회전과 무관하게 항상 같은
+     라벨 크기(라벨은 안 돌아가므로)를 그대로 빼준다. 라벨 크기 계산은
+     CorrectionPoints 의 getLabelWidth/labelHeight 와 반드시 같아야 한다. */
+  const getFrontLabelWidthPx = useCallback((point: PointResult) => {
+    const display = pointOverrides[point.id] !== undefined ? pointOverrides[point.id]! : -(point.value * coefficient);
+    const text = `${display > 0 ? '+' : ''}${display.toFixed(1)}`;
+    return Math.max(24, text.length * 5.2 + 8);
+  }, [pointOverrides, coefficient]);
+  const FRONT_LABEL_HEIGHT_PX = 17;
+  /* 정면도 창은 회전마다(위 넓이-보존 리핏) 가로/세로 폭이 서로 다른 비율로
+     바뀐다 -- 넓이(w*h)는 보존되지만 가로:세로 비율 자체는 방향마다 다르다.
+     stored 벡터를 그냥 실측 px 로 회전시키면, 회전 전/후 레이어의 "축척"이
+     가로·세로마다 다르게 늘어나 있어 rotateVector 의 등거리 가정이 깨진다
+     (예: 가로로 넓적한 레이어 → 세로로 넓적한 레이어). 넓이가 보존되니
+     sqrt(w*h) 는 회전과 무관하게 항상 같다 -- 이 값을 공통 척도로 삼아 실측
+     px 를 등방(가로세로 같은 척도) 좌표로 바꾼 다음에 회전시키고, 표시할 때
+     다시 그 순간의 실측 가로/세로로 풀어내야 지시선 길이가 정확히 보존된다. */
+  const storedFrontLabelOffsets = frontLabelPositionsByScan[scan.id] ?? {};
+  const displayedFrontLabelPositions = useMemo(() => {
+    const next: Record<string, { x: number; y: number }> = {};
+    const layerScale = Math.sqrt(frontLayerSizePx.width * frontLayerSizePx.height) || 1;
+    for (const point of sheetPoints) {
+      const stored = storedFrontLabelOffsets[point.id];
+      if (!stored) continue;
+      const [isoDx, isoDy] = rotateVector(activeSheetTransform, stored.x, stored.y);
+      const pxDx = isoDx * (frontLayerSizePx.width / layerScale);
+      const pxDy = isoDy * (frontLayerSizePx.height / layerScale);
+      const labelWidthPx = getFrontLabelWidthPx(point);
+      const cornerPxX = pxDx - labelWidthPx / 2;
+      const cornerPxY = pxDy - FRONT_LABEL_HEIGHT_PX / 2;
+      const offsetLayerPctX = cornerPxX / frontLayerSizePx.width * 100;
+      const offsetLayerPctY = cornerPxY / frontLayerSizePx.height * 100;
+      next[point.id] = { x: point.x + offsetLayerPctX, y: point.y + offsetLayerPctY };
+    }
+    return next;
+  }, [storedFrontLabelOffsets, activeSheetTransform, sheetPoints, frontLayerSizePx, getFrontLabelWidthPx]);
+  const labelPositionsByLayout: Record<string, Record<string, { x: number; y: number }>> = {
+    ...(detailLabelPositionsByScan[scan.id] ?? {}),
+    front: displayedFrontLabelPositions,
+  };
   const handleLabelPositionsChange = useCallback((layoutId: string, positions: Record<string, { x: number; y: number }>) => {
-    setLabelPositionsByScan((current) => {
+    if (layoutId === 'front') {
+      const canonical: Record<string, { x: number; y: number }> = {};
+      const layerScale = Math.sqrt(frontLayerSizePx.width * frontLayerSizePx.height) || 1;
+      for (const [id, position] of Object.entries(positions)) {
+        const point = sheetPoints.find((item) => item.id === id);
+        if (!point) continue;
+        const labelWidthPx = getFrontLabelWidthPx(point);
+        const cornerOffsetLayerPctX = position.x - point.x;
+        const cornerOffsetLayerPctY = position.y - point.y;
+        const cornerPxX = cornerOffsetLayerPctX / 100 * frontLayerSizePx.width;
+        const cornerPxY = cornerOffsetLayerPctY / 100 * frontLayerSizePx.height;
+        const pxDx = cornerPxX + labelWidthPx / 2;
+        const pxDy = cornerPxY + FRONT_LABEL_HEIGHT_PX / 2;
+        const isoDx = pxDx * (layerScale / frontLayerSizePx.width);
+        const isoDy = pxDy * (layerScale / frontLayerSizePx.height);
+        const [canonicalDx, canonicalDy] = unrotateVector(activeSheetTransform, isoDx, isoDy);
+        canonical[id] = { x: canonicalDx, y: canonicalDy };
+      }
+      setFrontLabelPositionsByScan((current) => {
+        const previous = current[scan.id];
+        if (previous && JSON.stringify(previous) === JSON.stringify(canonical)) return current;
+        return { ...current, [scan.id]: canonical };
+      });
+      return;
+    }
+    setDetailLabelPositionsByScan((current) => {
       const currentForScan = current[scan.id] ?? {};
       /* CorrectionPoints 는 매번 새 객체를 만들어 올리므로 참조 비교로는
          항상 "달라짐" 이 된다. 값까지 같으면 그대로 두어야, 이 setState 가
@@ -2219,7 +2401,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
       if (previous && JSON.stringify(previous) === JSON.stringify(positions)) return current;
       return { ...current, [scan.id]: { ...currentForScan, [layoutId]: positions } };
     });
-  }, [scan.id]);
+  }, [scan.id, activeSheetTransform, sheetPoints, frontLayerSizePx, getFrontLabelWidthPx]);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const removeAddedPoint = (id: string) => setAddedPoints((current) => current.filter((item) => item.id !== id));
@@ -2337,16 +2519,6 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
   };
   /* 시트에는 엔진이 찾은 포인트와 작업자가 찍은 포인트를 함께 올린다.
      표시 여부도 합친 목록 기준으로 계산해야 추가한 포인트의 라벨이 숨김 처리되지 않는다. */
-  /* 제품데이터 위에 올릴 때는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다.
-     전사되지 않은 포인트는 제품데이터 밖으로 나간 것이라 시트에서 뺀다. */
-  const sheetPoints = [...points, ...addedPoints].flatMap((point) => {
-    if (!onProduct) return [point];
-    if (point.xProduct === undefined || point.yProduct === undefined) return [];
-    return [{ ...point, x: point.xProduct, y: point.yProduct }];
-  }).map((point) => {
-    const [x, y] = transformSheetPoint(activeSheetTransform, point.x, point.y);
-    return { ...point, x, y };
-  });
   const sheetAddedPoints = sheetPoints.filter((point) => point.source === 'colormap');
   /* 제로 폴리라인도 포인트와 같은 규칙으로 프레임 % 로 옮긴다. 스캔 원본은 픽셀 좌표라
      [scanW, scanH] 로 나눠 %, 제품데이터는 alignment 행렬로 옮긴 뒤 [productW, productH] 로 % 를 낸다.
@@ -2832,7 +3004,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
       {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} initialRegions={detailRegions} initialLayouts={sheetLayouts} initialLabelPositionsByLayout={labelPositionsByLayout} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} onLabelPositionsChange={handleLabelPositionsChange} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} initialRegions={detailRegions} initialLayouts={sheetLayouts} initialLabelPositionsByLayout={labelPositionsByLayout} frontRotationSeed={{ transform: activeSheetTransform, canonicalOffsets: storedFrontLabelOffsets }} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} onLabelPositionsChange={handleLabelPositionsChange} onLayerSizeChange={handleLayerSizeChange} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
