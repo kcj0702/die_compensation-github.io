@@ -13,10 +13,11 @@ import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useSta
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
 import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
+import { WorkspaceHub, WorkspaceNavigation, type WorkspaceView } from './immersive-workspace';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
-type View = 'workspace' | 'results' | 'service' | 'files' | 'cad';
+type View = WorkspaceView;
 type Engine = 'label' | 'deviation' | 'zero';
 type AnalysisStep = 'scan' | Engine;
 type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
@@ -1432,7 +1433,9 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
       const title = layout.kind === 'front' ? '정면도 · FRONT VIEW' : region!.label;
       const imageAspect = region ? region.w * frameWidth / (region.h * frameHeight) : sourceAspect;
       const detailPoints = region ? points.filter((point) => point.x >= region.x && point.x <= region.x + region.w && point.y >= region.y && point.y <= region.y + region.h).map((point) => ({ ...point, x: (point.x - region.x) / region.w * 100, y: (point.y - region.y) / region.h * 100 })) : points;
-      const layoutVisiblePointIds = layout.kind === 'front' ? visiblePointIds : new Set(detailPoints.filter((point) => !hiddenDetailPointIds[layout.id]?.has(point.id)).map((point) => point.id));
+      /* 상세도도 정면도의 표시 집합을 상속한다. 주요 포인트가 아닌 항목이
+         정면도에서는 숨고 Detail View에서 다시 나타나는 일을 막는다. */
+      const layoutVisiblePointIds = layout.kind === 'front' ? visiblePointIds : new Set(detailPoints.filter((point) => visiblePointIds.has(point.id) && !hiddenDetailPointIds[layout.id]?.has(point.id)).map((point) => point.id));
       const toggleLayoutPoint = layout.kind === 'front' ? onPointToggle : (id: string) => setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); if (hidden.has(id)) hidden.delete(id); else hidden.add(id); return { ...current, [layout.id]: hidden }; });
       const applyAreaPoints = (ids: string[], mode: 'hide' | 'show') => {
         if (layout.kind === 'front') ids.filter((id) => mode === 'hide' ? layoutVisiblePointIds.has(id) : !layoutVisiblePointIds.has(id)).forEach(onPointToggle);
@@ -2087,7 +2090,7 @@ function FileOrganizerPage() {
       <button type="button" className={showFolderOrder ? 'active' : ''} onClick={() => setShowFolderOrder((current) => !current)} aria-expanded={showFolderOrder}>{showFolderOrder ? '닫기' : '순서 변경'}<ChevronDown size={17} /></button>
     </div>
     {showFolderOrder && <div className="card file-order-settings">
-      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b></span></div>
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>저장 시 기존 파일도 새 폴더 구조로 이동</small></span></div>
       <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
       <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
       <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
@@ -3407,7 +3410,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
+  const [view, setView] = useState<View>('overview'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
   const [resultEngine, setResultEngine] = useState<Engine>('label');
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
   const [sheetTitleFontSizesByScan, setSheetTitleFontSizesByScan] = useState<Record<string, SheetTitleFontSizes>>({});
@@ -3492,6 +3495,25 @@ export default function Home() {
       if (saved.zeroEdits && zeroEditsByScan[scan.id] === undefined) setZeroEditsByScan((current) => ({ ...current, [scan.id]: saved.zeroEdits as ZeroEdit[] }));
     }
   }, [sessionLoaded, scans, coefficientByScan, pointOverridesByScan, hiddenPointIdsByScan, sheetTitlesByScan, zonesByPart, zeroEditsByScan]);
+  /* 분석이 끝난 품번은 주요 포인트만 보정시트의 초기 표시 대상으로 삼는다.
+     나머지는 삭제하지 않고 hidden 집합에 보존하므로 작업자가 다시 표시할 수 있다.
+     저장된 작업 상태가 있으면 그 사용자의 표시 선택을 우선한다. */
+  useEffect(() => {
+    if (!sessionLoaded) return;
+    setHiddenPointIdsByScan((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const scan of scans) {
+        if (!scan.result?.keySelection || next[scan.id] !== undefined) continue;
+        const keyIds = new Set(scan.result.keySelection.ids);
+        next[scan.id] = new Set(scan.result.points
+          .filter((point) => !keyIds.has(point.id))
+          .map((point) => point.id));
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [sessionLoaded, scans]);
   /* 방향만 다시 계산한다. Qwen 판독은 그대로 두고 좌표만 옮겨 받는다. */
   const realign = async (flipX?: boolean, flipY?: boolean, rotation?: number) => {
     if (!completedScan?.result) return;
@@ -3528,7 +3550,11 @@ export default function Home() {
   };
   const openResults = (id: string) => { setActiveId(id); setResultEngine('label'); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
   const openEngine = (engine: Engine) => { if (!hasResult) return; setResultEngine(engine); setView('results'); window.scrollTo({ top: 0, behavior: 'smooth' }); };
-  const selectView = (next: View) => { if (next === 'workspace' || next === 'files' || next === 'cad' || hasResult) setView(next); };
+  const selectView = (next: View) => {
+    if ((next === 'service' || next === 'results') && !hasResult) return;
+    setView(next);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  };
   const buildSessionSnapshot = (): SessionSnapshot => {
     const snapshot = emptySession();
     for (const scan of scans) {
@@ -3603,10 +3629,10 @@ export default function Home() {
     setZeroEditsByScan({});
     sessionRef.current = emptySession();
   };
-  return <main className={`app-shell ${collapsed ? 'app-shell--collapsed' : ''}`}>
-    <Sidebar view={view} setView={selectView} collapsed={collapsed} setCollapsed={setCollapsed} hasResult={hasResult} />
+  return <main className={`studio-shell${view === 'overview' ? ' studio-shell--overview' : ''}`}>
+    <WorkspaceNavigation view={view} onSelect={selectView} hasResult={hasResult} scans={scans} activeId={resolvedActiveId} onScanChange={setActiveId} />
     <div className="app-main">
-      <Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} onSaveFile={saveWorkFile} onLoadFile={(file) => void loadWorkFile(file)} onReset={resetWork} />
+      {view === 'overview' && <WorkspaceHub onSelect={selectView} hasResult={hasResult} scanCount={scans.length} backendOnline={backendOnline} />}
       {view === 'workspace' && <Workspace scans={scans} selectedScan={activeScan || scans[0]} setScans={setScans} result={completedScan?.result} onOpenResults={openResults} onOpenEngine={openEngine} backendOnline={backendOnline} />}
       {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
       {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || []} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} />}

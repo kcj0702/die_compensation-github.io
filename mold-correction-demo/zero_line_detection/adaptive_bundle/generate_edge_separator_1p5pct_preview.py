@@ -17,7 +17,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from generate_preview import (
+from .generate_preview import (
     DEFAULT_INPUT,
     SPECS,
     ScanSpec,
@@ -32,7 +32,7 @@ from generate_preview import (
     imwrite_rgb,
     map_deviation,
 )
-from generate_between_signs_preview import (
+from .generate_between_signs_preview import (
     GRAY_SENTINEL_RGB,
     NEG_RGB,
     POS_RGB,
@@ -42,7 +42,7 @@ from generate_between_signs_preview import (
     draw_line,
     mask_boundary,
 )
-from generate_merged_4pct_preview import (
+from .generate_merged_4pct_preview import (
     fill_holes_without_final_zero,
     group_nearby_neutral_regions,
     merge_nearby_correction,

@@ -14,12 +14,10 @@
 
 64XX2·71XX2 는 Case 2(보로노이 분리선)로 간다.
 
-[왜 껍데기가 필요한가]
-그쪽 스크립트는 `<루트>/experiments/zero_line_area_edge_preview/` 에
-자기가 있고 `<루트>/zero_line_detection/zero_boundary.py` 를 import 한다고
-전제한다(`DEMO_ROOT = HERE.parents[1]`). 그 구조를 임시 폴더에 그대로
-만들어 주고 그 안에서 부른다 — lab_runner 와 같은 원칙이다. **받은 코드는
-한 줄도 고치지 않는다.**
+[실행 격리]
+선정 스크립트는 모두 `zero_line_detection/adaptive_bundle` 안에 있다.
+실행할 때는 이 내부 패키지만 임시 작업 공간에 복사하여 입력과 결과를
+격리한다. 프로젝트의 `experiments` 디렉터리는 참조하지 않는다.
 
 그리고 그쪽 main() 은 SPECS 세 부품을 모두 돌며, 하나라도 입력이 없으면
 멈춘다. 앱에서는 한 부품만 있는 게 보통이라, 우리 껍데기에서 SPECS 를
@@ -98,7 +96,7 @@ def _shim(key: str, script: str, argv: list) -> str:
     return (
         "import sys\n"
         f"sys.argv = {['x'] + argv!r}\n"
-        f"import {script} as step\n"
+        f"from zero_line_detection.adaptive_bundle import {script} as step\n"
         "step.SPECS = tuple(s for s in step.SPECS "
         f"if s.key == {key!r})\n"
         "step.main()\n"
@@ -153,15 +151,15 @@ def run(scan_bgr: np.ndarray, cleaned_bgr: np.ndarray,
 
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        work = root / "experiments" / "zero_line_area_edge_preview"
+        package = root / "zero_line_detection"
+        work = package / "adaptive_bundle"
         work.mkdir(parents=True)
-        (root / "zero_line_detection").mkdir()
         for path in BUNDLE.glob("*.py"):
             if path.name == "zero_boundary.py":
-                shutil.copy2(path, root / "zero_line_detection" / path.name)
+                shutil.copy2(path, package / path.name)
             else:
                 shutil.copy2(path, work / path.name)
-        (root / "zero_line_detection" / "__init__.py").write_text("", "utf-8")
+        (package / "__init__.py").write_text("", "utf-8")
 
         feed = root / "input"
         (feed / "colormap").mkdir(parents=True)
@@ -175,7 +173,8 @@ def run(scan_bgr: np.ndarray, cleaned_bgr: np.ndarray,
             shim = work / f"_run_{script}.py"
             shim.write_text(_shim(key, script, argv), encoding="utf-8")
             done = subprocess.run(
-                [sys.executable, shim.name], cwd=str(work),
+                [sys.executable, "-m", f"zero_line_detection.adaptive_bundle.{shim.stem}"],
+                cwd=str(root),
                 capture_output=True, text=True,
                 encoding="utf-8", errors="replace")
             if done.returncode != 0:

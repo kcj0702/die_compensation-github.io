@@ -22,7 +22,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from generate_preview import (
+from .generate_preview import (
     DEFAULT_INPUT,
     SPECS,
     ScanSpec,
@@ -37,7 +37,7 @@ from generate_preview import (
     imwrite_rgb,
     map_deviation,
 )
-from generate_between_signs_preview import (
+from .generate_between_signs_preview import (
     NEG_RGB,
     POS_RGB,
     detect_unmapped_gray,
@@ -45,7 +45,7 @@ from generate_between_signs_preview import (
     mask_boundary,
     strict_morphology,
 )
-from generate_merged_4pct_preview import merge_nearby_correction, resolve_sign_overlap
+from .generate_merged_4pct_preview import merge_nearby_correction, resolve_sign_overlap
 
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "results_correction_only_2pct"

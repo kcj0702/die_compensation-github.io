@@ -93,6 +93,7 @@ from product_alignment.registry import (  # noqa: E402
     part_number_from_name,
     read_image,
 )
+from point_selection import select_key_points  # noqa: E402
 from sheet_export import (  # noqa: E402
     SheetAnnotation,
     SheetPoint,
@@ -1557,6 +1558,14 @@ def analyze_image(
         errors["deviation"] = str(exc)
 
     # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
+    # 검출 결과는 모두 보존하고, 표시 필터가 사용할 주요 포인트 ID만 덧붙인다.
+    selection = select_key_points(points)
+    key_reasons = {key.point_id: list(key.reasons) for key in selection.keys}
+    for point in points:
+        reasons = key_reasons.get(point["id"])
+        if reasons:
+            point["keyReasons"] = reasons
+
     transferred = 0
     if alignment is not None:
         product_width, product_height = alignment.product_size
@@ -1628,6 +1637,7 @@ def analyze_image(
             if alignment_overlay is not None
             else None
         ),
+        "keySelection": selection.to_dict(),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)

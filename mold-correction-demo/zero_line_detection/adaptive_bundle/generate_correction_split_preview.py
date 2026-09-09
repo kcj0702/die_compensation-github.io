@@ -15,10 +15,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from generate_preview import (SPECS, add_title, blend_mask, detect_part_mask,
+from .generate_preview import (SPECS, add_title, blend_mask, detect_part_mask,
                               extract_color_ramp, fit_panel, imread_rgb,
                               imwrite_gray, imwrite_rgb, map_deviation)
-from generate_between_signs_preview import detect_unmapped_gray, draw_line
+from .generate_between_signs_preview import detect_unmapped_gray, draw_line
 
 HERE = Path(__file__).resolve().parent
 DEMO_ROOT = HERE.parents[1]

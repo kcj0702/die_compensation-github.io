@@ -1922,7 +1922,6 @@ button { cursor: pointer; }
 .cad-viewer__zone-new:disabled{color:#5d6c7a;cursor:not-allowed}
 .cad-viewer__puff { border-color: rgba(255,95,168,.45); }
 .cad-align{margin:0 0 8px;padding:9px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb;display:flex;flex-direction:column;gap:7px}
-.sheet-title-block__input{width:100%;border:0;background:transparent;padding:0;font:inherit;color:inherit;text-align:inherit}
 .cad-viewer__morph-key{display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px);font-size:9.5px;color:#b6c6d4}
 .cad-viewer__zone-name{color:#9db0c0;font-size:9px;font-style:normal;flex:1;white-space:nowrap}
 .cad-viewer__zone-pick:disabled{opacity:.7;cursor:default}

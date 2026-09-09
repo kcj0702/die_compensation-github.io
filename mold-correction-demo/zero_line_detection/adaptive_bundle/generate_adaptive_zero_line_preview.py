@@ -25,7 +25,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from generate_preview import (
+from .generate_preview import (
     SPECS,
     ScanSpec,
     add_title,
@@ -38,7 +38,7 @@ from generate_preview import (
     imwrite_rgb,
     map_deviation,
 )
-from generate_between_signs_preview import (
+from .generate_between_signs_preview import (
     NEG_RGB,
     POS_RGB,
     ZERO_CANDIDATE_RGB,
@@ -46,8 +46,8 @@ from generate_between_signs_preview import (
     draw_line,
     mask_boundary,
 )
-from generate_correction_split_preview import read_mask, skeletonize
-from generate_edge_separator_1p5pct_preview import detect_structural_edges
+from .generate_correction_split_preview import read_mask, skeletonize
+from .generate_edge_separator_1p5pct_preview import detect_structural_edges
 
 
 HERE = Path(__file__).resolve().parent
