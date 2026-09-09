@@ -167,6 +167,10 @@ export function stampsOf(region: CadRegion) {
   return [];
 }
 
+/* 가린 것이 없을 때 늘 같은 배열을 준다. 렌더마다 새 배열을 만들면
+   그걸 보고 도는 이펙트가 매번 다시 돈다. */
+const EMPTY_HIDES: CadRegion['shape'][] = [];
+
 export const DIE_CHOICES: CadRegion['die'][] = ['상형', '하형'];
 export const WORK_CHOICES: CadRegion['work'][] = ['용접', '가공', '심고음'];
 /** 시트가 쓰는 원문자. 구역이 열 개를 넘을 일은 없다. */
@@ -466,7 +470,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const partTint = tintByCad[tintKey] ?? null;
   const partTintRef = useRef<string | null>(null);
   partTintRef.current = partTint;
-  const hides = hideByCad[tintKey] ?? [];
+  const hides = hideByCad[tintKey] ?? EMPTY_HIDES;
+  /* 씬을 다시 만들지 말지 가리는 열쇠.
+   *
+   * 이 배열을 그대로 의존성에 넣었더니 `?? []` 가 렌더마다 새 배열을
+   * 만들어, 화면이 다시 그려질 때마다 씬을 통째로 새로 지었다. 카메라가
+   * 매번 처음 자리로 돌아가니 확대도 표준 뷰도 먹히지 않고, WebGL
+   * 컨텍스트가 계속 새로 열려 오류까지 났다. 내용이 바뀔 때만 달라지는
+   * 글자로 바꿔 건다 — 도형 몇 개뿐이라 값이 싸다. */
+  const hideKey = hides.length ? JSON.stringify(hides) : '';
   const hidingRef = useRef(false);
   hidingRef.current = hiding;
   const hidesRef = useRef<CadRegion['shape'][]>([]);
@@ -1954,7 +1966,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
       morph, morphMode, sections, exaggeration, ceiling, light, partTint,
-      hides, rendererRetry]);
+      hideKey, rendererRetry]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
