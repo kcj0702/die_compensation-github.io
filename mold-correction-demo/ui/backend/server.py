@@ -256,6 +256,10 @@ QWEN_REQUIRED_FILES = (
 )
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
+_reader_preload_lock = threading.Lock()
+_reader_preload_thread: threading.Thread | None = None
+_reader_status = "idle"
+_reader_warmup_error: str | None = None
 
 # Qwen 판독은 같은 라벨 그림에 대해 결정적이므로 내용 해시로 재사용한다.
 # 메모리 LRU와 디스크 저장을 함께 써 서버 재시작 뒤에도 긴 재판독을 피한다.
@@ -644,32 +648,80 @@ def _find_qwen_model() -> Path | None:
 
 
 def _get_qwen_reader() -> LabelValueReader:
-    global _reader
+    global _reader, _reader_status, _reader_warmup_error
     if _reader is not None:
         return _reader
     with _reader_lock:
         if _reader is None:
             import torch
 
-            model_path = _find_qwen_model()
-            if model_path is None:
-                raise FileNotFoundError("Qwen2.5-VL-3B 로컬 모델을 찾지 못했습니다.")
-            configured_device = os.environ.get("AJIN_QWEN_DEVICE", "auto").strip().lower()
-            if configured_device in {"", "auto"}:
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "CUDA용 PyTorch를 사용할 수 없어 Qwen 판독을 건너뜁니다."
-                    )
-                device = "cuda"
-            else:
-                device = configured_device
-            _reader = LabelValueReader(
-                model_id=str(model_path),
-                device=device,
-                local_files_only=True,
-                use_8bit=device.startswith("cuda"),
-            )
+            _reader_status = "loading"
+            _reader_warmup_error = None
+            try:
+                model_path = _find_qwen_model()
+                if model_path is None:
+                    raise FileNotFoundError("Qwen2.5-VL-3B 로컬 모델을 찾지 못했습니다.")
+                configured_device = os.environ.get("AJIN_QWEN_DEVICE", "auto").strip().lower()
+                if configured_device in {"", "auto"}:
+                    if not torch.cuda.is_available():
+                        raise RuntimeError(
+                            "CUDA용 PyTorch를 사용할 수 없어 Qwen 판독을 건너뜁니다."
+                        )
+                    device = "cuda"
+                else:
+                    device = configured_device
+                _reader = LabelValueReader(
+                    model_id=str(model_path),
+                    device=device,
+                    local_files_only=True,
+                    use_8bit=device.startswith("cuda"),
+                )
+                _reader_status = "loaded"
+            except Exception as exc:
+                _reader_status = "failed"
+                _reader_warmup_error = str(exc)
+                raise
     return _reader
+
+
+def _preload_qwen_reader() -> None:
+    """모델 로드와 첫 CUDA 실행을 UI 사용 전에 백그라운드에서 끝낸다."""
+    global _reader_status, _reader_warmup_error
+    try:
+        reader = _get_qwen_reader()
+        _reader_status = "warming"
+        warmup = getattr(reader, "warmup", None)
+        if callable(warmup):
+            warmup()
+        _reader_status = "ready"
+    except Exception as exc:
+        _reader_status = "failed"
+        _reader_warmup_error = str(exc)
+        print(f"[qwen] 백그라운드 준비 실패: {exc}", file=sys.stderr)
+
+
+def _start_qwen_preload() -> None:
+    """상태 확인 요청은 즉시 답하고 Qwen 준비만 데몬 스레드로 시작한다."""
+    global _reader_preload_thread, _reader_status
+    configured = os.environ.get("AJIN_QWEN_PRELOAD", "1").strip().lower()
+    if configured in {"0", "false", "no", "off"}:
+        if _reader_status == "idle":
+            _reader_status = "disabled"
+        return
+    if _find_qwen_model() is None:
+        _reader_status = "unavailable"
+        return
+    with _reader_preload_lock:
+        if (_reader is not None or _reader_status in {
+                "loading", "loaded", "warming", "ready", "failed"}):
+            return
+        _reader_status = "scheduled"
+        _reader_preload_thread = threading.Thread(
+            target=_preload_qwen_reader,
+            name="qwen-preload",
+            daemon=True,
+        )
+        _reader_preload_thread.start()
 
 
 def _read_qwen_values(
@@ -1614,6 +1666,8 @@ async def health(_: Request) -> JSONResponse:
     import torch
 
     model_path = _find_qwen_model()
+    if model_path is not None and torch.cuda.is_available():
+        _start_qwen_preload()
     return JSONResponse(
         {
             "ok": True,
@@ -1628,6 +1682,8 @@ async def health(_: Request) -> JSONResponse:
             "registeredMeshes": len(MESH_LIBRARY.registered()),
             "qwenCached": model_path is not None,
             "qwenLoaded": _reader is not None,
+            "qwenStatus": _reader_status,
+            "qwenWarmupError": _reader_warmup_error,
             "cuda": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
             "correctionDatabase": (
@@ -2923,21 +2979,110 @@ def _shift_centers(features: list[dict], offset) -> list[dict]:
     return moved
 
 
-def _load_step_cad_path(path: Path, display_name: str | None = None) -> dict[str, Any]:
+def _pick_symmetric_viewer_mesh(mesh, analysis_id: str | None = None):
+    """좌우 대칭쌍이면 스캔에 더 잘 맞는 한쪽 메시만 고른다.
+
+    분석 결과가 아직 없으면 좌표가 작은 쪽을 일관되게 고른다. 실제 스캔
+    분석이 생기면 프론트가 CAD를 다시 열어 두 절반의 실루엣 점수를 비교한다.
+    반환한 절반 메시를 CAD 캐시에도 넣기 때문에 뷰어만 반쪽이고 제로라인·
+    보정 형상은 전체인 불일치가 생기지 않는다.
+    """
+    import trimesh
+    from cad_import import overlay as ov
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    halves = ov.split_sides(vertices, faces)
+    if len(halves) != 2:
+        return mesh, None
+
+    selected_index = 0
+    matched_to_scan = False
+    analysis = _analysis_cache.get(str(analysis_id or ""))
+    scan_mask = analysis.get("part_mask") if isinstance(analysis, dict) else None
+    if scan_mask is not None and np.any(scan_mask):
+        best_score = -1.0
+        for index, (part_vertices, part_faces, *_split) in enumerate(halves):
+            try:
+                fit = fit_mesh_view(part_vertices, part_faces, scan_mask)
+                score = float(fit.detail_iou or fit.iou)
+            except Exception:
+                continue
+            if score > best_score:
+                best_score = score
+                selected_index = index
+                matched_to_scan = True
+
+    part_vertices, part_faces, axis, middle, side = halves[selected_index]
+    selected = trimesh.Trimesh(
+        vertices=part_vertices,
+        faces=part_faces,
+        process=False,
+    )
+    return selected, {
+        "axis": int(axis),
+        "middle": float(middle),
+        "side": int(side),
+        "part": selected_index + 1,
+        "matchedToScan": matched_to_scan,
+    }
+
+
+def _features_inside_mesh(features: list, mesh) -> list:
+    """선택한 대칭 절반 안에 중심점이 있는 STEP 특징만 남긴다."""
+    bounds = np.asarray(mesh.bounds, dtype=float)
+    tolerance = max(1.0, float(np.ptp(bounds, axis=0).max()) * 0.01)
+    low, high = bounds[0] - tolerance, bounds[1] + tolerance
+    selected = []
+    for feature in features:
+        center = feature.get("center") if isinstance(feature, dict) else None
+        if not isinstance(center, (list, tuple)) or len(center) != 3:
+            continue
+        point = np.asarray(center, dtype=float)
+        if np.all(point >= low) and np.all(point <= high):
+            selected.append(feature)
+    return selected
+
+
+def _load_step_cad_path(
+    path: Path,
+    display_name: str | None = None,
+    analysis_id: str | None = None,
+) -> dict[str, Any]:
     """STEP 경로를 복사하지 않고 파싱해 브라우저용 메시를 만든다."""
     from cad_import import mesh_io, step_reader
 
     parsed = step_reader.read_step_full(path)
+    viewer_mesh, symmetric = _pick_symmetric_viewer_mesh(
+        parsed["mesh"], analysis_id
+    )
     web = mesh_io.to_web_mesh(
-        parsed["mesh"], name=display_name or path.stem, source_format="step"
+        viewer_mesh, name=display_name or path.stem, source_format="step"
     )
     offset = web["summary"]["bounds"]["center"] if web.get("recentered") else None
-    web["holes"] = _shift_centers(parsed["holes"], offset)
-    web["planes"] = _shift_centers(parsed["planes"][:50], offset)
-    web["counts"] = parsed["counts"]
+    holes = parsed["holes"]
+    planes = parsed["planes"]
+    cylinders = parsed.get("cylinders", [])
+    if symmetric is not None:
+        holes = _features_inside_mesh(holes, viewer_mesh)
+        planes = _features_inside_mesh(planes, viewer_mesh)
+        cylinders = _features_inside_mesh(cylinders, viewer_mesh)
+        web["symmetricPair"] = symmetric
+        web["note"] = (
+            "좌우 대칭쌍 CAD에서 "
+            + ("스캔과 더 잘 맞는" if symmetric["matchedToScan"] else "한")
+            + "쪽 파트만 표시했습니다."
+        )
+    web["holes"] = _shift_centers(holes, offset)
+    web["planes"] = _shift_centers(planes[:50], offset)
+    web["counts"] = {
+        "cylinders": len(cylinders) if symmetric is not None else parsed["counts"]["cylinders"],
+        "holes": len(holes) if symmetric is not None else parsed["counts"]["holes"],
+        "planes": len(planes) if symmetric is not None else parsed["counts"]["planes"],
+    }
 
     web["cadId"] = _cache_cad({
-        "mesh": parsed["mesh"],
+        "mesh": viewer_mesh,
         "offset": np.asarray(offset, dtype=float) if offset else np.zeros(3),
         "name": display_name or path.stem,
         "display_vertices": np.asarray(
@@ -3029,7 +3174,10 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
     )
 
 
-def load_registered_cad(part_number: str) -> dict[str, Any]:
+def load_registered_cad(
+    part_number: str,
+    analysis_id: str | None = None,
+) -> dict[str, Any]:
     """품번에 등록된 CAD를 영구 캐시를 사용해 뷰어 데이터로 만든다.
 
     CATIA 원본은 반드시 STEP으로 변환한 뒤 ``load_cad_payload``의 STEP
@@ -3051,7 +3199,7 @@ def load_registered_cad(part_number: str) -> dict[str, Any]:
         converted_from = source_path.suffix.lower().lstrip(".")
 
     if viewer_path.suffix.lower() in {".step", ".stp"}:
-        result = _load_step_cad_path(viewer_path, display_name)
+        result = _load_step_cad_path(viewer_path, display_name, analysis_id)
     else:
         result = load_cad_payload(viewer_path.read_bytes(), viewer_path.name)
     summary = result.get("summary")
@@ -3061,7 +3209,10 @@ def load_registered_cad(part_number: str) -> dict[str, Any]:
     result["registeredPartNumber"] = display_name
     if converted_from is not None:
         result["convertedFrom"] = converted_from
-        result["note"] = "등록된 CATIA 파일을 STEP으로 변환하여 표시했습니다."
+        conversion_note = "등록된 CATIA 파일을 STEP으로 변환했습니다."
+        result["note"] = " ".join(
+            item for item in (conversion_note, result.get("note")) if item
+        )
     return result
 
 
@@ -3775,10 +3926,13 @@ async def cad(request: Request) -> JSONResponse:
         source = str(form.get("source", "")).strip().lower()
         if source == "registered":
             part_number = str(form.get("partNumber", "")).strip().upper()
+            analysis_id = str(form.get("analysisId", "")).strip() or None
             if not part_number:
                 return JSONResponse({"error": "등록 CAD를 열려면 품번이 필요합니다."}, status_code=400)
             try:
-                result = await run_in_threadpool(load_registered_cad, part_number)
+                result = await run_in_threadpool(
+                    load_registered_cad, part_number, analysis_id
+                )
             except FileNotFoundError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=404)
             return JSONResponse(result)

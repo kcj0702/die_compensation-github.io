@@ -89,6 +89,10 @@ export type CadMesh = {
   recentered: boolean;
   cadId?: string;
   note?: string;
+  symmetricPair?: {
+    axis: number; middle: number; side: number; part: number;
+    matchedToScan: boolean;
+  };
 };
 
 export type CadDetail = 'solid' | 'edges' | 'wire';
@@ -357,6 +361,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const [rendererRetry, setRendererRetry] = useState(0);
   const [detail] = useState<CadDetail>('solid');   // 표면만 쓴다
   const [showPlanes, setShowPlanes] = useState(false);
   const [showOverlay, setShowOverlay] = useState(true);
@@ -488,14 +493,33 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
     let renderer: THREE.WebGLRenderer;
     try {
-      // preserveDrawingBuffer: 화면 저장을 하려면 버퍼가 남아 있어야 한다
+      // 캡처 함수가 저장 직전에 직접 render() 하므로 프레임 버퍼를 계속
+      // 붙들고 있을 필요가 없다. 끄면 GPU 메모리와 화면 합성 비용이 준다.
       renderer = new THREE.WebGLRenderer({
-        antialias: true, alpha: false, preserveDrawingBuffer: true });
-    } catch {
-      setError('이 브라우저에서 WebGL 을 쓸 수 없습니다.');
-      return;
+        antialias: true, alpha: false, preserveDrawingBuffer: false });
+    } catch (primaryError) {
+      // 브라우저의 WebGL 컨텍스트/멀티샘플 자원이 잠시 부족한 경우에는
+      // 안티앨리어싱을 끈 가벼운 설정으로 한 번 더 시도한다.
+      try {
+        renderer = new THREE.WebGLRenderer({
+          antialias: false,
+          alpha: false,
+          preserveDrawingBuffer: false,
+          powerPreference: 'default',
+        });
+      } catch (fallbackError) {
+        console.error('[cad-viewer] WebGL renderer initialization failed', {
+          primaryError,
+          fallbackError,
+        });
+        setError('3D 화면을 시작하지 못했습니다. 다른 CAD 탭을 닫거나 페이지를 새로고침해 주세요.');
+        return;
+      }
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Fast Refresh 뒤 이전 오류 상태가 남아 있더라도 재시도가 성공하면 지운다.
+    setError(null);
+    const fullPixelRatio = Math.min(window.devicePixelRatio, 2);
+    renderer.setPixelRatio(fullPixelRatio);
     renderer.setSize(mount.clientWidth, mount.clientHeight);
     renderer.setClearColor(0x16202a);
     renderer.localClippingEnabled = true;
@@ -665,28 +689,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     regionRef.current = regionRoot;
     geometryRef.current = geometry;
 
-    // 삼각망을 눈으로 확인하는 층. 45,224개라 선이 촘촘하다 —
-    // 그래서 기본값은 '모서리'(각진 곳만)로 두고 전체 와이어는 선택이다.
-    const edges = new THREE.LineSegments(
-      new THREE.EdgesGeometry(geometry, 24),
-      new THREE.LineBasicMaterial({ color: 0x2f4256, transparent: true, opacity: 0.85 }),
-    );
-    scene.add(edges);
-    edgeLines.current = edges;
-
-    const wire = new THREE.LineSegments(
-      new THREE.WireframeGeometry(geometry),
-      new THREE.LineBasicMaterial({ color: 0x33566f, transparent: true, opacity: 0.28 }),
-    );
-    wire.visible = false;
-    wire.name = 'wire';
-    scene.add(wire);
-
-    // 장면을 새로 만들었으니 지금 고른 표시 모드를 곧바로 입힌다
+    // 화면에서는 표면 모드만 제공한다. 숨겨진 모서리·와이어 형상을 매번
+    // 만들면 40만 면 CAD를 처음 열 때 CPU와 메모리만 크게 사용한다.
+    edgeLines.current = null;
     const shownAs = detailRef.current;
     surface.visible = shownAs !== 'wire';
-    edges.visible = shownAs === 'edges';
-    wire.visible = shownAs === 'wire';
 
     // ── 홀 ───────────────────────────────────────────────────
     // 실측 부품은 Ø6mm 홀이 1062mm 짜리 형상에 박혀 있다. 실제 크기대로
@@ -1186,6 +1193,34 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       camera.position.clone().sub(target));
     let mode: 'none' | 'pan' | 'rotate' | 'zoom' = 'none';
     let last = { x: 0, y: 0 };
+    let qualityTimer: ReturnType<typeof setTimeout> | null = null;
+    let interactiveQuality = false;
+
+    // 고해상도 화면은 devicePixelRatio=2라 픽셀 수가 네 배다. 드래그와 휠
+    // 조작 중에만 1배 해상도로 낮추고 손을 놓으면 원래 품질로 복구한다.
+    // 형상과 계산 결과는 건드리지 않아 저사양 PC에서도 안전하다.
+    const setInteractionQuality = (interacting: boolean) => {
+      if (qualityTimer !== null) {
+        clearTimeout(qualityTimer);
+        qualityTimer = null;
+      }
+      if (interacting) {
+        if (!interactiveQuality && fullPixelRatio > 1) {
+          interactiveQuality = true;
+          renderer.setPixelRatio(1);
+          renderer.setSize(mount.clientWidth, mount.clientHeight, false);
+        }
+        return;
+      }
+      qualityTimer = setTimeout(() => {
+        if (interactiveQuality) {
+          interactiveQuality = false;
+          renderer.setPixelRatio(fullPixelRatio);
+          renderer.setSize(mount.clientWidth, mount.clientHeight, false);
+        }
+        qualityTimer = null;
+      }, 140);
+    };
 
     const applyCamera = () => {
       spherical.phi = Math.max(0.001, Math.min(Math.PI - 0.001, spherical.phi));
@@ -1230,6 +1265,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         return;
       }
       if (mode === 'none') return;
+      setInteractionQuality(true);
       const dx = event.clientX - last.x;
       const dy = event.clientY - last.y;
       last = { x: event.clientX, y: event.clientY };
@@ -1254,20 +1290,26 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+      setInteractionQuality(true);
       spherical.radius *= Math.exp(Math.sign(event.deltaY) * 0.12);
       applyCamera();
+      setInteractionQuality(false);
     };
     const onButtonDown = (event: PointerEvent) => {
       if (event.button === 1) event.preventDefault();   // 가운데 자동스크롤 막기
       mode = modeFor(event) as typeof mode;
       last = { x: event.clientX, y: event.clientY };
-      if (mode !== 'none') renderer.domElement.setPointerCapture(event.pointerId);
+      if (mode !== 'none') {
+        setInteractionQuality(true);
+        renderer.domElement.setPointerCapture(event.pointerId);
+      }
     };
     const onButtonUp = (event: PointerEvent) => {
       mode = modeFor(event) as typeof mode;
       if (mode === 'none' && renderer.domElement.hasPointerCapture(event.pointerId)) {
         renderer.domElement.releasePointerCapture(event.pointerId);
       }
+      if (mode === 'none') setInteractionQuality(false);
     };
     const blockMenu = (event: Event) => event.preventDefault();
 
@@ -1542,6 +1584,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     return () => {
       cancelAnimationFrame(loop);
       cancelAnimationFrame(resizeFrame);
+      if (qualityTimer !== null) clearTimeout(qualityTimer);
       resize.disconnect();
       renderer.domElement.removeEventListener('pointerdown', onButtonDown);
       renderer.domElement.removeEventListener('pointermove', onMove);
@@ -1553,7 +1596,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       window.removeEventListener('pointerup', onPaintUp);
       renderer.domElement.removeEventListener('pointerdown', onDown);
       renderer.domElement.removeEventListener('pointerup', onUp);
-      renderer.dispose();
       scene.traverse((node: any) => {
         const any = node as THREE.Mesh;
         any.geometry?.dispose?.();
@@ -1561,10 +1603,21 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
         else material?.dispose?.();
       });
-      mount.removeChild(renderer.domElement);
+      scene.environment = null;
+      environment.dispose();
+      renderer.dispose();
+      // 효과 의존성 변경과 개발 중 Fast Refresh가 반복되어도 브라우저의
+      // 제한된 WebGL 컨텍스트가 누적되지 않도록 즉시 반환한다.
+      renderer.forceContextLoss();
+      surfaceRef.current = null;
+      overlayGroup.current = null;
+      holeGroup.current = null;
+      if (renderer.domElement.parentNode === mount) {
+        mount.removeChild(renderer.domElement);
+      }
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
-      morph, morphMode, sections, exaggeration, ceiling]);
+      morph, morphMode, sections, exaggeration, ceiling, rendererRetry]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -1880,7 +1933,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
 
   useEffect(() => { detailRef.current = detail; }, [detail]);
 
-  if (error) return <div className="cad-viewer__error">{error}</div>;
+  if (error) return <div className="cad-viewer__error">
+    <span>{error}</span>
+    <button type="button" onClick={() => {
+      setError(null);
+      setRendererRetry((value) => value + 1);
+    }}>3D 화면 다시 시작</button>
+  </div>;
 
   const sheetCount = overlay?.points
     ?.filter((p) => typeof sheetValues?.[p.id] === 'number').length ?? 0;

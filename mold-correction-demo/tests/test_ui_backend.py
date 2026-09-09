@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode
 from unittest.mock import patch
 
@@ -1122,6 +1123,28 @@ class UiBackendStrictReadingTest(unittest.TestCase):
         ):
             return backend_server.analyze_image(self.image, "synthetic.png")
 
+    def test_background_preload_warms_reader_and_becomes_ready(self) -> None:
+        class WarmReader:
+            warmed = 0
+
+            def warmup(self) -> None:
+                self.warmed += 1
+
+        reader = WarmReader()
+        previous_status = backend_server._reader_status
+        previous_error = backend_server._reader_warmup_error
+        try:
+            with patch.object(
+                backend_server, "_get_qwen_reader", return_value=reader
+            ):
+                backend_server._preload_qwen_reader()
+            self.assertEqual(reader.warmed, 1)
+            self.assertEqual(backend_server._reader_status, "ready")
+            self.assertIsNone(backend_server._reader_warmup_error)
+        finally:
+            backend_server._reader_status = previous_status
+            backend_server._reader_warmup_error = previous_error
+
     def test_reader_initialization_failure_returns_no_made_up_values(self) -> None:
         result = self._analyze_with_reader(FileNotFoundError("model unavailable"))
 
@@ -1523,6 +1546,69 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
 
 
 class RegisteredCadViewerTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        backend_server._cad_cache.clear()
+        backend_server._analysis_cache.clear()
+
+    def test_symmetric_step_displays_and_caches_only_one_part(self) -> None:
+        import trimesh
+
+        left = trimesh.creation.box(extents=[100, 40, 30])
+        left.apply_translation([0, -120, 0])
+        right = trimesh.creation.box(extents=[100, 40, 30])
+        right.apply_translation([0, 120, 0])
+        both = trimesh.util.concatenate([left, right])
+        parsed = {
+            "mesh": both,
+            "cylinders": [
+                {"center": [0, -120, 0]}, {"center": [0, 120, 0]},
+            ],
+            "holes": [
+                {"center": [0, -120, 0]}, {"center": [0, 120, 0]},
+            ],
+            "planes": [
+                {"center": [0, -120, 0]}, {"center": [0, 120, 0]},
+            ],
+            "counts": {"cylinders": 2, "holes": 2, "planes": 2},
+        }
+
+        with patch("cad_import.step_reader.read_step_full", return_value=parsed):
+            result = backend_server._load_step_cad_path(Path("pair.step"), "PAIR")
+
+        self.assertEqual(result["summary"]["n_vertices"], len(left.vertices))
+        self.assertEqual(
+            result["counts"], {"cylinders": 1, "holes": 1, "planes": 1}
+        )
+        self.assertEqual(len(result["holes"]), 1)
+        self.assertIn("한쪽 파트만", result["note"])
+        cached = backend_server._cad_cache[result["cadId"]]
+        self.assertEqual(len(cached["mesh"].vertices), len(left.vertices))
+
+    def test_symmetric_step_prefers_the_half_matching_the_scan(self) -> None:
+        import trimesh
+
+        left = trimesh.creation.box(extents=[100, 40, 30])
+        left.apply_translation([0, -120, 0])
+        right = trimesh.creation.box(extents=[100, 40, 30])
+        right.apply_translation([0, 120, 0])
+        both = trimesh.util.concatenate([left, right])
+        analysis_id = backend_server._cache_analysis({
+            "part_mask": np.ones((20, 20), dtype=np.uint8),
+        })
+        fits = [
+            SimpleNamespace(iou=0.45, detail_iou=0.50),
+            SimpleNamespace(iou=0.91, detail_iou=0.94),
+        ]
+
+        with patch.object(backend_server, "fit_mesh_view", side_effect=fits):
+            selected, details = backend_server._pick_symmetric_viewer_mesh(
+                both, analysis_id
+            )
+
+        self.assertEqual(len(selected.vertices), len(right.vertices))
+        self.assertTrue(details["matchedToScan"])
+        self.assertEqual(details["part"], 2)
+
     def test_rpc_failure_retries_with_a_fresh_catia_instance(self) -> None:
         from cad_import import catia_convert
 
@@ -1577,7 +1663,7 @@ class RegisteredCadViewerTest(unittest.TestCase):
                 result = backend_server.load_registered_cad("64XX2-DR000")
 
         convert.assert_called_once_with(source, library.directory / ".cache")
-        load.assert_called_once_with(converted, "64XX2-DR000")
+        load.assert_called_once_with(converted, "64XX2-DR000", None)
         self.assertEqual(result["summary"]["name"], "64XX2-DR000")
         self.assertEqual(result["summary"]["source_format"], "step")
         self.assertEqual(result["convertedFrom"], "catpart")

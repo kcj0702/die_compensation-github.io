@@ -24,13 +24,15 @@ type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
    섞이지 않도록 화면에서도 구분해 보여준다. */
 /* xProduct/yProduct 는 같은 포인트를 제품데이터 이미지 기준 %로 다시 적은 값이다.
    정렬에 실패했거나 제품데이터가 없으면 비어 있다. */
-type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number };
+type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[] };
+type KeySelection = { ids: string[]; total: number; selected: number; peaks: number; signChanges: number; extremes: number };
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number; source?: string; kind?: 'point' | 'zone'; strength?: number };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
 type ZeroLineCandidate = { rank: number; anchor_start_id: number; anchor_end_id: number; points: [number, number][]; length_px: number; mean_abs_deviation: number; separation: number; balance: number; score: number };
 type ZeroPointCluster = { cluster_id: number; loop: string; kind: 'point' | 'zone'; center: [number, number]; members: [number, number][]; contour: [number, number][]; strength: number; span: number };
 type GreenBelt = { belt_id: number; contour: [number, number][]; center: [number, number]; length_px: number; area_px: number; mean_abs_deviation: number };
 type SimpleZeroLine = { line_id: number; points: [number, number][]; route_type: string; bend_count: number; combined_coverage: number; tolerance_coverage: number; product_coverage: number; support_count: number; length_px: number };
+type ZeroLineResult = { id: number | string; points: [number, number][] };
 type LabShape = { shape_id: number; points: [number, number][]; is_closed: boolean };
 type LabDistance = { to_lab_pct: number; to_predicted_pct: number; diagonal_px: number };
 type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
@@ -81,10 +83,9 @@ type AnalysisResult = {
   alignmentOverlay: string | null;
   zeroOverlay: string | null;
   zeroMask: string | null;
-  /* 백엔드가 스캔 좌표(픽셀)로 보낸 제로 폴리라인. 하이브리드 엔진과 폴백 엔진의 스키마가
-     달라 최소 공통항인 points 만 신뢰한다. 이 벡터가 있으면 제품데이터 위에도 alignment 로
-     좌표를 옮겨 오버레이할 수 있다 — 미리 렌더된 zeroOverlay 는 스캔 좌표계라 불가능. */
-  zeroLines?: { points: [number, number][] }[];
+  /* 스캔 좌표(픽셀) 기반 제로 폴리라인. id는 현재 UI의 개별 표시/숨김 제어에,
+     points는 제품데이터 좌표 변환과 편집 오버레이에 함께 사용한다. */
+  zeroLines?: ZeroLineResult[];
   zeroAnchors: ZeroAnchor[];
   advanceLine: AdvanceLine | null;
   zeroLineCandidates: ZeroLineCandidate[];
@@ -95,6 +96,7 @@ type AnalysisResult = {
   labDistance: LabDistance | null;
   labelZeroLine: LabelZeroLine | null;
   referenceLine: ReferenceLine | null;
+  keySelection?: KeySelection;
   points: PointResult[];
   stats: {
     labelsRemoved: number;
@@ -113,7 +115,7 @@ type AnalysisResult = {
   errors: Partial<Record<Engine | 'product', string>>;
   valueMode: string;
 };
-type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; assetError?: string; assetStatus?: string };
+type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; cadUploading?: boolean; assetError?: string; assetStatus?: string };
 type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
 type ZeroPointOffset = { dx: number; dy: number };
 type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean; points?: Record<string, ZeroPointOffset>; vertices?: [number, number][]; spline?: boolean; splineSegments?: number[] };
@@ -152,7 +154,7 @@ type CorrectionHistoryEntry = {
   createdAt: string;
 };
 type FolderResponse = { available?: boolean; rootName?: string; path?: string; entries?: FolderEntry[]; error?: string };
-type HealthResponse = { ok?: boolean; folderAvailable?: boolean };
+type HealthResponse = { ok?: boolean };
 type FileDatabaseStatus = { configured: boolean; label: string; connected: boolean | null; catalogCount: number; operationCount: number; version?: string; error?: string };
 type FileOrganizerStatus = { sourceRoot: string; destinationRoot: string; sourceAvailable: boolean; destinationAvailable: boolean; database: FileDatabaseStatus };
 type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
@@ -370,10 +372,11 @@ function createDefaultSheetTitleValues(scan: ScanItem): SheetTitleValues {
   };
 }
 
-function Heatmap({ imageUrl, width, height, children, lightBackground = false }: { imageUrl?: string | null; width: number; height: number; children?: React.ReactNode; lightBackground?: boolean }) {
+function Heatmap({ imageUrl, width, height, children, lightBackground = false, containImage = false }: { imageUrl?: string | null; width: number; height: number; children?: React.ReactNode; lightBackground?: boolean; containImage?: boolean }) {
   const [scale, setScale] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  const [containedSize, setContainedSize] = useState<{ width: number; height: number } | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
   const clampPan = (next: { x: number; y: number }, nextScale: number) => {
@@ -389,6 +392,26 @@ function Heatmap({ imageUrl, width, height, children, lightBackground = false }:
     setPan((current) => clampPan(current, bounded));
   };
   const resetView = () => { setScale(1); setPan({ x: 0, y: 0 }); };
+  useEffect(() => {
+    if (!containImage) { setContainedSize(null); return; }
+    const viewport = viewportRef.current;
+    if (!viewport || width <= 0 || height <= 0) return;
+    const update = () => {
+      const availableWidth = viewport.clientWidth;
+      const availableHeight = viewport.clientHeight;
+      if (!availableWidth || !availableHeight) return;
+      const imageRatio = width / height;
+      const viewportRatio = availableWidth / availableHeight;
+      const next = viewportRatio > imageRatio
+        ? { width: availableHeight * imageRatio, height: availableHeight }
+        : { width: availableWidth, height: availableWidth / imageRatio };
+      setContainedSize((current) => current && Math.abs(current.width - next.width) < 0.5 && Math.abs(current.height - next.height) < 0.5 ? current : next);
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [containImage, width, height]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -434,13 +457,25 @@ function Heatmap({ imageUrl, width, height, children, lightBackground = false }:
       <button type="button" onClick={() => setZoom(scale + 0.25)} disabled={scale >= 4} aria-label="확대" title="확대"><ZoomIn size={15} /></button>
       <button type="button" onClick={resetView} disabled={scale === 1 && pan.x === 0 && pan.y === 0} aria-label="화면 맞춤" title="화면 맞춤"><Maximize2 size={15} /></button>
     </div>}
-    {imageUrl ? <div className="heatmap__media" style={{ aspectRatio: `${width} / ${height}` }}>
+    {imageUrl ? <div className="heatmap__media" style={{ aspectRatio: `${width} / ${height}`, ...(containImage && containedSize ? { width: `${containedSize.width}px`, height: `${containedSize.height}px` } : {}) }}>
       <div className="heatmap__transform" style={{ transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${scale})` }}>
         <img src={imageUrl} alt="엔진이 처리한 3D 스캔 편차 이미지" />
         {children}
       </div>
     </div> : <div className="heatmap__empty"><ImageIcon size={34} /><span>분석 결과 이미지가 없습니다.</span></div>}
   </div>;
+}
+
+function ZeroLineLayer({ lines, width, height }: { lines: ZeroLineResult[]; width: number; height: number }) {
+  return <svg className="zero-line-result-layer" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+    {lines.map((line) => {
+      const points = line.points.map(([x, y]) => `${x},${y}`).join(' ');
+      return <g key={String(line.id)}>
+        <polyline className="zero-line-result__outline" points={points} />
+        <polyline className="zero-line-result__line" points={points} />
+      </g>;
+    })}
+  </svg>;
 }
 
 const MIN_ANNOTATION_SIZE = 2;
@@ -532,7 +567,7 @@ function normalizeAnnotation(annotation: Annotation): Annotation {
   return { ...annotation, x: clamp(x, 0, 100 - w), y: clamp(y, 0, 100 - h), w, h };
 }
 
-function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange, detailMode, onDetailMode, labelAreaMode, onLabelAreaMode, addPointMode, onAddPointMode }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void; detailMode?: boolean; onDetailMode?: () => void; labelAreaMode?: 'hide' | 'show' | null; onLabelAreaMode?: (mode: 'hide' | 'show') => void; addPointMode?: boolean; onAddPointMode?: () => void }) {
+function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange, detailMode, onDetailMode, labelAreaMode, onLabelAreaMode, addPointMode, onAddPointMode, zeroEditActive, zeroEditDisabled, onZeroEdit }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void; detailMode?: boolean; onDetailMode?: () => void; labelAreaMode?: 'hide' | 'show' | null; onLabelAreaMode?: (mode: 'hide' | 'show') => void; addPointMode?: boolean; onAddPointMode?: () => void; zeroEditActive?: boolean; zeroEditDisabled?: boolean; onZeroEdit?: () => void }) {
   const tools: { id: AnnotationTool; icon: typeof Square; label: string }[] = [
     { id: 'select', icon: MousePointer2, label: '선택 · 이동' },
     { id: 'rect', icon: Square, label: '사각형 강조' },
@@ -556,6 +591,7 @@ function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selected
     {onAddPointMode && <button type="button" className={addPointMode ? 'active add-point' : ''} onClick={onAddPointMode} aria-pressed={addPointMode} aria-label="보정 포인트 추가" title="보정 포인트 추가 — 부품 위를 누르면 그 자리의 편차값을 색에서 추정합니다"><Crosshair size={14} /></button>}
     {onDetailMode && <span className="annotation-toolbar__divider" />}
     <button type="button" onClick={onClearAll} disabled={!hasAnnotations} aria-label="주석 전체 삭제" title="주석 전체 삭제"><Trash2 size={14} /></button>
+    {onZeroEdit && <button type="button" className={`annotation-toolbar__zero-edit ${zeroEditActive ? 'active' : ''}`} onClick={onZeroEdit} disabled={zeroEditDisabled} aria-pressed={Boolean(zeroEditActive)} title={zeroEditDisabled ? '편집 가능한 제로라인 좌표가 없습니다' : '제로라인의 꼭짓점과 위치를 수정합니다'}><Move size={18} /><span>제로라인 수정</span></button>}
   </div>;
 }
 
@@ -780,8 +816,9 @@ function AnnotationLayer({ annotations, tool, setTool, selectedId, onSelect, onC
           onPointerMove={handleMove} onPointerUp={endOperation} onPointerCancel={endOperation} />)}
         <button type="button" className="annotation-delete" style={{ left: `${selectedAnchorX}%`, top: `${selectedAnchorY}%` }} onPointerDown={(event) => event.stopPropagation()}
           onClick={(event) => { event.stopPropagation(); onDelete(selectedId); onSelect(null); }} aria-label="이 주석 삭제" title="삭제 (Delete)"><X size={11} /></button>
+        {/* 기본 동작까지 막으면 Chrome에서 select 메뉴가 열리지 않는다. */}
         {selectedAnnotation.kind === 'text' && <div className="annotation-fontsize" style={{ left: `${Math.min(selectedAnnotation.x, selectedAnnotation.x + selectedAnnotation.w)}%`, top: `${Math.min(selectedAnnotation.y, selectedAnnotation.y + selectedAnnotation.h) + Math.abs(selectedAnnotation.h)}%` }}
-          onPointerDown={(event) => { event.stopPropagation(); event.preventDefault(); }}>
+          onPointerDown={(event) => event.stopPropagation()}>
           <select className="annotation-fontsize__font" value={selectedFontFamily} onChange={(event) => onCommit({ ...selectedAnnotation, fontFamily: event.target.value })} aria-label="주석 글꼴 선택" title="글꼴 선택">
             {FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}
           </select>
@@ -1290,13 +1327,13 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, onRegionsChange,
 function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: View; setView: (view: View) => void; collapsed: boolean; setCollapsed: (value: boolean) => void; hasResult: boolean }) {
   const items = [
     { id: 'workspace' as const, label: '엔진 결과', icon: BarChart3 },
-    { id: 'service' as const, label: 'ADC 보정 시트', icon: Layers3 },
-    { id: 'files' as const, label: '품번 파일 정리', icon: Files },
+    { id: 'service' as const, label: '보정 시트', icon: Layers3 },
     { id: 'cad' as const, label: '3D CAD 뷰어', icon: Layers3 },
+    { id: 'files' as const, label: '품번 파일 정리', icon: Files, separated: true },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
     <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /></div>
-    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">ADC WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id === 'service' && !hasResult; const active = item.id === 'workspace' ? view === 'workspace' || view === 'results' : view === item.id; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={active ? 'active' : ''}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
+    <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id === 'service' && !hasResult; const active = item.id === 'workspace' ? view === 'workspace' || view === 'results' : view === item.id; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={`${active ? 'active' : ''}${item.separated ? ' sidebar__nav-item--separated' : ''}`}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
 }
@@ -1313,7 +1350,7 @@ function AnalysisTabs({ active, result, scanReady, onSelect }: { active: Analysi
 
 function Header({ scans, activeId, setActiveId, onSaveFile, onLoadFile, onReset, note }: { scans: ScanItem[]; activeId?: string; setActiveId: (id: string) => void; onSaveFile: () => void; onLoadFile: (file: File) => void; onReset: () => void; note?: string | null }) {
   const fileRef = useRef<HTMLInputElement>(null);
-  return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span><h1>ADC <small>Ajin Die Compensation</small></h1></div><div className="topbar__actions">
+  return <header className="topbar"><div><span className="topbar__context">AJIN INDUSTRIAL · DIE ENGINEERING</span></div><div className="topbar__actions">
     <label className="item-select"><span>현재 품번</span><select value={activeId || ''} disabled={!scans.length} onChange={(e) => setActiveId(e.target.value)}><option value="">등록된 이미지 없음</option>{scans.map((scan) => <option value={scan.id} key={scan.id}>{scan.partNo} · {scan.name}</option>)}</select></label>
     {/* 작업 내용은 자동으로 이 PC 에 남는다. 파일로 빼두면 보관하거나
         다른 사람에게 넘길 수 있다. */}
@@ -1388,7 +1425,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
   const attachReferenceFiles = async (id: string, files: FileList | File[]) => {
     const selected = Array.from(files);
     const image = selected.find((file) => file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|tiff?)$/i.test(file.name));
-    const cadFiles = selected.filter((file) => /\.(catpart|step|stp|stl)$/i.test(file.name));
+    const cadFiles = selected.filter((file) => /\.(catpart|catproduct|step|stp|stl)$/i.test(file.name));
     const scan = scans.find((item) => item.id === id);
     if (!scan) return;
     if (image) setScans((current) => current.map((item) => {
@@ -1397,7 +1434,13 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
       return { ...item, productFile: image, productUrl: URL.createObjectURL(image), status: item.status === 'done' ? 'ready' : item.status, assetError: undefined };
     }));
     if (!cadFiles.length) return;
-    setScans((current) => current.map((item) => item.id === id ? { ...item, assetError: undefined, assetStatus: 'CAD 업로드 준비 중…' } : item));
+    setScans((current) => current.map((item) => item.id === id ? {
+      ...item,
+      status: item.status === 'done' ? 'ready' : item.status,
+      cadUploading: true,
+      assetError: undefined,
+      assetStatus: 'CAD 업로드 준비 중…',
+    } : item));
     for (const file of cadFiles) {
       try {
         const partNumber = partNoFromName(scan.partNo) || partNoFromName(file.name);
@@ -1418,7 +1461,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
     /* 라이브러리 저장이나 파일명 판정 실패가 뷰어 추가를 막아서는 안 된다.
        형상은 먼저 열고 실제 정합 결과로 맞는 파일인지 판단한다. */
     setScans((current) => current.map((item) => item.id === id
-      ? { ...item, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
+      ? { ...item, cadUploading: false, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
       : item));
   };
   const detachProduct = (id: string) => setScans((current) => current.map((scan) => {
@@ -1431,14 +1474,37 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
     <AnalysisTabs active="scan" result={result} scanReady={scans.length > 0} onSelect={(step) => step !== 'scan' && onOpenEngine(step)} />
     <div className="workspace-grid">
       <div className="scan-data-preview card">
-        <div className="viewer-toolbar"><div><span className={`status ${previewScan ? 'status--done' : 'status--ready'}`}>{previewScan ? <><Check size={13} /> 등록 완료</> : '등록 대기'}</span><b>{previewScan?.name || '등록된 스캔 이미지가 없습니다'}</b></div>{previewScan && <span className="count-chip">{previewScan.partNo}</span>}</div>
-        <div className="scan-data-preview__stage">{previewScan ? <img src={previewScan.url} alt={`${previewScan.name} 원본 스캔 데이터`} /> : <div className="scan-data-preview__empty"><ImageIcon size={34} /><b>스캔 이미지를 등록하면 이곳에 크게 표시됩니다</b></div>}</div>
-        {previewScan && <div className="viewer-legend"><span><i className="legend-dot" style={{ background: '#3b75c3' }} /> 현재 등록 이미지</span><span>{previewScan.size}</span></div>}
+        <div className="viewer-toolbar"><div><b>{previewScan?.name || '업로드된 자료가 없습니다.'}</b></div>{previewScan && <span className="count-chip">{previewScan.partNo}</span>}</div>
+        <div className="scan-data-preview__stage">{previewScan ? <img src={previewScan.url} alt={`${previewScan.name} 원본 스캔 데이터`} /> : <div className="scan-data-preview__empty"><ImageIcon size={34} /></div>}</div>
       </div>
-      <div className="upload-panel card"><div className="card-title"><div><h3>스캔 이미지 등록</h3><p>PNG, JPG, WEBP · 여러 파일 동시 선택 가능</p></div><span className="count-chip">{scans.length}개 등록</span></div>
-      <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} /><span className="dropzone__icon"><UploadCloud size={29} /></span><b>스캔 이미지를 여기에 놓으세요</b><span>또는 클릭하여 파일 선택</span><em>여러 품번의 이미지를 동시에 올릴 수 있습니다</em></label>
-      <div className="file-list"><div className="file-list__head"><span>등록된 이미지</span><button><ListFilter size={15} /> 상태순</button></div>{!scans.length && <div className="empty-file-list">아직 등록된 이미지가 없습니다.</div>}{scans.map((scan) => <div className="file-row" key={scan.id}><div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div><div className="file-row__name"><b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span><span className="product-slot"><label><input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff,.catpart,.step,.stp,.stl" onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} /><UploadCloud size={12} /> 기준 시트·CAD 등록</label>{scan.productFile && <><ImageIcon size={12} /> {scan.productFile.name}</>}{scan.cadFiles?.map((file) => <span className="product-slot__cad" key={file.name}><Layers3 size={12} /> {file.name}</span>)}{(scan.productFile || scan.cadFiles?.length) ? <button type="button" onClick={() => detachProduct(scan.id)} aria-label="기준 시트 이미지 해제">이미지 해제</button> : null}</span>{scan.assetStatus && <span className="asset-status">{scan.assetStatus}</span>}{scan.assetError && <span className="asset-error">CAD 등록 오류: {scan.assetError}</span>}</div><span className={`status status--${scan.status}`}>{scan.status === 'done' ? <><Check size={13} /> 분석 완료</> : scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>{scan.status === 'done' ? <button className="text-button" onClick={() => onOpenResults(scan.id)}>결과 보기 <ArrowRight size={14} /></button> : <button className="icon-button icon-button--small" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 삭제`}><X size={15} /></button>}</div>)}</div>
-      <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '대기 이미지 전체 분석 시작'}<ArrowRight size={18} /></button>
+      <div className="upload-panel card">
+        <div className="card-title"><div><h3>파일 업로드</h3><p>PNG, JPG, WEBP</p></div><span className="count-chip">{scans.length}개 등록</span></div>
+        <label className={`dropzone ${dragging ? 'dropzone--active' : ''}`} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(e: DragEvent<HTMLLabelElement>) => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files); }}>
+          <input type="file" multiple accept="image/png,image/jpeg,image/webp,image/bmp,image/tiff" onChange={(e: ChangeEvent<HTMLInputElement>) => e.target.files && addFiles(e.target.files)} />
+          <span className="dropzone__icon"><UploadCloud size={29} /></span><b>파일 업로드</b>
+        </label>
+        <div className="file-list">
+          <div className="file-list__head"><span>업로드된 파일</span></div>
+          {!scans.length && <div className="empty-file-list">아직 업로드된 파일이 없습니다.</div>}
+          {scans.map((scan) => <div className="file-row" key={scan.id}>
+            <div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div>
+            <div className="file-row__name">
+              <b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span>
+            </div>
+            <div className="file-row__actions">
+              {scan.status === 'done'
+                ? <button type="button" className="status status--done status--result" onClick={() => onOpenResults(scan.id)} title="분석 결과 보기"><Check size={13} /> 분석 완료</button>
+                : <span className={`status status--${scan.status}`}>{scan.status === 'analyzing' ? <><Activity size={13} /> 분석 중</> : scan.status === 'error' ? '오류' : '대기'}</span>}
+              <label className={`cad-upload-action${scan.cadFiles?.length ? ' cad-upload-action--done' : ''}${scan.assetError ? ' cad-upload-action--error' : ''}`} title={scan.assetError ? `CAD 등록 오류: ${scan.assetError}` : scan.cadFiles?.length ? scan.cadFiles.map((file) => file.name).join(', ') : '이 스캔과 연결할 CAD 파일을 등록합니다'}>
+                <input type="file" multiple accept=".catpart,.catproduct,.step,.stp,.stl" disabled={scan.cadUploading} onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} />
+                <Layers3 size={13} /> CAD 파일 업로드
+                {scan.cadUploading ? <Activity className="cad-upload-action__progress" size={13} /> : scan.cadFiles?.length ? <Check className="cad-upload-action__check" size={14} strokeWidth={3} /> : null}
+              </label>
+              <button className="icon-button icon-button--small upload-cancel-button" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 업로드 취소`} title="업로드 취소"><X size={15} /></button>
+            </div>
+          </div>)}
+        </div>
+        <button className="primary-button primary-button--wide" onClick={analyzeAll} disabled={!backendOnline || analyzingCount > 0 || !scans.some((scan) => scan.status === 'ready' || scan.status === 'error')}><Play size={17} fill="currentColor" /> {analyzingCount ? `${analyzingCount}개 이미지 분석 중` : backendOnline === false ? '로컬 엔진 서버 연결 필요' : '3D 스캔 데이터 분석'}<ArrowRight size={18} /></button>
       </div>
     </div>
   </section>;
@@ -1467,28 +1533,43 @@ function AlignmentBar({ alignment, partNumber, source, transferred, total, busy,
   return <div className={`alignment-bar ${trusted ? '' : 'alignment-bar--check'}`}>
     <span className="alignment-bar__state">{trusted ? <><ShieldCheck size={14} /> 자동 판정 신뢰 가능</> : <><MoveRight size={14} /> 방향 확인 필요</>}</span>
     <span className="alignment-bar__facts"><b>{partNumber || '품번 미확인'}</b><small>{source || '제품데이터 없음'}</small><small>외형 {(alignment.outlineIou * 100).toFixed(1)}% · 구멍 {(alignment.holeIou * 100).toFixed(1)}% · 2위와 격차 {alignment.margin.toFixed(3)}</small><small>전사 {transferred}/{total}개</small></span>
-    {onFlip && <span className="alignment-bar__actions">{/* 분석 결과는 화면에 남아 있으므로, 엔진이 바뀌면 좌표만 다시 받아 온다. Qwen 판독은 다시 하지 않는다. */}<button type="button" disabled={busy} onClick={() => onFlip()} title="정렬만 다시 계산합니다. 방향은 자동 판정과 확정 저장분을 따릅니다">정렬 다시 계산</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, alignment.flipY, alignment.rotation === 90 ? 0 : 90)}>90° 회전</button><button type="button" disabled={busy} onClick={() => onFlip(!alignment.flipX, alignment.flipY, alignment.rotation ?? 0)}>좌우 뒤집기</button><button type="button" disabled={busy} onClick={() => onFlip(alignment.flipX, !alignment.flipY, alignment.rotation ?? 0)}>상하 뒤집기</button>{onConfirm && <button type="button" className="primary" disabled={busy || confirmed || !partNumber} onClick={onConfirm}>{confirmed ? <><Check size={13} /> 품번에 저장됨</> : '이 방향으로 확정'}</button>}</span>}
+    {onFlip && <span className="alignment-bar__actions">{/* 분석 결과는 화면에 남아 있으므로, 엔진이 바뀌면 좌표만 다시 받아 온다. Qwen 판독은 다시 하지 않는다. */}<button type="button" disabled={busy} onClick={() => onFlip?.()} title="정렬만 다시 계산합니다. 방향은 자동 판정과 확정 저장분을 따릅니다">정렬 다시 계산</button><button type="button" disabled={busy} onClick={() => onFlip?.(alignment.flipX, alignment.flipY, alignment.rotation === 90 ? 0 : 90)}>90° 회전</button><button type="button" disabled={busy} onClick={() => onFlip?.(!alignment.flipX, alignment.flipY, alignment.rotation ?? 0)}>좌우 뒤집기</button><button type="button" disabled={busy} onClick={() => onFlip?.(alignment.flipX, !alignment.flipY, alignment.rotation ?? 0)}>상하 뒤집기</button>{onConfirm && <button type="button" className="primary" disabled={busy || confirmed || !partNumber} onClick={onConfirm}>{confirmed ? <><Check size={13} /> 품번에 저장됨</> : '이 방향으로 확정'}</button>}</span>}
   </div>;
 }
 
-function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, onAllPointsToggle, onRealign, onConfirmAlignment }: { scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onAllPointsToggle: (visible: boolean) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
+function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, onRealign, onConfirmAlignment }: { scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
   /* 편차 뷰는 세 가지로 본다: 스캔 위, 제품데이터 위, 그리고 정렬 확인용 실루엣 겹침. */
   const [frame, setFrame] = useState<'scan' | 'product' | 'overlay'>('scan');
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
-  const result = scan.result!; const meta = engineMeta[engine]; const summary = engineSummary(engine, result);
-  const engineWarnings = result.warningsByEngine?.[engine] ?? (engine === 'zero' ? result.warnings : []);
-  const visibleLabelIds = new Set(result.points.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
+  const [keyPointsOnly, setKeyPointsOnly] = useState(false);
+  const [hiddenZeroLineIds, setHiddenZeroLineIds] = useState<Set<string>>(new Set());
+  useEffect(() => { setHiddenZeroLineIds(new Set()); }, [scan.id]);
+  const result = scan.result!;
+  const keyPointIds = new Set(result.keySelection?.ids ?? result.points.filter((point) => point.keyReasons?.length).map((point) => point.id));
+  const hasKeySelection = result.keySelection !== undefined;
+  const showKeyPointsOnly = keyPointsOnly && hasKeySelection;
+  const displayedPoints = engine === 'deviation' && showKeyPointsOnly ? result.points.filter((point) => keyPointIds.has(point.id)) : result.points;
+  const visibleLabelIds = new Set(displayedPoints.filter((point) => !hiddenPointIds.has(point.id)).map((point) => point.id));
   const alignment = result.alignment;
   const productReady = engine === 'deviation' && Boolean(result.productImage && alignment);
   const showFrame = productReady ? frame : 'scan';
   /* 제품데이터 뷰에서는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다. */
   const productPoints = result.points.filter((point) => point.xProduct !== undefined && point.yProduct !== undefined).map((point) => ({ ...point, x: point.xProduct!, y: point.yProduct! }));
-  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
+  const displayedProductPoints = productPoints.filter((point) => !showKeyPointsOnly || keyPointIds.has(point.id));
+  const zeroLines = (result.zeroLines ?? []).filter((line) => Array.isArray(line.points) && line.points.length >= 2);
+  const visibleZeroLines = zeroLines.filter((line) => !hiddenZeroLineIds.has(String(line.id)));
+  const hasZeroLineControls = engine === 'zero' && zeroLines.length > 0;
+  const hasInspectionPanel = engine === 'label' || engine === 'deviation' || hasZeroLineControls;
+  const toggleZeroLine = (id: number | string) => setHiddenZeroLineIds((current) => {
+    const next = new Set(current); const key = String(id);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  });
+  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : engine === 'zero' && hasZeroLineControls ? result.cleanImage || scan.url : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
   const frameWidth = showFrame === 'scan' || !alignment ? result.source.width : alignment.productSize[0];
   const frameHeight = showFrame === 'scan' || !alignment ? result.source.height : alignment.productSize[1];
   const toggleLabel = onPointToggle;
-  const allLabelsVisible = result.points.length > 0 && visibleLabelIds.size === result.points.length;
   const runRealign = async (flipX?: boolean, flipY?: boolean) => {
     if (!onRealign || busy) return;
     setBusy(true); setConfirmed(false);
@@ -1499,10 +1580,40 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
     setBusy(true);
     try { await onConfirmAlignment(); setConfirmed(true); } finally { setBusy(false); }
   };
-  return <section className={`page page--results page--results-${engine}`}><div className="page-heading page-heading--compact"><div><span className="breadcrumb">엔진 결과 <ChevronRight size={14} /> {scan.partNo}</span><h2>단계별 분석 결과</h2><p>{scan.name} · {result.source.width} × {result.source.height}px</p></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
+  return <section className={`page page--results page--results-${engine}`}><div className="page-heading page-heading--compact"><div><h2>3D 스캔 데이터 분석</h2></div><button className="primary-button" onClick={onService}>보정 시트 만들기 <ArrowRight size={17} /></button></div>
     <AnalysisTabs active={engine} result={result} scanReady onSelect={(step) => step === 'scan' ? onScanData() : setEngine(step)} />
-    <div className="results-layout"><div className="viewer-card card"><div className="viewer-toolbar"><div><span className={`status ${result.errors[engine] ? 'status--error' : 'status--done'}`}>{result.errors[engine] ? <><X size={13} /> 실행 실패</> : <><Check size={13} /> 실제 분석 완료</>}</span><b>{meta.name}</b></div><div>{productReady && <div className="frame-toggles">{([['scan', '스캔 위'], ['product', '제품데이터 위'], ['overlay', '정렬 확인']] as const).map(([key, label]) => <button key={key} type="button" className={showFrame === key ? 'active' : ''} onClick={() => setFrame(key)}>{label}</button>)}</div>}{engine === 'deviation' && <button className="tool-button" onClick={() => onAllPointsToggle(!allLabelsVisible)}>{allLabelsVisible ? <EyeOff size={14} /> : <Eye size={14} />} 라벨 전체 {allLabelsVisible ? 'OFF' : 'ON'}</button>}</div></div>{productReady && alignment && <AlignmentBar alignment={alignment} partNumber={result.partNumber} source={result.productSource} transferred={productPoints.length} total={result.points.length} busy={busy} confirmed={confirmed} onFlip={onRealign ? runRealign : undefined} onConfirm={onConfirmAlignment ? runConfirm : undefined} />}<div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}><Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'}>{engine === 'deviation' && showFrame !== 'overlay' && <CorrectionPoints coefficient={-1} points={showFrame === 'product' ? productPoints : result.points} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}</Heatmap></div><div className="viewer-legend"><span><i className="legend-dot" style={{ background: meta.color }} /> 현재 표시: {meta.name}</span><span>{engine === 'deviation' ? '라벨이나 포인트 점을 누르면 개별 표시를 켜고 끌 수 있습니다.' : '표시된 값과 위치는 업로드 이미지의 실제 엔진 결과입니다.'}</span></div></div>
-      <aside className="inspection-panel"><div className="score-card card"><span className="score-card__icon" style={{ color: meta.color, background: `${meta.color}12` }}>{engine === 'label' ? <Sparkles /> : engine === 'deviation' ? <Activity /> : <Gauge />}</span><span>핵심 결과</span><strong style={{ color: result.errors[engine] ? '#bd4650' : meta.color }}>{summary.stat}</strong><p>{summary.detail}</p></div><div className="card plain-summary"><h3>쉽게 보는 결과</h3><div className="summary-line"><Check size={16} /><div><b>처리 방식</b><span>{engine === 'label' ? 'label_removal의 인페인팅 결과입니다.' : engine === 'deviation' ? '라벨 제거 이미지에 deviation_extraction의 지시선 끝점과 판독값을 겹쳐 표시합니다.' : 'zero_line_detection의 컬러바 기반 결과입니다.'}</span></div></div>{engineWarnings.length > 0 && <div className="summary-line warning"><MoveRight size={16} /><div><b>확인 필요</b><span>{engineWarnings[0]}</span></div></div>}</div><div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>라벨 {visibleLabelIds.size}/{result.points.length}</span></div>{result.points.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!result.points.length && <p className="empty-mini">검출된 포인트가 없습니다.</p>}</div></aside>
+    <div className={`results-layout ${hasInspectionPanel ? '' : 'results-layout--viewer-only'}`}>
+      <div className="viewer-card card">
+        <div className="viewer-toolbar">
+          <div><b>{scan.name}</b></div>
+          <div>
+            {productReady && <div className="frame-toggles">{([['scan', '스캔 위'], ['product', '제품데이터 위'], ['overlay', '정렬 확인']] as const).map(([key, label]) => <button key={key} type="button" className={showFrame === key ? 'active' : ''} onClick={() => setFrame(key)}>{label}</button>)}</div>}
+            {engine === 'deviation' && <div className={`point-filter-switch ${showKeyPointsOnly ? 'active' : ''}`}>
+              <span>주요 포인트만 표시</span>
+              <button type="button" role="switch" aria-checked={showKeyPointsOnly} aria-label="주요 포인트만 표시" disabled={!hasKeySelection} onClick={() => setKeyPointsOnly((current) => !current)} title={hasKeySelection ? '국소 극값, 부호 변화, 전체 최대·최소 포인트만 표시합니다.' : '주요 포인트 정보가 없습니다. 이미지를 다시 분석해 주세요.'}><i /></button>
+            </div>}
+          </div>
+        </div>
+        {productReady && alignment && <AlignmentBar alignment={alignment} partNumber={result.partNumber} source={result.productSource} transferred={productPoints.length} total={result.points.length} busy={busy} confirmed={confirmed} onFlip={onRealign ? runRealign : undefined} onConfirm={onConfirmAlignment ? runConfirm : undefined} />}
+        <div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}>
+          <Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'} containImage>
+            {engine === 'deviation' && showFrame !== 'overlay' && <CorrectionPoints coefficient={-1} points={showFrame === 'product' ? displayedProductPoints : displayedPoints} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}
+            {engine === 'zero' && hasZeroLineControls && <ZeroLineLayer lines={visibleZeroLines} width={frameWidth} height={frameHeight} />}
+          </Heatmap>
+        </div>
+      </div>
+      {engine === 'label' && <aside className="inspection-panel">
+        <div className="card label-removal-count">
+          <span className="label-removal-count__icon"><Sparkles size={19} /></span>
+          <div><span>제거된 라벨 영역</span><strong>{result.stats.labelsRemoved}<small>개</small></strong><p>라벨 제거 및 주변 색상 복원 완료</p></div>
+        </div>
+      </aside>}
+      {engine === 'deviation' && <aside className="inspection-panel">
+        <div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>{showKeyPointsOnly ? `주요 ${displayedPoints.length}/${result.points.length}` : `${visibleLabelIds.size}/${result.points.length}`}</span></div>{displayedPoints.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!displayedPoints.length && <p className="empty-mini">표시할 포인트가 없습니다.</p>}</div>
+      </aside>}
+      {hasZeroLineControls && <aside className="inspection-panel">
+        <div className="card mini-table zero-line-list"><div className="card-title"><h3>추천 제로라인</h3><span>{visibleZeroLines.length}/{zeroLines.length}</span></div>{zeroLines.map((line, index) => { const visible = !hiddenZeroLineIds.has(String(line.id)); const label = `ZL-${String(index + 1).padStart(2, '0')}`; return <div className="zero-line-list-row" key={String(line.id)}><span><i className="zero-line-swatch" />{label}</span><small>{visible ? '표시' : '숨김'}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleZeroLine(line.id)} aria-label={`${label} ${visible ? '숨기기' : '표시하기'}`} title={visible ? '제로라인 숨기기' : '제로라인 표시하기'}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}</div>
+      </aside>}
     </div></section>;
 }
 
@@ -1865,10 +1976,13 @@ function FileOrganizerPage() {
       <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
     </div>}
     <div className="file-organizer-grid">
+      <div className="file-organizer-main">
       <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3><p>외부 파일을 끌어 놓거나 지정된 원본 폴더를 스캔하세요.</p></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
         <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
         <div className="file-organizer-table"><div className="file-organizer-table__head"><input type="checkbox" checked={items.length > 0 && selected.size === items.length} onChange={(event) => setSelected(event.target.checked ? new Set(items.map((item) => item.id)) : new Set())} aria-label="전체 선택" /><span>파일명 / 감지 태그</span><span>자료유형</span><span>예정 위치</span><span>신뢰도</span><span /></div>{items.map((item) => <div className="file-organizer-row" key={item.id} draggable onDragStart={(event) => { const ids = selected.has(item.id) ? [...selected] : [item.id]; event.dataTransfer.setData('text/ajin-file-ids', JSON.stringify(ids)); event.dataTransfer.effectAllowed = 'move'; }} title={item.reasons.join('\n')}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`${item.name} 선택`} /><span className="file-organizer-name"><File size={17} /><span><b>{item.name}</b><small>{[item.customer, item.itemNo, item.productName, item.process].filter(Boolean).join(' · ') || '품번 태그 미검출'} <em>{item.sourceKind === 'upload' ? '업로드' : '원본'}</em></small></span></span><span className={`file-category category-${item.categoryKey || 'unknown'}`}>{item.categoryKey || '--'} {item.categoryLabel}</span><span className="file-target-path" title={item.targetPath}>{item.targetDir || '_미분류'}</span><span className={`file-confidence ${item.confidence >= 70 ? 'good' : ''}`}>{item.confidence}%</span><button type="button" className="file-row-delete" onClick={() => removeItem(item)} aria-label={`${item.name} 대기열에서 삭제`} title="대기열에서 삭제"><Trash2 size={14} /></button></div>)}{!items.length && <div className="file-organizer-empty">분류할 파일이 아직 없습니다.</div>}</div>
         <div className="file-execute-bar"><div className="file-operation-switch"><button type="button" className={operation === 'copy' ? 'active' : ''} onClick={() => setOperation('copy')}><Copy size={14} /> 복사</button><button type="button" className={operation === 'move' ? 'active' : ''} onClick={() => setOperation('move')}><Move size={14} /> 이동</button></div><label>동명 파일<select value={conflict} onChange={(event) => setConflict(event.target.value as typeof conflict)}><option value="rename">자동 이름 변경</option><option value="skip">건너뛰기</option><option value="overwrite">덮어쓰기</option></select></label><button type="button" className="primary-button file-execute" onClick={execute} disabled={busy || !activeItems.length}>{busy ? '처리 중…' : `선택 ${activeItems.length}개 정리 실행`} <ArrowRight size={16} /></button></div>
+      </div>
+      <Explorer />
       </div>
       <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3><p>파일을 끌어 놓아 위치를 바꾸세요. (실제 폴더 구조)</p></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div><div className="file-target-hint"><b>세부 자동 분류</b><span>금형도면은 LAYOUT·구조도·패턴도·완성도와 OP별로, 문서는 성형해석·보정이력으로, NC데이터는 OP10~OP50으로 나뉩니다.</span></div><div className="file-target-hint"><b>드래그 앤 드롭</b><span>파일을 폴더 위에 놓아 자동 분류 위치를 직접 수정할 수 있습니다.</span></div></aside>
     </div>
@@ -1955,7 +2069,7 @@ function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, del
   </div>;
 }
 
-function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange }: { scan: ScanItem; folderAvailable: boolean; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void }) {
+function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange }: { scan: ScanItem; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [zeroPanel, setZeroPanel] = useState(false);
   const [zeroPointAddMode, setZeroPointAddMode] = useState(false);
@@ -2587,10 +2701,21 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
      스캔 모드에서 zeroOverlay(래스터)만 있고 벡터가 없으면 종전대로 오버레이를 그림 자체에 굽는다.
      벡터가 있으면 굳이 굽지 않고 깨끗한 이미지를 쓰고, 위에 SVG 폴리라인으로 얹는다. */
   const baseImage = renderedSheetImage.url;
+  const toggleZeroEditor = () => {
+    setZeroPanel((current) => {
+      const next = !current;
+      if (!next) {
+        setZeroPointAddMode(false);
+        setZeroPointDeleteMode(false);
+      }
+      return next;
+    });
+    setShowZero(true);
+  };
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><span className="breadcrumb">ADC · Ajin Die Compensation</span><h2>ADC 금형 보정 시트</h2><p>흰 시트 위에 정면도와 Detail View를 독립 레이아웃으로 구성합니다.</p></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={zeroPanel ? 'active green' : ''} onClick={() => { setZeroPanel((current) => { const next = !current; if (!next) { setZeroPointAddMode(false); setZeroPointDeleteMode(false); } return next; }); setShowZero(true); }} disabled={!editableZeroLineCount(result)} title={editableZeroLineCount(result) ? '제로라인의 꼭짓점과 위치를 수정합니다' : '편집 가능한 제로라인 좌표가 없습니다'}>제로라인 수정</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <div className="sheet-image-toolbar" role="toolbar" aria-label="보정시트 이미지 방향">
         <b>이미지 방향</b>
         <button type="button" onClick={rotateSheet} title="이미지와 보정 위치를 함께 시계 방향으로 90° 회전">90° 회전</button>
@@ -2600,7 +2725,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
         <span>{renderedSheetImage.busy ? '이미지 변환 중…' : `${activeSheetTransform.rotation}°`}</span>
         {renderedSheetImage.error && <em>{renderedSheetImage.error}</em>}
       </div>
-      <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} />
+      <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} zeroEditActive={zeroPanel} zeroEditDisabled={!editableZeroLineCount(result)} onZeroEdit={toggleZeroEditor} />
       {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
@@ -2612,7 +2737,7 @@ function ServicePreview({ scan, folderAvailable, hiddenPointIds, onPointToggle, 
         <button type="button" className="sheet-print" onClick={() => void saveSheetExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
         <button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button>
       </div>
-    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) onCoefficientChange(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>{folderAvailable && <Explorer />}
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3><p>편차값에 곱할 비율을 조절합니다.</p></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) onCoefficientChange(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
   </section>;
 }
 
@@ -2658,11 +2783,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [showAlign, setShowAlign] = useState(false);
   const importedReferenceFiles = useRef<Set<string>>(new Set());
 
-  const requestCadMesh = useCallback(async (file: File, registeredPartNumber?: string) => {
+  const requestCadMesh = useCallback(async (file: File, registeredPartNumber?: string, analysisId?: string) => {
     const form = new FormData();
     if (registeredPartNumber) {
       form.append('source', 'registered');
       form.append('partNumber', registeredPartNumber);
+      if (analysisId) form.append('analysisId', analysisId);
     } else {
       form.append('file', file, file.name);
     }
@@ -2677,11 +2803,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     return response;
   }, []);
 
-  const uploadCad = async (file: File, scanId?: string, registeredPartNumber?: string) => {
+  const uploadCad = async (file: File, scanId?: string, registeredPartNumber?: string, analysisId?: string) => {
     setLoadingCount((count) => count + 1);
     setError(null);
     try {
-      const response = await requestCadMesh(file, registeredPartNumber);
+      const response = await requestCadMesh(file, registeredPartNumber, analysisId);
       const data = await response.json() as CadMesh & { error?: string };
       if (!response.ok) throw new Error(data.error || `${file.name} 파일을 읽지 못했습니다.`);
       const key = data.cadId || `${file.name}-${Date.now()}-${Math.random()}`;
@@ -2705,11 +2831,12 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
       for (const scan of scans) {
         for (const file of scan.cadFiles || []) {
           if (cancelled) return;
-          const identity = `registered-step-v2:${scan.id}:${file.name}:${file.size}:${file.lastModified}`;
+          const analysisId = scan.result?.analysisId;
+          const identity = `registered-step-v3:${scan.id}:${analysisId || 'pending'}:${file.name}:${file.size}:${file.lastModified}`;
           if (importedReferenceFiles.current.has(identity)) continue;
           importedReferenceFiles.current.add(identity);
           const registeredPartNumber = partNoFromName(scan.partNo) || partNoFromName(file.name) || undefined;
-          await uploadCad(file, scan.id, registeredPartNumber);
+          await uploadCad(file, scan.id, registeredPartNumber, analysisId);
         }
       }
     };
@@ -2757,7 +2884,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     const registeredPartNumber = linkedScan
       ? partNoFromName(linkedScan.partNo) || partNoFromName(file.name) || undefined
       : undefined;
-    const response = await requestCadMesh(file, registeredPartNumber);
+    const response = await requestCadMesh(file, registeredPartNumber, linkedScan?.result?.analysisId);
     const data = await response.json() as CadMesh & { error?: string };
     if (!response.ok) return null;
     const key = data.cadId || name;
@@ -3107,7 +3234,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [folderAvailable, setFolderAvailable] = useState(false); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
+  const [view, setView] = useState<View>('workspace'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [collapsed, setCollapsed] = useState(false); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
   const [resultEngine, setResultEngine] = useState<Engine>('label');
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
   const [sheetTitleFontSizesByScan, setSheetTitleFontSizesByScan] = useState<Record<string, SheetTitleFontSizes>>({});
@@ -3133,7 +3260,7 @@ export default function Home() {
     setRegionsByCad(regions);
     setSessionLoaded(true);
   }, []);
-  useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => { setBackendOnline(Boolean(data.ok)); setFolderAvailable(Boolean(data.folderAvailable)); }).catch(() => setBackendOnline(false)); }, []);
+  useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => setBackendOnline(Boolean(data.ok))).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
@@ -3143,7 +3270,6 @@ export default function Home() {
   const sheetTitleFonts = completedScan ? sheetTitleFontsByScan[completedScan.id] || DEFAULT_TITLE_FONTS : DEFAULT_TITLE_FONTS;
   const sheetTitleFontSizes = completedScan ? sheetTitleFontSizesByScan[completedScan.id] || {} : {};
   const togglePoint = (id: string) => completedScan && setHiddenPointIdsByScan((current) => { const next = new Set(current[completedScan.id] || []); if (next.has(id)) next.delete(id); else next.add(id); return { ...current, [completedScan.id]: next }; });
-  const setAllPointsVisible = (visible: boolean) => completedScan && setHiddenPointIdsByScan((current) => ({ ...current, [completedScan.id]: visible ? new Set() : new Set(completedScan.result!.points.map((point) => point.id)) }));
   const setPointOverride = (id: string, value: number | null) => completedScan && setPointOverridesByScan((current) => { const next = { ...(current[completedScan.id] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [completedScan.id]: next }; });
   const setPointOverrideFor = (scanId: string, id: string, value: number | null) => setPointOverridesByScan((current) => { const next = { ...(current[scanId] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [scanId]: next }; });
   const setCoefficient = (value: number) => completedScan && setCoefficientByScan((current) => ({ ...current, [completedScan.id]: value }));
@@ -3294,8 +3420,8 @@ export default function Home() {
     <div className="app-main">
       <Header scans={scans} activeId={resolvedActiveId} setActiveId={setActiveId} onSaveFile={saveWorkFile} onLoadFile={(file) => void loadWorkFile(file)} onReset={resetWork} />
       {view === 'workspace' && <Workspace scans={scans} selectedScan={activeScan || scans[0]} setScans={setScans} result={completedScan?.result} onOpenResults={openResults} onOpenEngine={openEngine} backendOnline={backendOnline} />}
-      {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onAllPointsToggle={setAllPointsVisible} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
-      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} folderAvailable={folderAvailable} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || []} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} />}
+      {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
+      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || []} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} />}
       {view === 'files' && <FileOrganizerPage />}
       <div style={{ display: view === 'cad' ? 'block' : 'none' }}>
         <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />

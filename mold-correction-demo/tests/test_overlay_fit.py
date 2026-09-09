@@ -30,6 +30,24 @@ def test_같은_방향이면_잘_맞는다():
     assert fit.iou > 0.9
 
 
+def test_큰_메시의_병렬_정합은_기존_순차_결과와_같다():
+    mesh = trimesh.creation.icosphere(subdivisions=4, radius=100)
+    vertices = np.asarray(mesh.vertices, float)
+    faces = np.asarray(mesh.faces)
+    mask = ov._rasterize(vertices[:, [0, 1]], faces, ov.FIT_GRID)[0]
+
+    executor = ov._FIT_EXECUTOR
+    try:
+        ov._FIT_EXECUTOR = None
+        sequential = ov.fit_view(vertices, faces, mask)
+        ov._FIT_EXECUTOR = executor
+        parallel = ov.fit_view(vertices, faces, mask)
+    finally:
+        ov._FIT_EXECUTOR = executor
+
+    assert parallel.to_dict() == sequential.to_dict()
+
+
 def test_스캔이_90도_돌아가_있어도_맞춘다():
     """부품을 눕혀 찍은 스캔.
 
