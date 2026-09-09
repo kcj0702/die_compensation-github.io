@@ -1910,15 +1910,33 @@ button { cursor: pointer; }
 .cad-viewer__edit-reset{color:#8fa3b4}
 .cad-viewer__note{position:absolute;transform:translate(-50%,-130%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #6fb4e8;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
 .cad-viewer__notes{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:4px;max-width:260px;padding:9px 11px;border:1px solid rgba(111,180,232,.4);border-radius:7px;background:rgba(14,22,30,.84);z-index:3;backdrop-filter:blur(6px)}
-.cad-viewer__zones{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:5px;max-width:270px;padding:9px 11px;border:1px solid rgba(255,95,168,.45);border-radius:7px;background:rgba(14,22,30,.86);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__zones{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:5px;max-width:270px;max-height:calc(100% - 110px);overflow-y:auto;padding:9px 11px;border:1px solid rgba(255,95,168,.45);border-radius:7px;background:rgba(14,22,30,.92);z-index:3;backdrop-filter:blur(6px);font-size:9px;line-height:1.45;color:#cfdae4}
 .cad-viewer__zone{display:flex;align-items:center;gap:5px}
 .topbar__session{display:flex;align-items:center;gap:6px}
 .topbar__session-note{margin-right:4px;color:#5c8f6b;font-size:8.5px;white-space:nowrap}
-.cad-viewer__zone-pick { padding: 0 5px !important; border: 0 !important; background: transparent !important; color: inherit !important; font-weight: 700; cursor: pointer; }
-.cad-viewer__zone-new { width: 100%; margin-top: 4px; }
+.cad-viewer__zone-pick { padding: 0 5px !important; border: 0 !important; background: transparent !important; color: #ff8fc4 !important; font-size: 11px; font-weight: 700; cursor: pointer; }
+.cad-viewer__zone-new{width:100%;margin-top:4px;padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;cursor:pointer}
+.cad-viewer__zone-new:hover:not(:disabled){border-color:#ff5fa8;color:#ffd6e8}
+.cad-viewer__zone-new:disabled{color:#5d6c7a;cursor:not-allowed}
 .cad-viewer__puff { border-color: rgba(255,95,168,.45); }
 .cad-align{margin:0 0 8px;padding:9px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb;display:flex;flex-direction:column;gap:7px}
 .sheet-title-block__input{width:100%;border:0;background:transparent;padding:0;font:inherit;color:inherit;text-align:inherit}
 .cad-viewer__morph-key{display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px);font-size:9.5px;color:#b6c6d4}
 .cad-viewer__zone-name{color:#9db0c0;font-size:9px;font-style:normal;flex:1;white-space:nowrap}
 .cad-viewer__zone-pick:disabled{opacity:.7;cursor:default}
+.cad-viewer__zones p{margin:0;color:#8fa3b4;font-size:9px}
+.cad-viewer__zones-size{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.cad-viewer__zones-size label{color:#8fa3b4;font-size:9px;font-weight:600;white-space:nowrap}
+.cad-viewer__zones-size input{width:104px;accent-color:#ff5fa8}
+.cad-viewer__zone b{color:#ff8fc4;font-size:11px;min-width:15px}
+.cad-viewer__zone select{padding:2px 5px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:#0d151d;color:#eaf2f8;font-size:9px;font-family:inherit}
+.cad-viewer__zone select:focus-visible{outline:2px solid #ff5fa8;outline-offset:1px}
+.cad-viewer__zone button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
+.cad-viewer__zone button:hover{color:#ff8b8b}
+.cad-viewer__zone.is-active{border-color:#ff5fa8;background:rgba(120,30,70,.6)}
+.cad-viewer__zone.is-active .cad-viewer__zone-pick{color:#ffbfe0 !important}
+/* 줄 안에 든 작은 버튼(다시 보기·가리기)은 위 `.cad-viewer__zone button`
+   과 특정도가 같아 뒤에 오는 쪽이 이긴다. 한 칸 더 얹어 되돌린다. */
+.cad-viewer__zone .cad-viewer__zone-tools button{padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;line-height:normal}
+.cad-viewer__zone .cad-viewer__zone-tools button:hover{border-color:#ff5fa8;color:#ffd6e8}
+.cad-viewer__zone .cad-viewer__zone-tools button.is-on{border-color:#ff5fa8;background:rgba(255,95,168,.18);color:#ffd6e8}

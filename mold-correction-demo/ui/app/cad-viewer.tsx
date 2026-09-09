@@ -167,9 +167,19 @@ export function stampsOf(region: CadRegion) {
   return [];
 }
 
-/* 가린 것이 없을 때 늘 같은 배열을 준다. 렌더마다 새 배열을 만들면
+/** 돋보기로 잡아 둔 자리 하나.
+
+    끌어서 잡으면 **바로 그 자리를 크게 본다.** `hidden` 을 켠 것만
+    안 그린다 — 예전에는 끌면 곧장 사라졌는데, 정작 자주 필요한 것은
+    좁은 데(홀 둘레·굽힘 R)를 확대해 시트에 담는 일이었다. */
+export type CadViewBox = {
+  shape: NonNullable<CadRegion['shape']>;
+  hidden: boolean;
+};
+
+/* 잡아 둔 자리가 없을 때 늘 같은 배열을 준다. 렌더마다 새 배열을 만들면
    그걸 보고 도는 이펙트가 매번 다시 돈다. */
-const EMPTY_HIDES: CadRegion['shape'][] = [];
+const EMPTY_BOXES: CadViewBox[] = [];
 
 export const DIE_CHOICES: CadRegion['die'][] = ['상형', '하형'];
 export const WORK_CHOICES: CadRegion['work'][] = ['용접', '가공', '심고음'];
@@ -458,19 +468,23 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다(주석·구역과 같은
      방식이다). */
   const [paintNote, setPaintNote] = useState('');
-  /* 보고 싶지 않은 자리를 가려 둔다.
-     시트에 실을 그림에서 반대편 살이나 옆 부품이 겹쳐 보이는 일이 잦다.
-     네모·동그라미로 훑으면 그 안의 삼각형을 아예 안 그린다 — 형상을
-     지우는 것이 아니라 이 화면에서만 감추는 것이라 되돌릴 수 있다.
+  /* 보고 싶은 자리를 네모·동그라미로 훑어 잡아 둔다.
+     끌면 그 자리가 화면에 꽉 차게 커진다 — 시트에 실을 그림은 홀 둘레나
+     굽힘 R 처럼 좁은 데를 확대해 담기 때문이다. 반대편 살이나 옆 부품이
+     겹쳐 보일 때는 그 줄의 가리기를 켜면 그 안을 안 그린다. 형상을 지우는
+     것이 아니라 이 화면에서만 감추는 것이라 언제든 되돌릴 수 있다.
      색과 같이 **부품마다** 따로 기억한다. */
   const [hiding, setHiding] = useState(false);
-  const [hideByCad, setHideByCad] = useState<Record<string, CadRegion['shape'][]>>({});
+  const [boxByCad, setBoxByCad] = useState<Record<string, CadViewBox[]>>({});
   const [tintByCad, setTintByCad] = useState<Record<string, string>>({});
   const tintKey = mesh.summary.name;
   const partTint = tintByCad[tintKey] ?? null;
   const partTintRef = useRef<string | null>(null);
   partTintRef.current = partTint;
-  const hides = hideByCad[tintKey] ?? EMPTY_HIDES;
+  const boxes = boxByCad[tintKey] ?? EMPTY_BOXES;
+  /* 실제로 안 그릴 자리만 추린다. 잡아 둔 자리는 기본이 "보이는 채로
+     크게" 라, 사람이 그 줄의 가리기를 켠 것만 여기 들어온다. */
+  const hides = boxes.filter((box) => box.hidden).map((box) => box.shape);
   /* 씬을 다시 만들지 말지 가리는 열쇠.
    *
    * 이 배열을 그대로 의존성에 넣었더니 `?? []` 가 렌더마다 새 배열을
@@ -483,9 +497,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   hidingRef.current = hiding;
   const hidesRef = useRef<CadRegion['shape'][]>([]);
   hidesRef.current = hides;
-  const addHide = (shape: CadRegion['shape']) => setHideByCad((current) => ({
-    ...current, [tintKey]: [...(current[tintKey] ?? []), shape],
-  }));
+  const addBox = (shape: NonNullable<CadRegion['shape']>) =>
+    setBoxByCad((current) => ({
+      ...current, [tintKey]: [...(current[tintKey] ?? []), { shape, hidden: false }],
+    }));
+  const changeBoxes = (make: (list: CadViewBox[]) => CadViewBox[]) =>
+    setBoxByCad((current) => ({
+      ...current, [tintKey]: make(current[tintKey] ?? []),
+    }));
 
   /* 도구는 한 번에 하나만 켠다.
      버튼마다 "나 말고 무엇을 끌지" 를 따로 적어 뒀더니 서로 어긋났다 —
@@ -577,6 +596,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     snapshot: (scale?: number) => string;
     /* 카메라를 지금 값으로 다시 세운다(화면 돌리기 등). */
     refresh: () => void;
+    /* 그린 네모·동그라미가 화면에 꽉 차도록 당긴다(돋보기). */
+    zoomBox: (shape: NonNullable<CadRegion['shape']>) => void;
+    /* 보는 방향은 그대로 두고 부품 전체가 들어오게 되돌린다. */
+    fitAll: () => void;
     centre: THREE.Vector3; radius: number;
     /* 단면 슬라이더가 쓸 실제 Z 범위. 구 반지름으로 갈음하면
        원점이 부품 밖에 있는 CAD 에서 최대로 밀어도 잘린다. */
@@ -1841,6 +1864,48 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       return ring;
     };
 
+    /* 그린 도형이 화면에 꽉 차도록 카메라를 당긴다.
+     *
+     * 보는 **방향은 건드리지 않는다** — 겨눔점과 거리만 바꾼다. 돋보기를
+     * 대는 것과 같아야, 확대한 뒤에도 방금까지 보던 각도가 그대로 남는다.
+     *
+     * 도형의 u·v 는 그릴 때의 화면 가로·세로라, 나중에 돌려 놓고 목록에서
+     * 다시 부르면 그 축이 화면과 어긋나 있다. 그래서 네 꼭짓점을 지금
+     * 화면 축에 다시 재서 가로·세로로 얼마나 벌어지는지 구한다. */
+    const zoomBox = (shape: NonNullable<CadRegion['shape']>) => {
+      camera.updateMatrixWorld();
+      const u = new THREE.Vector3(...shape.u);
+      const v = new THREE.Vector3(...shape.v);
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0).normalize();
+      const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1).normalize();
+      let acrossU = 0, acrossV = 0;
+      for (const su of [-1, 1]) {
+        for (const sv of [-1, 1]) {
+          const corner = u.clone().multiplyScalar(su * shape.hu)
+            .add(v.clone().multiplyScalar(sv * shape.hv));
+          acrossU = Math.max(acrossU, Math.abs(corner.dot(right)));
+          acrossV = Math.max(acrossV, Math.abs(corner.dot(up)));
+        }
+      }
+      const halfV = Math.tan((camera.fov * Math.PI / 180) / 2);
+      const halfH = halfV * camera.aspect;
+      target.set(...shape.center);
+      // 1.12 는 테두리가 화면에 딱 붙지 않게 남기는 여백이다.
+      spherical.radius = Math.max(acrossV / halfV, acrossU / halfH) * 1.12;
+      applyCamera();
+    };
+
+    /* 부품 전체가 다시 들어오게 되돌린다. 표준 뷰 버튼과 달리 **보던
+     * 방향을 그대로 둔다** — 확대만 풀고 싶을 때 각도까지 튀면 곤란하다. */
+    const fitAll = () => {
+      const dir = camera.position.clone().sub(target);
+      if (dir.lengthSq() < 1e-9) dir.set(1, 1, 1);
+      dir.normalize();
+      target.copy(centre);
+      spherical.radius = fitDistance(dir);
+      applyCamera();
+    };
+
     const onPaintDown = (event: PointerEvent) => {
       if ((!zoningRef.current && !hidingRef.current) || event.button !== 0) return;
       event.preventDefault();
@@ -1905,8 +1970,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         center: triple(middle), u: triple(dragU), v: triple(dragV), hu, hv,
       };
       if (hidingRef.current) {
-        // 형상을 지우는 것이 아니라 이 화면에서만 감춘다.
-        addHide(drawn);
+        /* 훑은 자리를 **없애지 않고 키운다.**
+         *
+         * 예전에는 끌면 곧장 그 안을 안 그렸다. 그런데 시트에 실을 그림은
+         * 홀 둘레나 굽힘 R 처럼 좁은 데를 확대해 담는 일이 훨씬 잦다.
+         * 그래서 끌면 돋보기로 동작하고, 정말 감춰야 할 때는 아래 목록에서
+         * 그 줄의 가리기를 켠다. */
+        addBox(drawn);
+        zoomBox(drawn);
         return;
       }
       const current = regionsRef.current ?? [];
@@ -1957,7 +2028,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.render(scene, camera);
       return url;
     };
-    viewApi.current = { frame, snapshot, refresh: applyCamera,
+    viewApi.current = { frame, snapshot, refresh: applyCamera, zoomBox, fitAll,
                         centre: centre.clone(), radius,
                         zMin: box.min.z, zMax: box.max.z };
     setDepth({ min: box.min.z, max: box.max.z });
@@ -2566,13 +2637,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
         {full ? '축소' : '확대'}
       </button>
-      {/* 시트에 실을 그림에서 반대편 살이나 옆 부품이 겹쳐 보일 때
-          네모·동그라미로 훑어 감춘다. 형상을 지우는 것이 아니라 이
-          화면에서만 안 그리는 것이라 언제든 되돌릴 수 있다. */}
+      {/* 보고 싶은 자리를 네모·동그라미로 훑으면 그만큼이 화면에 꽉 차게
+          커진다. 반대편 살이나 옆 부품이 겹쳐 보일 때는 잡아 둔 자리
+          목록에서 가리기를 켜면 그 안을 안 그린다 — 형상 자체는 그대로다.
+          바로 옆 '확대' 는 창 전체를 키우는 것이라 이름을 나눠 뒀다. */}
       <button type="button" className={hiding ? 'is-on' : undefined}
-        title="보고 싶지 않은 자리를 네모·동그라미로 훑어 감춥니다 (형상은 그대로)"
+        title="보고 싶은 자리를 네모·동그라미로 훑으면 그만큼 크게 봅니다 (그 줄에서 가리기도 켤 수 있습니다)"
         onClick={() => pickTool(hiding ? 'none' : 'hide')}>
-        가리기 {hides.length ? hides.length : ''}
+        돋보기 {boxes.length ? boxes.length : ''}
       </button>
       <button type="button" onClick={() => setLight((v) => !v)}
         title={light
@@ -2739,7 +2811,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        {hiding ? '형상 위에서 끌어 그 자리를 감춥니다 — 형상은 그대로입니다'
+        {hiding ? '형상 위에서 끌면 그 자리가 화면에 꽉 차게 커집니다'
           : zoning ? (zoneTool === 'brush'
           ? '형상 위를 눌러 공정 구역을 칠합니다'
           : '형상 위에서 끌어 공정 구역을 잡습니다')
@@ -2774,7 +2846,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     {hiding && (
       <div className="cad-viewer__zones">
         <div className="cad-viewer__zones-size">
-          <span className="cad-viewer__zone-tools" role="group" aria-label="가리기 도구">
+          <span className="cad-viewer__zone-tools" role="group" aria-label="돋보기 도구">
             {([['rect', '네모'], ['circle', '동그라미']] as const)
               .map(([kind, name]) => (
                 <button key={kind} type="button"
@@ -2782,34 +2854,45 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
                   onClick={() => setZoneTool(kind)}>{name}</button>
               ))}
           </span>
-          <em>형상 위에서 끌면 그 자리가 앞뒤로 뚫려 안 보입니다</em>
+          <em>형상 위에서 끌면 그만큼이 화면에 꽉 차게 커집니다</em>
         </div>
-        {hides.map((shape, order) => (
+        {boxes.map((box, order) => (
           <div key={order} className="cad-viewer__zone">
-            <button type="button" className="cad-viewer__zone-pick" disabled>
+            <button type="button" className="cad-viewer__zone-pick"
+              title="이 자리를 다시 크게 봅니다"
+              onClick={() => viewApi.current?.zoomBox(box.shape)}>
               {CIRCLED[order] ?? order + 1}
             </button>
             <span className="cad-viewer__zone-name">
-              {shape?.kind === 'circle' ? '동그라미' : '네모'}
+              {box.shape.kind === 'circle' ? '동그라미' : '네모'}
             </span>
-            <button type="button" title="이 자리만 되살립니다"
-              onClick={() => setHideByCad((current) => ({
-                ...current,
-                [tintKey]: (current[tintKey] ?? []).filter((_, k) => k !== order),
-              }))}>되살리기</button>
+            <span className="cad-viewer__zone-tools">
+              <button type="button" title="이 자리를 다시 크게 봅니다"
+                onClick={() => viewApi.current?.zoomBox(box.shape)}>다시 보기</button>
+              <button type="button" className={box.hidden ? 'is-on' : ''}
+                title={box.hidden
+                  ? '다시 보이게 합니다'
+                  : '이 자리를 앞뒤로 뚫어 감춥니다 (형상은 그대로)'}
+                onClick={() => changeBoxes((list) => list.map((other, k) =>
+                  k === order ? { ...other, hidden: !other.hidden } : other))}>
+                가리기
+              </button>
+            </span>
+            <button type="button" aria-label={`${order + 1}번 자리 지우기`}
+              title="이 자리를 목록에서 지웁니다"
+              onClick={() => changeBoxes(
+                (list) => list.filter((_, k) => k !== order))}>×</button>
           </div>
         ))}
-        {hides.length === 0 && <em className="cad-viewer__zone-name">
-          아직 가린 자리가 없습니다
+        {boxes.length === 0 && <em className="cad-viewer__zone-name">
+          아직 잡아 둔 자리가 없습니다
         </em>}
-        {hides.length > 0 && (
-          <button type="button" className="cad-viewer__zone-new"
-            onClick={() => setHideByCad((current) => {
-              const next = { ...current };
-              delete next[tintKey];
-              return next;
-            })}>전부 되살리기</button>
-        )}
+        <button type="button" className="cad-viewer__zone-new"
+          title="보던 방향은 그대로 두고 부품 전체가 들어오게 되돌립니다"
+          onClick={() => viewApi.current?.fitAll()}>전체 보기로</button>
+        <p>{boxes.some((box) => box.hidden)
+          ? '가리기를 켠 자리는 앞뒤로 뚫려 안 보입니다 — 다시 누르면 돌아옵니다'
+          : '끌면 그 자리가 커집니다. 감추려면 그 줄의 가리기를 누르세요'}</p>
       </div>
     )}
 
