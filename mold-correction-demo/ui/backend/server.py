@@ -1464,7 +1464,12 @@ def analyze_image(
             )
         # UI 응답은 합의한 하이브리드 엔진 결과를 우선한다. 위의 기존
         # 결과는 후보/앵커 호환 필드를 유지하기 위한 보조 계산이다.
-        hybrid_zero = detect_hybrid_zero_line(image, filename, base=zero_output)
+        hybrid_zero = detect_hybrid_zero_line(
+            image,
+            filename,
+            base=zero_output,
+            decision_bgr=clean_image,
+        )
         zero_datum_mask = hybrid_zero.mask
         zero_overlay = hybrid_zero.overlay_rgb
         zero_lines = hybrid_zero.lines
@@ -3432,10 +3437,6 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
         moved.append(adjusted_line)
     return moved
 
-
-# 적응형 제로라인(zero_line (2) 묶음)을 쓸 부품.
-# 이 묶음의 Case 1(윤곽 교점 다각형)로 가는 부품만 넣는다.
-ADAPTIVE_PARTS = {"JD_67XX6-DR000"}
 
 # 자세 후보를 몇 개까지 광선으로 검증할지. 하나에 1초 안쪽이다.
 OVERLAY_TRIES = 6

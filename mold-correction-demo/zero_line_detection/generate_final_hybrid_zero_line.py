@@ -26,22 +26,18 @@ import numpy as np
 
 
 HERE = Path(__file__).resolve().parent
-DEMO_ROOT = HERE.parent
 ADAPTIVE_DIR = HERE / "adaptive_bundle"
-REVIEW_DATA_DIR = DEMO_ROOT / "experiments" / "zero_line_area_edge_preview"
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
-if str(DEMO_ROOT) not in sys.path:
-    sys.path.insert(0, str(DEMO_ROOT))
 
 from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt  # noqa: E402
 from zero_line_detection.adaptive_bundle import generate_correction_only_3pct_preview as correction  # noqa: E402
 from zero_line_detection import case2_route_adapter as case2_adapter  # noqa: E402
 
 
-DEFAULT_CORRECTION_DIR = REVIEW_DATA_DIR / "results_correction_only_2pct"
+DEFAULT_CORRECTION_DIR = HERE / "review_inputs"
 DEFAULT_OUTPUT_DIR = HERE / "results_final_hybrid_zero_line"
-DEFAULT_RAW_INPUT_DIR = DEMO_ROOT / "label_removal" / "input"
+DEFAULT_RAW_INPUT_DIR = HERE / "input"
 FINAL_LINE_WIDTH_PX = 4
 FINAL_LINE_RGB = (255, 235, 0)
 FINAL_LINE_OUTLINE_RGB = (255, 255, 255)
@@ -170,6 +166,154 @@ def select_case(zero_ratio: float, zero_component_count: int) -> int:
             and zero_component_count > 1
         )
     ) + 1
+
+
+def build_common_from_detection(
+    image_rgb: np.ndarray,
+    values: np.ndarray,
+    part_mask: np.ndarray,
+    mapped_mask: np.ndarray | None = None,
+    gray_positive: np.ndarray | None = None,
+    gray_negative: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Build the case-decision inputs with the approved correction pipeline.
+
+    The UI previously thresholded ``values`` directly.  The reviewed decision,
+    however, is made *after* correction regions are merged, hole-filled,
+    area-filtered and opened.  Skipping those stages changes both the remaining
+    zero-area ratio and its connected-component count (notably for 67XX6), so
+    the same scan can be sent to the wrong case.
+    """
+    part = part_mask.astype(bool)
+    part_px = max(1, int(part.sum()))
+    empty = np.zeros_like(part, dtype=bool)
+    mapped = part if mapped_mask is None else mapped_mask.astype(bool)
+    raw_positive, raw_negative = correction.build_signed_correction_masks(
+        values,
+        mapped,
+        empty if gray_positive is None else gray_positive.astype(bool),
+        empty if gray_negative is None else gray_negative.astype(bool),
+        correction.CORRECTION_THRESHOLD_MM,
+    )
+    merged_positive = correction.merge_nearby_correction(raw_positive, 24, part)
+    merged_negative = correction.merge_nearby_correction(raw_negative, 24, part)
+    positive, _positive_holes, _positive_rows = correction.fill_all_internal_holes(
+        merged_positive, part
+    )
+    negative, _negative_holes, _negative_rows = correction.fill_all_internal_holes(
+        merged_negative, part
+    )
+    positive, negative = correction.resolve_sign_overlap(
+        positive, negative, raw_positive, raw_negative
+    )
+    positive, negative, _labels, _rows = correction.select_final_regions(
+        positive, negative, part_px, 0.02, inclusive=True
+    )
+    positive = correction.open_narrow_parts(
+        positive, correction.OPENING_KERNEL_SIZE_PX, part
+    )
+    negative = correction.open_narrow_parts(
+        negative, correction.OPENING_KERNEL_SIZE_PX, part
+    )
+    positive, negative = correction.resolve_sign_overlap(
+        positive, negative, raw_positive, raw_negative
+    )
+    positive, _positive_holes, _positive_rows = correction.fill_all_internal_holes(
+        positive, part
+    )
+    negative, _negative_holes, _negative_rows = correction.fill_all_internal_holes(
+        negative, part
+    )
+    positive, negative = correction.resolve_sign_overlap(
+        positive, negative, raw_positive, raw_negative
+    )
+    positive, negative, _labels, _rows = correction.select_final_regions(
+        positive, negative, part_px, 0.02, inclusive=False
+    )
+
+    raw_zero = part & ~(positive | negative)
+    zero, zero_labels, zero_rows, raw_zero_rows = kdt.filter_components_by_ratio(
+        raw_zero, part_px, kdt.ZERO_COMPONENT_MIN_RATIO
+    )
+    return {
+        "image": image_rgb,
+        "values": values,
+        "part": part,
+        "part_px": part_px,
+        "positive": positive,
+        "negative": negative,
+        "correction": positive | negative,
+        "raw_zero": raw_zero,
+        "raw_zero_rows": raw_zero_rows,
+        "zero": zero,
+        "zero_labels": zero_labels,
+        "zero_rows": zero_rows,
+        "zero_ratio": float(zero.sum()) / part_px,
+        "zero_count": len(zero_rows),
+    }
+
+
+def build_common_from_base_detection(
+    image_rgb: np.ndarray,
+    values: np.ndarray,
+    mapped_mask: np.ndarray,
+    vmin: float,
+    vmax: float,
+) -> dict[str, Any]:
+    """Recreate reviewed inputs without remapping an already mapped scan."""
+    part = kdt.detect_part_mask(image_rgb)
+    mapped = part & mapped_mask.astype(bool)
+    gray = kdt.detect_unmapped_gray(image_rgb, part, mapped)
+    effective_values, gray_positive, gray_negative, _nearest = (
+        correction.assign_gray_by_nearest_mapped_sign(
+            values,
+            mapped,
+            gray,
+            max(float(vmax), correction.CORRECTION_THRESHOLD_MM) + 0.01,
+            min(float(vmin), -correction.CORRECTION_THRESHOLD_MM) - 0.01,
+        )
+    )
+    return build_common_from_detection(
+        image_rgb,
+        effective_values,
+        part,
+        mapped_mask=mapped,
+        gray_positive=gray_positive,
+        gray_negative=gray_negative,
+    )
+
+
+def build_common_from_review_mapping(
+    image_rgb: np.ndarray,
+    legend_rgb: np.ndarray,
+    vmin: float,
+    vmax: float,
+) -> dict[str, Any]:
+    """Run the exact experiments color mapping and correction preparation."""
+    values, valid = kdt.map_deviation(
+        image_rgb, kdt.extract_color_ramp(legend_rgb), vmin, vmax
+    )
+    values = cv2.medianBlur(values, 5)
+    part = kdt.detect_part_mask(image_rgb)
+    mapped = part & valid
+    gray = kdt.detect_unmapped_gray(image_rgb, part, mapped)
+    effective_values, gray_positive, gray_negative, _nearest = (
+        correction.assign_gray_by_nearest_mapped_sign(
+            values,
+            mapped,
+            gray,
+            max(float(vmax), correction.CORRECTION_THRESHOLD_MM) + 0.01,
+            min(float(vmin), -correction.CORRECTION_THRESHOLD_MM) - 0.01,
+        )
+    )
+    return build_common_from_detection(
+        image_rgb,
+        effective_values,
+        part,
+        mapped_mask=mapped,
+        gray_positive=gray_positive,
+        gray_negative=gray_negative,
+    )
 
 
 def run_case1(common: dict[str, Any]) -> tuple[np.ndarray, dict[str, Any]]:

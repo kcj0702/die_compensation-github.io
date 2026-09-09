@@ -171,6 +171,17 @@ def _scale_for(filename: str) -> float:
     return 2.0
 
 
+def _range_for(filename: str, base) -> tuple[float, float]:
+    name = filename.upper()
+    if "64XX2" in name:
+        return -1.5, 2.0
+    if "67XX6" in name:
+        return -3.0, 3.0
+    if "71XX2" in name:
+        return -2.0, 2.0
+    return float(base.colorbar.vmin), float(base.colorbar.vmax)
+
+
 def _matching_review_spec(filename: str):
     """Return the bundled review specification for a known standard scan.
 
@@ -290,6 +301,7 @@ def _detect_hybrid_zero_line_uncached(
     image_bgr: np.ndarray,
     filename: str,
     base=None,
+    decision_bgr: np.ndarray | None = None,
 ) -> HybridZeroLineOutput:
     """Detect a UI-ready zero result, with a safe case-1 fallback.
 
@@ -297,18 +309,10 @@ def _detect_hybrid_zero_line_uncached(
     components whose total area is below 40% choose case 1; all other inputs
     choose the original case-2 routing implementation.
     """
-    # Known reviewed parts must use the exact correction-only masks that the
-    # original Case 1/2 decision was approved against.  The data lives in the
-    # review-results directory, while every executable selection module is
-    # loaded from zero_line_detection.
-    try:
-        review_result = _detect_from_review_inputs(image_bgr, filename)
-    except Exception:
-        review_result = None
-    if review_result is not None:
-        return review_result
-
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    decision_rgb = cv2.cvtColor(
+        image_bgr if decision_bgr is None else decision_bgr, cv2.COLOR_BGR2RGB
+    )
     if base is None:
         base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
     fallback_part_px = max(1, int(base.part_mask.sum()))
@@ -318,24 +322,31 @@ def _detect_hybrid_zero_line_uncached(
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
         from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
 
-        # UI에서도 검토 엔진과 같은 ±0.6 mm 보정영역 기준을 사용한다.
-        # 기존 zero_line의 자동 tolerance(컬러바 범위의 10%)는 여기서 쓰지 않는다.
-        part = base.part_mask.astype(bool)
-        part_px = max(1, int(part.sum()))
-        positive = part & (base.values > 0.6)
-        negative = part & (base.values < -0.6)
-        raw_zero = part & ~(positive | negative)
-        zero, _labels, rows, _raw_rows = kdt.filter_components_by_ratio(
-            raw_zero, part_px, kdt.ZERO_COMPONENT_MIN_RATIO
+        # 판정 입력도 검토 엔진과 같은 보정영역 생성 단계를 거친다. 단순
+        # +/-0.6 threshold 는 67XX6의 영역을 합치기 전 상태로 세어 Case 2로
+        # 잘못 보낼 수 있었다.
+        info = base.colorbar.info
+        legend_rgb = rgb[info.y0:info.y1, info.x0:info.x1]
+        vmin, vmax = _range_for(filename, base)
+        common = hybrid.build_common_from_review_mapping(
+            decision_rgb, legend_rgb, vmin, vmax
         )
-        ratio = float(zero.sum()) / part_px
-        is_case1 = ratio < 0.40 and len(rows) > 1
+        part = common["part"]
+        part_px = common["part_px"]
+        positive = common["positive"]
+        negative = common["negative"]
+        zero = common["zero"]
+        selected_case = hybrid.select_case(
+            common["zero_ratio"], common["zero_count"]
+        )
+        print(
+            f"[zero] decision ratio={common['zero_ratio']:.4f} "
+            f"components={common['zero_count']} case={selected_case}",
+            flush=True,
+        )
 
-        if is_case1:
-            final_mask, _details = hybrid.run_case1({
-                "zero": zero, "positive": positive, "negative": negative,
-                "part": part, "part_px": part_px,
-            })
+        if selected_case == 1:
+            final_mask, _details = hybrid.run_case1(common)
             overlay = rgb.copy()
             tint = np.zeros_like(overlay)
             tint[final_mask] = (0, 235, 255)
@@ -395,13 +406,19 @@ def detect_hybrid_zero_line(
     image_bgr: np.ndarray,
     filename: str,
     base=None,
+    decision_bgr: np.ndarray | None = None,
 ) -> HybridZeroLineOutput:
     """Return a content-cached result and optionally reuse basic detection."""
-    path = _cache_path(image_bgr, filename)
+    cache_image = image_bgr if decision_bgr is None else np.concatenate(
+        (image_bgr.reshape(-1, 3), decision_bgr.reshape(-1, 3)), axis=0
+    )
+    path = _cache_path(cache_image, filename)
     cached = _load_cached(path, image_bgr.shape[:2]) if path.is_file() else None
     if cached is not None:
         return cached
 
-    output = _detect_hybrid_zero_line_uncached(image_bgr, filename, base=base)
+    output = _detect_hybrid_zero_line_uncached(
+        image_bgr, filename, base=base, decision_bgr=decision_bgr
+    )
     _save_cached(path, output)
     return output

@@ -28,6 +28,23 @@ class HybridCaseSelectionTests(unittest.TestCase):
         self.assertEqual(hybrid.select_case(0.400, 2), 2)
         self.assertEqual(hybrid.select_case(0.200, 1), 2)
 
+    def test_ui_common_inputs_use_final_correction_regions_for_decision(self) -> None:
+        part = np.ones((120, 240), dtype=bool)
+        values = np.zeros(part.shape, dtype=np.float32)
+        # A retained correction band separates the remaining zero area into
+        # two components whose combined area is below the 40% Case-1 limit.
+        values[:, 36:204] = 1.0
+
+        common = hybrid.build_common_from_detection(
+            np.zeros((*part.shape, 3), dtype=np.uint8), values, part
+        )
+
+        self.assertEqual(
+            hybrid.select_case(common["zero_ratio"], common["zero_count"]), 1
+        )
+        self.assertLess(common["zero_ratio"], 0.40)
+        self.assertGreater(common["zero_count"], 1)
+
     def test_interior_boundary_sampling_finds_spatially_distinct_crossings(self) -> None:
         part = np.zeros((120, 180), dtype=bool)
         cv2.rectangle(part, (20, 20), (160, 100), 1, -1)
