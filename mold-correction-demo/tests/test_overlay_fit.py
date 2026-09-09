@@ -30,6 +30,24 @@ def test_같은_방향이면_잘_맞는다():
     assert fit.iou > 0.9
 
 
+def test_큰_메시의_병렬_정합은_기존_순차_결과와_같다():
+    mesh = trimesh.creation.icosphere(subdivisions=4, radius=100)
+    vertices = np.asarray(mesh.vertices, float)
+    faces = np.asarray(mesh.faces)
+    mask = ov._rasterize(vertices[:, [0, 1]], faces, ov.FIT_GRID)[0]
+
+    executor = ov._FIT_EXECUTOR
+    try:
+        ov._FIT_EXECUTOR = None
+        sequential = ov.fit_view(vertices, faces, mask)
+        ov._FIT_EXECUTOR = executor
+        parallel = ov.fit_view(vertices, faces, mask)
+    finally:
+        ov._FIT_EXECUTOR = executor
+
+    assert parallel.to_dict() == sequential.to_dict()
+
+
 def test_스캔이_90도_돌아가_있어도_맞춘다():
     """부품을 눕혀 찍은 스캔.
 
@@ -67,6 +85,28 @@ def test_되돌린_좌표가_제자리로_온다():
                           trimesh.Trimesh(vertices=vertices, faces=faces,
                                           process=False))
     assert placed and placed[0] is not None
+
+
+def test_unproject_works_when_trimesh_ray_backend_is_unavailable():
+    """The packaged app must not require trimesh's optional ``rtree`` extra."""
+    class BrokenRay:
+        def intersects_location(self, **_kwargs):
+            raise ModuleNotFoundError("No module named 'rtree'")
+
+    class MeshWithoutRayBackend:
+        ray = BrokenRay()
+
+    vertices, faces = _bar()
+    mask = _mask(400, 100)
+    fit = ov.fit_view(vertices, faces, mask)
+    mesh = MeshWithoutRayBackend()
+
+    placed = ov.unproject([[200, 50], [0, 0]], vertices, faces, fit, mesh)
+
+    assert placed[0] is not None
+    assert placed[1] is None
+    assert mesh._die_ray_unavailable is True
+    assert ov.measure_hit_rate(fit, vertices, faces, mask, mesh) > 0.9
 
 
 def test_비스듬히_기울어진_스캔도_맞춘다():

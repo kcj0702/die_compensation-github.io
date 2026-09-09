@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+ui_backend_stub_logs/
+
+# 로컬에 저장된 MariaDB 연결 문자열(비밀번호 포함) — 커밋 금지
+.file_db_url
+
+# 사용자가 UI에서 바꾼 네 단계 폴더 순서 — 배포별 로컬 설정
+.folder_order.json
+
+# 사용자가 UI에서 바꾼 원본/정리 대상 경로 — 배포별 로컬 설정
+.organizer_paths.json
+
+# 실제 회사 파일이 쌓이는 폴더들 — 폴더 구조(.gitkeep)만 추적하고 내용물은 커밋하지 않는다
+data/incoming/**
+data/organized/**
+!data/incoming/**/
+!data/organized/**/
+!data/incoming/**/.gitkeep
+!data/organized/**/.gitkeep

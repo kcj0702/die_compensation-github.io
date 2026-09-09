@@ -1,7 +1,7 @@
 import { sites } from '@openai/sites-vite-plugin';
 import tailwindcss from '@tailwindcss/postcss';
 import vinext from 'vinext';
-import { defineConfig } from 'vite';
+import { defineConfig, type HmrContext } from 'vite';
 import hostingConfig from './.openai/hosting.json';
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
@@ -46,6 +46,11 @@ export default defineConfig(async () => {
 
   return {
     css: { postcss: { plugins: [tailwindcss()] } },
+    // RSC/SSR/client 환경이 각각 React 사본을 해석하면 HMR 도중 같은
+    // Context Provider를 여러 렌더러가 동시에 잡는 경고가 발생한다.
+    resolve: {
+      dedupe: ['react', 'react-dom', 'react-server-dom-webpack'],
+    },
     server: {
       host: '127.0.0.1',
       port: 3000,
@@ -60,6 +65,17 @@ export default defineConfig(async () => {
         : {}),
     },
     plugins: [
+      {
+        name: 'ajindie-rsc-safe-reload',
+        handleHotUpdate(context: HmrContext) {
+          // Vinext의 RSC 엔트리를 부분 교체하면 이전 client renderer가
+          // 남아 Context 충돌이 난다. 앱 소스는 안전한 전체 reload로 바꾼다.
+          if (/[\\/]app[\\/].*\.(?:ts|tsx|css)$/.test(context.file)) {
+            context.server.ws.send({ type: 'full-reload' });
+            return [];
+          }
+        },
+      },
       vinext(),
       sites(),
       cloudflare({

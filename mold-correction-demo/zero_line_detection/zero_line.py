@@ -32,9 +32,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from shared.schemas import ZeroLineRegion, ZeroLineResult  # noqa: E402
 from zero_line_detection.annotations import build_annotation_mask  # noqa: E402
-from zero_line_detection.colorbar import (  # noqa: E402
-    Colorbar, canonical_colorbar, detect_colorbar,
-)
+from zero_line_detection.colorbar import Colorbar, detect_colorbar  # noqa: E402
 
 
 @dataclass
@@ -225,22 +223,7 @@ def detect_zero_line(
     h, w = rgb.shape[:2]
 
     # 1) 컬러바 -------------------------------------------------------
-    # 범례가 잘려 나갔거나 캡처에 안 담긴 이미지가 들어온다. 예전에는
-    # 여기서 예외가 나면 제로라인 단계 전체가 "실행 실패" 로 끝났다.
-    # 컬러바 범위를 아는 품번이면(vmin/vmax 를 받았으면) 표준 램프로
-    # 이어서 진행한다 — 정확도는 떨어지지만 아무것도 못 내는 것보다 낫다.
-    try:
-        cb = detect_colorbar(rgb, vmin=cfg.vmin, vmax=cfg.vmax)
-    except RuntimeError:
-        if cfg.vmin is None or cfg.vmax is None:
-            raise
-        cb = canonical_colorbar(cfg.vmin, cfg.vmax)
-        warnings.append(
-            f"이미지에서 컬러바를 찾지 못해 표준 무지개 램프({cfg.vmin:+.1f} ~ "
-            f"{cfg.vmax:+.1f}mm)를 기준으로 색을 값으로 옮겼습니다. 실제 범례가 "
-            "표준 램프의 일부만 쓰고 있으면 값이 어긋날 수 있으니, 범례가 "
-            "보이는 원본으로 다시 확인하세요."
-        )
+    cb = detect_colorbar(rgb, vmin=cfg.vmin, vmax=cfg.vmax)
 
     if cb.is_clipped and (cfg.vmin is None or cfg.vmax is None):
         lo, hi = cb.endpoint_gaps
@@ -248,10 +231,7 @@ def detect_zero_line(
             f"컬러바가 이미지 경계에서 잘렸습니다 (끝점 색 오차 {lo:.0f}/{hi:.0f}). "
             "보이는 구간이 전체 범위가 아니므로 '중앙 = 편차 0' 가정이 성립하지 "
             "않습니다. 컬러바에 적힌 최소·최대값을 --vmin / --vmax 로 지정하세요. "
-            # 현업이 알려준 실제 컬러바 범위(simple_zero_line.PRODUCT_COLORBAR_MM).
-            # 전에 -1.5 로 적어 뒀는데 JD_64XX 의 하단은 -1.6 이다.
-            "(JD_64XX 는 --vmin -1.6 --vmax 2.0, JD_67XX 는 -3.0/3.0, "
-            "JD_71XX 는 -2.0/2.0)"
+            "(예: JD_64XX2 는 --vmin -1.5 --vmax 2.0)"
         )
 
     # 2) 주석 마스크 --------------------------------------------------

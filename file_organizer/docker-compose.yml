@@ -1,0 +1,17 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: ajin-file-organizer-demo-db
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: file_demo_root_password
+      MARIADB_DATABASE: file_organizer
+      MARIADB_USER: file_demo
+      MARIADB_PASSWORD: file_demo_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - ajin-file-organizer-demo-db:/var/lib/mysql
+
+volumes:
+  ajin-file-organizer-demo-db:

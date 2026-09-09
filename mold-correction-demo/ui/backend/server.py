@@ -6,16 +6,18 @@ import base64
 import json
 import math
 import os
+import sqlite3
 import sys
 import tempfile
 import threading
-import time
-import urllib.parse
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import cv2
 import numpy as np
@@ -32,11 +34,33 @@ UI_DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = UI_DIR.parent
 WORKSPACE_DIR = PROJECT_DIR.parent
 DEVIATION_DIR = PROJECT_DIR / "deviation_extraction"
+FILE_ORGANIZER_DIR = WORKSPACE_DIR / "file_organizer"
+
+
+def _load_local_environment(env_path: Path) -> None:
+    """Load non-committed local settings without overriding process variables."""
+    if not env_path.is_file():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value[:1] == value[-1:] and value[:1] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_local_environment(UI_DIR / ".env")
 
 # deviation_extraction currently uses local-style imports (import config), so
 # its own folder must precede the project root on sys.path.
 sys.path.insert(0, str(PROJECT_DIR))
 sys.path.insert(0, str(DEVIATION_DIR))
+sys.path.insert(0, str(FILE_ORGANIZER_DIR))
 
 from label_detector import (  # noqa: E402
     build_blue_annotation_mask, build_scan_mask, detect_labels,
@@ -44,11 +68,51 @@ from label_detector import (  # noqa: E402
 from colormap_reader import build_lut  # noqa: E402
 from point_extractor import _sample_deviation_color  # noqa: E402
 from vlm_reader import LabelValueReader  # noqa: E402
-from label_removal.remove_labels import create_versions, detect_label_boxes  # noqa: E402
+from label_removal.remove_labels import (  # noqa: E402
+    build_scan_mask as build_label_removal_scan_mask,
+    create_versions,
+    detect_exact_hsv_leader_lines,
+    detect_label_boxes,
+)
+from product_alignment.alignment import (  # noqa: E402
+    Alignment,
+    estimate_alignment,
+    is_inside,
+    map_point,
+    warp_scan_mask,
+)
+from product_alignment.compose import render_alignment_overlay  # noqa: E402
+from product_alignment.masks import (  # noqa: E402
+    build_product_mask,
+    build_scan_mask as build_part_silhouette,
+)
+from product_alignment.registry import (  # noqa: E402
+    AlignmentStore,
+    MeshLibrary,
+    ProductLibrary,
+    part_number_from_name,
+    read_image,
+)
+from sheet_export import (  # noqa: E402
+    SheetAnnotation,
+    SheetPoint,
+    SheetView,
+    TitleBlock,
+    build_sheet,
+    crop_view,
+    stack_workbooks,
+)
+from cad_import.mesh_io import (  # noqa: E402
+    SUPPORTED_SUFFIXES as MESH_SUPPORTED_SUFFIXES,
+    is_mesh_file, load_any as load_any_mesh, load_mesh,
+    split_symmetric_pair, to_web_mesh,
+)
+from cad_import.overlay import fit_view as fit_mesh_view  # noqa: E402
+from cad_import.catia_capture import capture_product_image as capture_catia_product_image  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
+from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
 from zero_line_detection import zero_shapes  # noqa: E402
-from zero_line_detection import adaptive_runner  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
 )
@@ -57,43 +121,125 @@ from zero_line_detection.zero_polyline import (  # noqa: E402
     draw_zero_polylines, extract_zero_polylines,
 )
 from zero_line_detection.zero_boundary import (  # noqa: E402
-    draw_zero_boundary, filter_anchors_by_labels, find_boundary_anchors, grow_patches,
+    draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
-from zero_line_detection.calibration import (  # noqa: E402
-    calibrate_vmin_vmax, calibrate_with_points,
+from core import (  # noqa: E402
+    AXES, AXIS_LABELS, FilenameClassifier, classify_batch, execute_batch,
+    is_valid_folder_order, load_folder_order, load_rules, migrate_folder_structure,
+    save_folder_order, write_history,
 )
-from zero_line_detection.zero_valley import (  # noqa: E402
-    find_valley_lines, rank_zero_line_candidates,
+from storage import (  # noqa: E402
+    DatabaseError as FileDatabaseError,
+    MariaDBRepository,
+    load_database_url,
+    safe_database_label,
+    save_database_url,
 )
-from zero_line_advance.advance import (  # noqa: E402
-    AdvanceConfig, detect_advanced_zero_line,
-)
-from zero_line_detection.sheet_reference import load_library  # noqa: E402
-from zero_line_detection.green_belt import find_green_belts  # noqa: E402
-from zero_line_detection.simple_zero_line import (  # noqa: E402
-    PRODUCT_COLORBAR_MM, colorbar_span_for, find_simple_zero_lines,
-)
-from zero_line_detection.lab_profile import (  # noqa: E402
-    distance_report, lab_shapes_for,
-)
-from zero_line_detection.zero_points import (  # noqa: E402
-    cluster_zero_points, connect_strongest_pair, expand_clusters_to_zones,
-    filter_to_key_points, load_key_scores, load_loop_paths, load_zero_points,
-    snap_into_mask,
-)
-from zero_line_detection.register_sheet import part_no_from_name  # noqa: E402
-from zero_line_detection.key_points import select as select_key_points  # noqa: E402
-from zero_line_detection.file_naming import parse as parse_filename  # noqa: E402
-from zero_line_detection import lab_runner  # noqa: E402
 
 
-DEFAULT_FOLDER_ROOT = Path(
-    r"C:\Users\KDT013\Desktop\금형보정치\경북대KDT(14기) 자료\품번별 폴더 정리 자료_예시"
+FILE_ORGANIZER_RULES = load_rules(FILE_ORGANIZER_DIR / "rules.json")
+DEFAULT_FOLDER_ROOT = Path(FILE_ORGANIZER_RULES["destination_root"])
+_ORGANIZER_PATHS_FILE = FILE_ORGANIZER_DIR / ".organizer_paths.json"
+
+
+def _load_organizer_paths_override() -> dict[str, str]:
+    """웹에서 저장한 원본/정리 대상 경로 오버라이드. .env 의 AJIN_* 값이 항상 우선한다."""
+    if not _ORGANIZER_PATHS_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(_ORGANIZER_PATHS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _initial_organizer_root(env_name: str, override_key: str, rules_value: str) -> Path:
+    env_value = os.environ.get(env_name, "").strip()
+    if env_value:
+        return Path(env_value).resolve()
+    override_value = _load_organizer_paths_override().get(override_key, "").strip()
+    if override_value:
+        return Path(override_value).resolve()
+    return Path(rules_value).resolve()
+
+
+FOLDER_ROOT = _initial_organizer_root(
+    "AJIN_FOLDER_ROOT", "destinationRoot", str(DEFAULT_FOLDER_ROOT)
 )
-FOLDER_ROOT = Path(os.environ.get("AJIN_FOLDER_ROOT", DEFAULT_FOLDER_ROOT)).resolve()
-# 금형 STEP 은 CATIA 가 삼각망을 통째로 끼워 넣어 파일이 크다 —
-# 실측 64XX1 이 215MB, 67XX6 이 170MB, 71XX1 이 119MB 였다.
-MAX_UPLOAD_BYTES = 300 * 1024 * 1024
+FILE_SOURCE_ROOT = _initial_organizer_root(
+    "AJIN_FILE_SOURCE_ROOT", "sourceRoot", FILE_ORGANIZER_RULES["source_root"]
+)
+
+# CATIA 원본이 있는 실제 업무 폴더 — 사용자가 UI 에서 지정한다. 여기 안에서
+# 재귀적으로 파일명이 품번과 맞는 .CATPart / STEP / STL 을 찾는다. 이 저장소
+# 안 data/product_mesh 는 별도(직접 업로드용) — 이쪽은 검색용이다.
+_CAD_SOURCE_PATH_FILE = UI_DIR / "backend" / ".cad_source_path.json"
+
+
+def _load_cad_source_override() -> Path | None:
+    if not _CAD_SOURCE_PATH_FILE.is_file():
+        return None
+    try:
+        data = json.loads(_CAD_SOURCE_PATH_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    raw = str((data or {}).get("path", "")).strip() if isinstance(data, dict) else ""
+    return Path(raw).resolve() if raw else None
+
+
+def _default_cad_source_root() -> Path | None:
+    """UI 설정도 env 도 없을 때 쓸 기본 폴백.
+
+    현업 PC 는 CATIA 원본을 사용자 데스크톱 아래 프로젝트 폴더(ajin4)에
+    두는 습관이 굳어 있어, 그 안 어디에 던져 두어도 재귀 스캔이 잡아낸다.
+    폴더가 존재하지 않으면(다른 PC) None 을 준다.
+    """
+    candidate = Path.home() / "Desktop" / "ajin4"
+    return candidate.resolve() if candidate.is_dir() else None
+
+
+def _initial_cad_source_root() -> Path | None:
+    env_value = os.environ.get("AJIN_CAD_ROOT", "").strip()
+    if env_value:
+        return Path(env_value).resolve()
+    override = _load_cad_source_override()
+    if override is not None:
+        return override
+    return _default_cad_source_root()
+
+
+# UI/env 로 명시 지정한 게 없으면 사용자 데스크톱의 프로젝트 폴더를 폴백으로.
+# 사용자가 아무 설정 없이도 CATIA 원본을 그 안에 두면 자동 매칭이 성립한다.
+CAD_SOURCE_ROOT: Path | None = _initial_cad_source_root()
+FILE_STAGING_ROOT = UI_DIR / "backend" / "file_staging"
+FILE_LOG_ROOT = UI_DIR / "backend" / "file_operation_logs"
+MAX_FILE_ORGANIZER_UPLOAD_BYTES = 500 * 1024 * 1024
+MAX_UPLOAD_BYTES = 60 * 1024 * 1024
+MAX_CAD_UPLOAD_BYTES = 300 * 1024 * 1024
+
+# 분석 결과와 CAD 파싱 결과는 후속 3D 작업에서 재사용한다. STEP 재파싱과
+# Qwen 재판독을 피하고, 여러 CAD 탭을 동시에 열 수 있도록 원 브랜치와
+# 동일한 LRU 크기를 유지한다.
+_analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_ANALYSIS_CACHE_MAX = 5
+_cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_CAD_CACHE_MAX = 6
+
+
+def _cache_analysis(entry: dict[str, Any]) -> str:
+    analysis_id = uuid.uuid4().hex
+    _analysis_cache[analysis_id] = entry
+    while len(_analysis_cache) > _ANALYSIS_CACHE_MAX:
+        _analysis_cache.popitem(last=False)
+    return analysis_id
+
+
+def _cache_cad(entry: dict[str, Any]) -> str:
+    cad_id = uuid.uuid4().hex
+    _cad_cache[cad_id] = entry
+    while len(_cad_cache) > _CAD_CACHE_MAX:
+        _cad_cache.popitem(last=False)
+    return cad_id
 QWEN_CACHE_DIR = (
     Path.home()
     / ".cache"
@@ -108,58 +254,22 @@ QWEN_REQUIRED_FILES = (
     "model.safetensors.index.json",
     "tokenizer.json",
 )
-# 품번별로 확정된 제로라인 보관함. 보정시트에서 읽어 등록해두면
-# (python -m zero_line_detection.register_sheet) 같은 품번의 스캔이
-# 들어왔을 때 추론하지 않고 시트와 동일한 선을 그대로 쓴다.
-ZERO_LINE_LIBRARY = PROJECT_DIR / "zero_line_detection" / "zero_line_library.json"
-# my_lab 파이프라인(스캔포인트 윤곽선 -> 편차 그래프 -> 0포인트)의 결과.
-# 라벨 실측값에서 나온 0포인트라 컬러바 색 잡음에 흔들리지 않는다.
-ZERO_POINTS_DIR = PROJECT_DIR / "zero_line_detection" / "zero_points_data"
-LOOP_PATHS_DIR = PROJECT_DIR / "my_lab" / "scan_point_contour" / "output"
-# 현업 제공 key_zero_point_engine 결과(있으면 0포인트 후보를 컬러바 HSV
-# 재검증으로 한 번 더 거른다). 없는 품번은 그냥 원래 후보를 그대로 쓴다.
-KEY_ZERO_POINTS_DIR = PROJECT_DIR / "my_lab" / "zero_point_selection" / "output"
-
 _reader: LabelValueReader | None = None
 _reader_lock = threading.Lock()
+_reader_preload_lock = threading.Lock()
+_reader_preload_thread: threading.Thread | None = None
+_reader_status = "idle"
+_reader_warmup_error: str | None = None
 
-# 분석 1회분(값장·부품마스크·앵커·허용오차)을 잠깐 들고 있는 캐시.
-# 로컬 1인용 데모라 세션 관리 없이 메모리 dict 로 충분하다 — 사람이
-# 앵커 2개를 클릭해서 "선 잇기" 를 요청할 때 이미지를 다시 안 올리고,
-# VLM 라벨 판독도 다시 안 돌리려는 목적.
-_analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-_ANALYSIS_CACHE_MAX = 5
-
-
-# 라벨 판독 결과 캐시.
-#
-# [왜 필요한가 — 실측]
-# JD_67XX6 한 장을 분석하는 데 812초가 걸리는데 그중 **739초(96%)가
-# Qwen 숫자 판독**이다. 나머지 전부 합쳐도 8초다(라벨 검출 0.3 · 라벨
-# 지우기 3.6 · 컬러바 4.2).
-#
-# 그런데 Qwen 이 하는 일은 **라벨에 적힌 글자를 읽는 것**뿐이다.
-# `-1.4` 는 품번이 뭐든 `-1.4` 다. 품번은 컬러바 범위(색->mm)와 제로라인
-# 파라미터만 바꾼다. 그래서 같은 그림을 다시 분석할 때 — 품번을 고쳐
-# 다시 돌릴 때가 특히 그렇다 — 739초를 그대로 또 쓸 이유가 없다.
-#
-# 열쇠는 **잘라낸 라벨 그림 자체**의 해시다. 파일 이름이나 크기가 아니라
-# 내용으로 잡아야 같은 라벨을 알아본다.
-_MISSING = object()          # 캐시에 없음과 '읽었는데 None' 을 가른다
+# Qwen 판독은 같은 라벨 그림에 대해 결정적이므로 내용 해시로 재사용한다.
+# 메모리 LRU와 디스크 저장을 함께 써 서버 재시작 뒤에도 긴 재판독을 피한다.
+_MISSING = object()
 _label_cache: "OrderedDict[str, float | None]" = OrderedDict()
-_LABEL_CACHE_MAX = 4000        # 부품 한 장이 라벨 130여 개다
-
-# 판독 결과를 디스크에도 남긴다.
-#
-# 실측 64XX2 한 장이 Qwen 판독 57초다. 메모리에만 들고 있으면 엔진을
-# 다시 띄울 때마다 그 57초를 다시 쓴다 — 파이썬을 고치면 반드시 다시
-# 띄워야 하는 프로젝트라 그 일이 잦다. 열쇠가 **잘라낸 그림의 내용
-# 해시**라 그림이 같으면 값도 같다.
-# 경로는 환경변수로 옮길 수 있다(ADC_LABEL_CACHE). 시험은 이걸로
-# 임시 폴더를 가리켜 실제로 데워 둔 캐시를 지키고, 운영에서는 여러
-# 사람이 공유하는 자리로 옮길 수 있다.
-_LABEL_STORE = Path(os.environ.get("ADC_LABEL_CACHE")
-                    or (Path(__file__).resolve().parent / ".label_cache.json"))
+_LABEL_CACHE_MAX = 4000
+_LABEL_STORE = Path(
+    os.environ.get("ADC_LABEL_CACHE")
+    or (Path(__file__).resolve().parent / ".label_cache.json")
+)
 _label_store_dirty = False
 
 
@@ -170,7 +280,7 @@ def _load_label_store() -> None:
             for key, value in found.items():
                 _label_cache[key] = value
     except Exception:
-        pass          # 깨졌으면 그냥 다시 읽는다
+        pass
 
 
 def _save_label_store() -> None:
@@ -179,8 +289,8 @@ def _save_label_store() -> None:
         return
     try:
         _LABEL_STORE.write_text(
-            json.dumps(dict(_label_cache), ensure_ascii=False),
-            encoding="utf-8")
+            json.dumps(dict(_label_cache), ensure_ascii=False), encoding="utf-8"
+        )
         _label_store_dirty = False
     except Exception:
         pass
@@ -189,8 +299,7 @@ def _save_label_store() -> None:
 _load_label_store()
 
 
-def _crop_key(crop) -> str:
-    """잘라낸 라벨 그림의 내용 해시."""
+def _crop_key(crop: Any) -> str:
     import hashlib
 
     return hashlib.blake2b(
@@ -199,13 +308,12 @@ def _crop_key(crop) -> str:
 
 
 def reset_label_cache() -> None:
-    """판독 캐시를 비운다. 테스트가 서로 영향을 주지 않게 하는 용도다."""
     global _label_store_dirty
     _label_cache.clear()
     _label_store_dirty = False
 
 
-def _remember_labels(keys: list[str], values: list) -> None:
+def _remember_labels(keys: list[str], values: list[Any]) -> None:
     global _label_store_dirty
     for key, value in zip(keys, values):
         _label_cache[key] = value
@@ -215,31 +323,297 @@ def _remember_labels(keys: list[str], values: list) -> None:
     _label_store_dirty = True
     _save_label_store()
 
-
-_cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
-# 여러 개를 열어 놓고 골라 보므로 3개로는 모자란다(파일 4개째를 열면
-# 첫 파일이 밀려나 "CAD 가 만료됐습니다" 가 뜬다). 실측 64XX1 STEP 한 개가
-# 파싱 후 메모리에서 약 40MB(정점 302,340 · 삼각형 369,082)라 6개까지는
-# 감당된다.
-_CAD_CACHE_MAX = 6
-
-
-def _cache_cad(entry: dict[str, Any]) -> str:
-    """파싱한 CAD 를 들고 있는다. 215MB STEP 이 42~100초 걸려서
-    오버레이를 그릴 때마다 다시 읽을 수는 없다."""
-    cad_id = uuid.uuid4().hex
-    _cad_cache[cad_id] = entry
-    while len(_cad_cache) > _CAD_CACHE_MAX:
-        _cad_cache.popitem(last=False)
-    return cad_id
+# 보정치 수동 수정 이력을 남기는 로컬 DB. 스캔 이미지·도면 데이터를 외부로 보낼 수 없는
+# 사내 보안정책과 같은 이유로, 외부 SQL 서버가 아니라 이 백엔드가 로컬에 직접 들고 있다.
+CORRECTION_DB_PATH = Path(
+    os.environ.get(
+        "AJIN_CORRECTION_DB_PATH", str(UI_DIR / "backend" / "correction_history.db")
+    )
+)
+CORRECTION_DB_URL = os.environ.get("AJIN_CORRECTION_DB_URL", "").strip()
+CORRECTION_ACTIONS = frozenset(
+    {"edit", "reset_auto", "reset_all", "restore_before", "reapply", "revise"}
+)
+CORRECTION_MODES = frozenset({"auto", "manual"})
 
 
-def _cache_analysis(entry: dict[str, Any]) -> str:
-    analysis_id = uuid.uuid4().hex
-    _analysis_cache[analysis_id] = entry
-    while len(_analysis_cache) > _ANALYSIS_CACHE_MAX:
-        _analysis_cache.popitem(last=False)
-    return analysis_id
+class CorrectionDatabaseError(RuntimeError):
+    """Raised when the shared correction-history database is unavailable."""
+
+
+def _active_correction_db_url() -> str:
+    return os.environ.get("AJIN_CORRECTION_DB_URL", CORRECTION_DB_URL).strip()
+
+
+def _mysql_connection_config(database_url: str) -> dict[str, Any]:
+    parsed = urlsplit(database_url)
+    if parsed.scheme not in {"mysql", "mysql+mysqlconnector"}:
+        raise ValueError(
+            "AJIN_CORRECTION_DB_URL must start with mysql:// or "
+            "mysql+mysqlconnector://."
+        )
+    database = unquote(parsed.path.lstrip("/"))
+    if not parsed.hostname or not parsed.username or not database:
+        raise ValueError(
+            "AJIN_CORRECTION_DB_URL requires a host, user, and database name."
+        )
+    query = parse_qs(parsed.query)
+    charset = query.get("charset", ["utf8mb4"])[-1]
+    timeout_text = query.get("connect_timeout", ["10"])[-1]
+    try:
+        connection_timeout = max(1, min(60, int(timeout_text)))
+    except ValueError as exc:
+        raise ValueError("connect_timeout must be an integer from 1 to 60.") from exc
+    config: dict[str, Any] = {
+        "host": parsed.hostname,
+        "port": parsed.port or 3306,
+        "user": unquote(parsed.username),
+        "password": unquote(parsed.password or ""),
+        "database": database,
+        "charset": charset,
+        "connection_timeout": connection_timeout,
+        "autocommit": False,
+    }
+    ssl_ca = query.get("ssl_ca", [""])[-1].strip()
+    if ssl_ca:
+        config.update(
+            ssl_ca=ssl_ca,
+            ssl_verify_cert=True,
+            ssl_verify_identity=True,
+        )
+    return config
+
+
+class _CorrectionConnection:
+    def __init__(self, raw_connection: Any, dialect: str) -> None:
+        self.raw_connection = raw_connection
+        self.dialect = dialect
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> Any:
+        cursor = (
+            self.raw_connection.cursor(dictionary=True)
+            if self.dialect == "mysql"
+            else self.raw_connection.cursor()
+        )
+        statement = query.replace("?", "%s") if self.dialect == "mysql" else query
+        try:
+            cursor.execute(statement, params)
+        except Exception as exc:
+            cursor.close()
+            if self.dialect == "mysql":
+                raise CorrectionDatabaseError(
+                    "MySQL correction-history query failed."
+                ) from exc
+            raise
+        return cursor
+
+
+@contextmanager
+def _get_correction_db() -> Iterator[_CorrectionConnection]:
+    database_url = _active_correction_db_url()
+    if database_url:
+        try:
+            import mysql.connector
+
+            raw_connection = mysql.connector.connect(
+                **_mysql_connection_config(database_url)
+            )
+        except (ImportError, ValueError) as exc:
+            raise CorrectionDatabaseError(str(exc)) from exc
+        except Exception as exc:
+            raise CorrectionDatabaseError(
+                "Could not connect to the MySQL correction-history database."
+            ) from exc
+        connection = _CorrectionConnection(raw_connection, "mysql")
+    else:
+        raw_connection = sqlite3.connect(CORRECTION_DB_PATH)
+        raw_connection.row_factory = sqlite3.Row
+        connection = _CorrectionConnection(raw_connection, "sqlite")
+    try:
+        yield connection
+        raw_connection.commit()
+    except CorrectionDatabaseError:
+        raw_connection.rollback()
+        raise
+    except Exception as exc:
+        raw_connection.rollback()
+        if connection.dialect == "mysql":
+            raise CorrectionDatabaseError(
+                "MySQL correction-history operation failed."
+            ) from exc
+        raise
+    finally:
+        raw_connection.close()
+
+
+def _init_correction_db() -> None:
+    with _get_correction_db() as conn:
+        if conn.dialect == "mysql":
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS correction_history (
+                    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+                    part_no VARCHAR(255) NOT NULL,
+                    scan_name VARCHAR(255) NOT NULL,
+                    point_id VARCHAR(128) NOT NULL,
+                    old_value DOUBLE NULL,
+                    new_value DOUBLE NULL,
+                    worker VARCHAR(255) NULL,
+                    created_at VARCHAR(32) NOT NULL,
+                    action VARCHAR(32) NOT NULL DEFAULT 'edit',
+                    old_mode VARCHAR(16) NULL,
+                    new_mode VARCHAR(16) NULL,
+                    coefficient DOUBLE NULL,
+                    source_entry_id BIGINT UNSIGNED NULL,
+                    PRIMARY KEY (id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+                """
+            )
+            columns = {
+                row["Field"]
+                for row in conn.execute("SHOW COLUMNS FROM correction_history").fetchall()
+            }
+            migrations = (
+                ("action", "VARCHAR(32) NOT NULL DEFAULT 'edit'"),
+                ("old_mode", "VARCHAR(16) NULL"),
+                ("new_mode", "VARCHAR(16) NULL"),
+                ("coefficient", "DOUBLE NULL"),
+                ("source_entry_id", "BIGINT UNSIGNED NULL"),
+            )
+            for name, declaration in migrations:
+                if name not in columns:
+                    conn.execute(
+                        f"ALTER TABLE correction_history ADD COLUMN {name} {declaration}"
+                    )
+            indexes = {
+                row["Key_name"]
+                for row in conn.execute("SHOW INDEX FROM correction_history").fetchall()
+            }
+            if "idx_correction_history_part_scan_id" not in indexes:
+                conn.execute(
+                    "CREATE INDEX idx_correction_history_part_scan_id "
+                    "ON correction_history (part_no, scan_name, id DESC)"
+                )
+            return
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS correction_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                part_no TEXT NOT NULL,
+                scan_name TEXT NOT NULL,
+                point_id TEXT NOT NULL,
+                old_value REAL,
+                new_value REAL,
+                worker TEXT,
+                created_at TEXT NOT NULL,
+                action TEXT NOT NULL DEFAULT 'edit',
+                old_mode TEXT,
+                new_mode TEXT,
+                coefficient REAL,
+                source_entry_id INTEGER
+            )
+            """
+        )
+        # The first version of the local history DB only had the columns above
+        # ``created_at``.  Keep those rows intact and add metadata in place so a
+        # UI/backend update never discards an operator's existing audit trail.
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(correction_history)").fetchall()
+        }
+        migrations = (
+            ("action", "TEXT NOT NULL DEFAULT 'edit'"),
+            ("old_mode", "TEXT"),
+            ("new_mode", "TEXT"),
+            ("coefficient", "REAL"),
+            ("source_entry_id", "INTEGER"),
+        )
+        for name, declaration in migrations:
+            if name not in columns:
+                conn.execute(
+                    f"ALTER TABLE correction_history ADD COLUMN {name} {declaration}"
+                )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_correction_history_part_scan_id "
+            "ON correction_history (part_no, scan_name, id DESC)"
+        )
+        current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version < 1:
+            conn.execute("PRAGMA user_version = 1")
+
+
+try:
+    _init_correction_db()
+except CorrectionDatabaseError as exc:
+    # 서버 시작 시점에 보정 이력 DB(사내망 MySQL)가 잠깐 안 닿아도, 그것과
+    # 무관한 나머지 기능(품번 파일 정리 등)까지 통째로 못 뜨게 하지는 않는다.
+    # 보정 이력 쪽 API는 요청 시점에 다시 연결을 시도하고, 여전히 안 되면
+    # 이미 503으로 안내한다.
+    print(f"[경고] 보정 이력 DB 초기화 실패, 나머지 기능은 계속 시작합니다: {exc}")
+
+
+def _correction_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "partNo": row["part_no"],
+        "scanName": row["scan_name"],
+        "pointId": row["point_id"],
+        "oldValue": row["old_value"],
+        "newValue": row["new_value"],
+        "worker": row["worker"],
+        "createdAt": row["created_at"],
+        "action": row["action"],
+        "oldMode": row["old_mode"],
+        "newMode": row["new_mode"],
+        "coefficient": row["coefficient"],
+        "sourceEntryId": row["source_entry_id"],
+    }
+
+
+def _optional_finite_number(value: Any, field_name: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite number or null.")
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{field_name} must be a finite number or null.") from exc
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be a finite number or null.")
+    return number
+
+
+def _optional_correction_mode(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in CORRECTION_MODES:
+        choices = ", ".join(sorted(CORRECTION_MODES))
+        raise ValueError(f"{field_name} must be one of: {choices}, or null.")
+    return value
+
+
+def _optional_source_entry_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value <= 0
+        or value > 2**63 - 1
+    ):
+        raise ValueError("sourceEntryId must be a positive integer or null.")
+    return value
+
+
+# 제품데이터는 품번당 한 장으로 고정이고 스캔은 차수마다 새로 들어온다. 한 번
+# 등록해 두면 이후 스캔은 지금처럼 파일 하나만 올려도 자동으로 짝이 맞는다.
+PRODUCT_LIBRARY = ProductLibrary()
+ALIGNMENT_STORE = AlignmentStore()
+# CATIA 에서 export 한 STEP/STL 을 품번당 한 파일로 보관한다. PNG 가 없으면
+# 스캔 마스크에 fit_view 로 뷰를 맞춰 즉석 렌더한다.
+MESH_LIBRARY = MeshLibrary()
 
 
 def _is_complete_qwen_model(candidate: Path) -> bool:
@@ -274,32 +648,80 @@ def _find_qwen_model() -> Path | None:
 
 
 def _get_qwen_reader() -> LabelValueReader:
-    global _reader
+    global _reader, _reader_status, _reader_warmup_error
     if _reader is not None:
         return _reader
     with _reader_lock:
         if _reader is None:
             import torch
 
-            model_path = _find_qwen_model()
-            if model_path is None:
-                raise FileNotFoundError("Qwen2.5-VL-3B 로컬 모델을 찾지 못했습니다.")
-            configured_device = os.environ.get("AJIN_QWEN_DEVICE", "auto").strip().lower()
-            if configured_device in {"", "auto"}:
-                if not torch.cuda.is_available():
-                    raise RuntimeError(
-                        "CUDA용 PyTorch를 사용할 수 없어 Qwen 판독을 건너뜁니다."
-                    )
-                device = "cuda"
-            else:
-                device = configured_device
-            _reader = LabelValueReader(
-                model_id=str(model_path),
-                device=device,
-                local_files_only=True,
-                use_8bit=device.startswith("cuda"),
-            )
+            _reader_status = "loading"
+            _reader_warmup_error = None
+            try:
+                model_path = _find_qwen_model()
+                if model_path is None:
+                    raise FileNotFoundError("Qwen2.5-VL-3B 로컬 모델을 찾지 못했습니다.")
+                configured_device = os.environ.get("AJIN_QWEN_DEVICE", "auto").strip().lower()
+                if configured_device in {"", "auto"}:
+                    if not torch.cuda.is_available():
+                        raise RuntimeError(
+                            "CUDA용 PyTorch를 사용할 수 없어 Qwen 판독을 건너뜁니다."
+                        )
+                    device = "cuda"
+                else:
+                    device = configured_device
+                _reader = LabelValueReader(
+                    model_id=str(model_path),
+                    device=device,
+                    local_files_only=True,
+                    use_8bit=device.startswith("cuda"),
+                )
+                _reader_status = "loaded"
+            except Exception as exc:
+                _reader_status = "failed"
+                _reader_warmup_error = str(exc)
+                raise
     return _reader
+
+
+def _preload_qwen_reader() -> None:
+    """모델 로드와 첫 CUDA 실행을 UI 사용 전에 백그라운드에서 끝낸다."""
+    global _reader_status, _reader_warmup_error
+    try:
+        reader = _get_qwen_reader()
+        _reader_status = "warming"
+        warmup = getattr(reader, "warmup", None)
+        if callable(warmup):
+            warmup()
+        _reader_status = "ready"
+    except Exception as exc:
+        _reader_status = "failed"
+        _reader_warmup_error = str(exc)
+        print(f"[qwen] 백그라운드 준비 실패: {exc}", file=sys.stderr)
+
+
+def _start_qwen_preload() -> None:
+    """상태 확인 요청은 즉시 답하고 Qwen 준비만 데몬 스레드로 시작한다."""
+    global _reader_preload_thread, _reader_status
+    configured = os.environ.get("AJIN_QWEN_PRELOAD", "1").strip().lower()
+    if configured in {"0", "false", "no", "off"}:
+        if _reader_status == "idle":
+            _reader_status = "disabled"
+        return
+    if _find_qwen_model() is None:
+        _reader_status = "unavailable"
+        return
+    with _reader_preload_lock:
+        if (_reader is not None or _reader_status in {
+                "loading", "loaded", "warming", "ready", "failed"}):
+            return
+        _reader_status = "scheduled"
+        _reader_preload_thread = threading.Thread(
+            target=_preload_qwen_reader,
+            name="qwen-preload",
+            daemon=True,
+        )
+        _reader_preload_thread.start()
 
 
 def _read_qwen_values(
@@ -396,85 +818,653 @@ def _decode_image(payload: bytes) -> np.ndarray:
     return image
 
 
-def analyze_image(image: np.ndarray, filename: str,
-                  part_no: str | None = None) -> dict[str, Any]:
-    """스캔 한 장을 분석한다.
+def _marker_centers_from_version_difference(
+    labels_inpainted: np.ndarray,
+    labels_points_inpainted: np.ndarray,
+) -> list[tuple[float, float]]:
+    """Return marker centers isolated by the version-2/version-4 difference."""
+    if labels_inpainted.shape != labels_points_inpainted.shape:
+        raise ValueError("Label-removal result sizes do not match.")
+    difference = np.max(
+        cv2.absdiff(labels_inpainted, labels_points_inpainted), axis=2
+    )
+    difference_mask = np.where(difference >= 8, 255, 0).astype(np.uint8)
+    count, _, stats, centroids = cv2.connectedComponentsWithStats(
+        difference_mask, connectivity=8
+    )
+    centers: list[tuple[float, float]] = []
+    maximum_area = max(500, int(difference_mask.size * 0.001))
+    for component in range(1, count):
+        area = int(stats[component, cv2.CC_STAT_AREA])
+        if 3 <= area <= maximum_area:
+            centers.append(
+                (float(centroids[component, 0]), float(centroids[component, 1]))
+            )
+    return centers
 
-    part_no 를 주면 파일명 대신 그것을 품번으로 쓴다. 품번은 컬러바 범위
-    (PRODUCT_COLORBAR_MM)와 제로라인 파라미터를 고르는 열쇠라, 파일명에
-    품번이 없으면 제로라인 단계가 통째로 비어 버린다 — 실측으로 확인했다.
 
-        _boundary_anchors.png                  제로라인 0개
-        JD_67XX6-DR000 3D 스캔.png (같은 그림)  제로라인 3개
+def _refine_candidates_from_removed_markers(
+    image: np.ndarray,
+    candidates: list,
+    labels_inpainted: np.ndarray,
+    labels_points_inpainted: np.ndarray,
+) -> int:
+    """Replace heuristic endpoints with centers measured from removed markers."""
+    marker_centers = _marker_centers_from_version_difference(
+        labels_inpainted, labels_points_inpainted
+    )
+    if not marker_centers or not candidates:
+        return 0
 
-    파일명을 바꾸라고 하는 대신 화면에서 품번을 고를 수 있게 했다.
+    label_boxes = detect_label_boxes(image)
+    removal_scan_mask = build_label_removal_scan_mask(image)
+    _, point_specs, point_boxes = detect_exact_hsv_leader_lines(
+        image,
+        label_boxes,
+        removal_scan_mask,
+        return_point_boxes=True,
+    )
+
+    unused_centers = set(range(len(marker_centers)))
+    center_records: list[
+        tuple[tuple[int, int, int, int], tuple[int, int]]
+    ] = []
+    for spec, point_box in zip(point_specs, point_boxes):
+        spec_x, spec_y, radius, _ = spec
+        nearest: tuple[float, int] | None = None
+        for center_index in unused_centers:
+            center_x, center_y = marker_centers[center_index]
+            distance = math.hypot(center_x - spec_x, center_y - spec_y)
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, center_index)
+        maximum_gap = max(8.0, float(radius * 3))
+        if nearest is None or nearest[0] > maximum_gap:
+            continue
+        _, center_index = nearest
+        center_records.append(
+            (point_box, (int(spec_x), int(spec_y)))
+        )
+        unused_centers.remove(center_index)
+
+    refined = 0
+    used_records: set[int] = set()
+    for candidate in candidates:
+        x, y, box_width, box_height = candidate.box
+        candidate_box = (x, y, x + box_width, y + box_height)
+        best_record: tuple[float, int] | None = None
+        candidate_area = max(1, box_width * box_height)
+        for record_index, (point_box, _) in enumerate(center_records):
+            if record_index in used_records:
+                continue
+            ix0 = max(candidate_box[0], point_box[0])
+            iy0 = max(candidate_box[1], point_box[1])
+            ix1 = min(candidate_box[2], point_box[2])
+            iy1 = min(candidate_box[3], point_box[3])
+            intersection = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+            point_area = max(
+                1, (point_box[2] - point_box[0]) * (point_box[3] - point_box[1])
+            )
+            overlap = intersection / float(candidate_area + point_area - intersection)
+            if best_record is None or overlap > best_record[0]:
+                best_record = (overlap, record_index)
+        if best_record is not None and best_record[0] >= 0.75:
+            _, record_index = best_record
+            point = center_records[record_index][1]
+            used_records.add(record_index)
+        else:
+            # Direct-contact markers have no normal leader component/box
+            # record. Match their newly added difference component to the
+            # already reliable compact-marker fallback coordinate.
+            if candidate.point_xy is None:
+                continue
+            nearest_center: tuple[float, int] | None = None
+            for center_index in unused_centers:
+                center_x, center_y = marker_centers[center_index]
+                distance = math.hypot(
+                    center_x - candidate.point_xy[0],
+                    center_y - candidate.point_xy[1],
+                )
+                if nearest_center is None or distance < nearest_center[0]:
+                    nearest_center = (distance, center_index)
+            if nearest_center is None or nearest_center[0] > 12.0:
+                continue
+            _, center_index = nearest_center
+            center_x, center_y = marker_centers[center_index]
+            point = (int(round(center_x)), int(round(center_y)))
+            unused_centers.remove(center_index)
+        candidate.point_xy = point
+        candidate.traced = True
+        refined += 1
+    return refined
+
+
+def _resolve_product_image(
+    filename: str, uploaded: np.ndarray | None
+) -> tuple[np.ndarray | None, str | None, list[str]]:
+    """Pick the uploaded product image first, then a registered one."""
+    warnings: list[str] = []
+    if uploaded is not None:
+        return uploaded, "업로드한 이미지", warnings
+    part_number = part_number_from_name(filename)
+    if part_number is None:
+        return None, None, warnings
+    match = PRODUCT_LIBRARY.find(part_number)
+    if match is None:
+        warnings.append(f"품번 {part_number}의 제품데이터가 등록되어 있지 않습니다.")
+        return None, None, warnings
+    if not match.exact:
+        warnings.append(f"{part_number}에 정확히 맞는 제품데이터가 없어 {match.part_number}를 사용했습니다.")
+    try:
+        return read_image(match.path), f"등록됨 · {match.part_number}", warnings
+    except ValueError as exc:
+        warnings.append(str(exc))
+        return None, None, warnings
+
+
+# 재귀 스캔에서 반드시 건너뛰어야 할 폴더 이름들.
+# node_modules 하나만 수십만 파일이라, 프루닝 없이 rglob 을 돌리면 HTTP 핸들러가
+# 통째로 잠긴다. .venv/.git/__pycache__/.next/AJ_ENV/.local_archive 도 같은 이유.
+_CAD_SCAN_SKIP_DIRS = {
+    "node_modules", ".venv", ".git", "__pycache__", ".next", "AJ_ENV",
+    ".local_archive", ".pytest_cache", ".cache", ".idea", ".vscode",
+    "dist", "build", "out",
+}
+
+
+def _walk_cad_source(root: Path):
+    """os.walk 을 쓰되 위 노이즈 폴더는 즉시 프루닝. 파일 Path 를 순차 산출한다."""
+    for dir_path, dir_names, file_names in os.walk(root):
+        # 원소를 제거해 하위 재귀를 막는다 (os.walk 의 정식 프루닝 방식).
+        dir_names[:] = [d for d in dir_names if d not in _CAD_SCAN_SKIP_DIRS]
+        base = Path(dir_path)
+        for name in file_names:
+            yield base / name
+
+
+def _find_cad_source_for_part(part_number: str) -> Path | None:
+    """CAD_SOURCE_ROOT 안을 재귀적으로 훑어 품번과 맞는 CAD 파일을 하나 고른다.
+
+    같은 품번이 여러 파일에 걸릴 수 있어 우선순위를 준다:
+      1) 파일명이 정확히 <품번>.<ext> — 가장 명확
+      2) 파일명이 정확히 <베이스품번>.<ext> — 접두어 매칭 폴백
+      3) 파일명이 품번을 포함(예: `64XX2-DR000 3D모델.CATPart`)
+    확장자 우선순위는 STEP > STL > CATPart 순 — STEP 이 있으면 변환 없이 바로 로드
+    가능하고, STL 은 CATIA export 시 tessellation 이 이미 굳어 오지만 열기 쉽다.
+    CATPart 는 CATIA COM 을 거쳐야 하므로 마지막.
     """
+    if CAD_SOURCE_ROOT is None or not CAD_SOURCE_ROOT.is_dir():
+        return None
+    from product_alignment.registry import base_number
+    part_upper = part_number.upper()
+    prefix_upper = base_number(part_upper)
+    supported = tuple(MeshLibrary.SUPPORTED_SUFFIXES)
+    priority = {".step": 0, ".stp": 0, ".stl": 1, ".ply": 1, ".obj": 1,
+                ".off": 1, ".glb": 1, ".gltf": 1, ".3mf": 1,
+                ".catpart": 2, ".catproduct": 3}
+
+    candidates: list[tuple[int, int, Path]] = []
+    try:
+        for candidate in _walk_cad_source(CAD_SOURCE_ROOT):
+            suffix = candidate.suffix.lower()
+            if suffix not in supported:
+                continue
+            stem_upper = candidate.stem.upper()
+            if stem_upper == part_upper:
+                match_rank = 0
+            elif stem_upper == prefix_upper:
+                match_rank = 1
+            elif part_upper in stem_upper or prefix_upper in stem_upper:
+                match_rank = 2
+            else:
+                continue
+            candidates.append((match_rank, priority.get(suffix, 9), candidate))
+            # 정확 매칭이 걸리는 순간 더 볼 이유가 없다 — 조기 종료로 초 단위 절약.
+            if match_rank == 0 and priority.get(suffix, 9) <= 1:
+                break
+    except (OSError, PermissionError):
+        return None
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], str(item[2]).lower()))
+    return candidates[0][2]
+
+
+def _cad_cache_dir() -> Path:
+    """CATIA 변환 등 캐시 산출물을 두는 곳. mesh 라이브러리 폴더 안이라
+    저장소 .gitignore 에 의해 자동 제외된다.
+    """
+    return MESH_LIBRARY.directory / ".cache"
+
+
+def _mesh_not_found_message(part_number: str | None) -> str:
+    """CAD 파일을 못 찾았을 때 사용자에게 이유와 대안을 알려 줄 문구.
+
+    "제품데이터도 mesh 도 없어서 이 스캔 위엔 아무것도 못 올렸음" 이 되기 전에,
+    등록된 파일과 자동 스캔 폴더를 함께 보여 준다 — 사용자는 파일이 왜 안
+    매칭됐는지(품번 오타/파일 위치/이름 규칙)를 바로 확인할 수 있다.
+    """
+    library = MESH_LIBRARY.registered()
+    lines: list[str] = []
+    if part_number:
+        lines.append(f"{part_number} 에 매칭되는 CAD 파일이 없습니다.")
+    else:
+        lines.append("스캔 파일 이름에서 품번을 찾지 못해 CAD 매칭을 시도하지 못했습니다.")
+    if library:
+        lines.append(f"등록된 CAD: {', '.join(library[:6])}" + ("…" if len(library) > 6 else ""))
+    if CAD_SOURCE_ROOT is not None:
+        lines.append(f"자동 스캔 폴더: {CAD_SOURCE_ROOT}")
+    return " · ".join(lines)
+
+
+def _resolve_product_from_mesh(
+    part_number: str | None, scan_image: np.ndarray,
+) -> tuple[np.ndarray, str, list[str]] | None:
+    """등록된 mesh 로 CATIA 제품데이터 이미지를 즉석으로 만든다.
+
+    실패 요인(등록 없음, 마스크 비어 있음, 로드 실패, 뷰 fit 실패, CATIA
+    캡처 실패) 모두 None 을 준다. 반환하면 (이미지, 출처, 경고) — 이 이미지는
+    실제 촬영된 제품데이터 PNG 와 똑같은 대접을 받는다: 호출자가 이걸
+    그대로 `_align_to_product` 에 넘겨서 좌우반전·위치·스케일을 그 검증된
+    2D 실루엣 매칭 엔진이 정하게 한다. mesh/fit 은 "어느 축 방향에서
+    찍을까" 를 고르는 데까지만 쓰인다 — 정밀한 정합은 여기서 안 한다
+    (이전에 mesh 좌표만으로 정합까지 하려다 CATIA 카메라의 실제 좌우
+    방향(handedness)을 잘못 가정해 뒤집힌 채 나온 적이 있었다).
+
+    [로깅]
+    이 경로는 개발 중이라 어디서 실패하는지 눈으로 볼 수 있어야 한다.
+    각 단계 시작·완료를 stderr 에 짧게 남긴다 — backend.err.log 로 흘러
+    사용자가 문의할 때 함께 확인할 수 있다.
+    """
+    def _log(message: str) -> None:
+        print(f"[mesh] {message}", file=sys.stderr, flush=True)
+
+    _log(f"resolve start part={part_number!r}")
+    if not part_number:
+        _log("skip: no part number")
+        return None
+
+    warnings: list[str] = []
+    match_path: Path | None = None
+    match_name: str = part_number
+
+    match = MESH_LIBRARY.find(part_number)
+    if match is not None:
+        match_path = match.path
+        match_name = match.part_number
+        _log(f"library hit: {match_path.name} (exact={match.exact})")
+        if not match.exact:
+            warnings.append(
+                f"{part_number} 에 정확히 맞는 mesh 가 없어 {match.part_number} 를 사용했습니다."
+            )
+
+    if match_path is None:
+        # 로컬 라이브러리에 없으면 사용자가 지정한 CAD 소스 폴더를 재귀 스캔.
+        _log("library miss — scanning CAD source root")
+        found = _find_cad_source_for_part(part_number)
+        if found is not None:
+            match_path = found
+            match_name = found.stem
+            _log(f"source scan hit: {found}")
+            warnings.append(f"CAD 소스 폴더에서 자동 매칭됨: {found.name}")
+
+    if match_path is None:
+        _log("no CAD file matched — giving up")
+        return None
+
+    def _capture_without_mesh() -> np.ndarray | None:
+        """Use CATIA views only when native-to-mesh conversion is unavailable.
+
+        Trying every principal axis avoids the old failure mode where a fixed
+        Z view captured a valid but sideways or edge-on part.  The normal mesh
+        fit path remains preferred because it can split symmetric pairs.
+        """
+        if match_path.suffix.lower() not in {".catpart", ".catproduct"}:
+            return None
+        from types import SimpleNamespace
+
+        try:
+            scan_mask = build_part_silhouette(scan_image)
+        except Exception as exc:
+            _log(f"capture fallback scan mask FAIL: {exc}")
+            return None
+        best: tuple[float, np.ndarray, Any] | None = None
+        for axis in (0, 1, 2):
+            for sign in (1, -1):
+                for swap in (False, True):
+                    try:
+                        candidate = capture_catia_product_image(
+                            match_path,
+                            SimpleNamespace(axis=axis, sign=sign, swap=swap),
+                            _cad_cache_dir(),
+                        )
+                        candidate_alignment = estimate_alignment(
+                            scan_mask, build_product_mask(candidate)
+                        )
+                        score = float(candidate_alignment.score)
+                        _log(
+                            f"capture fallback axis={axis} sign={sign} swap={swap} "
+                            f"rotation={candidate_alignment.rotation} score={score:.4f}"
+                        )
+                        if best is None or score > best[0]:
+                            best = (score, candidate, candidate_alignment)
+                    except Exception as capture_exc:
+                        _log(
+                            f"capture fallback axis={axis} sign={sign} swap={swap} "
+                            f"FAIL: {capture_exc}"
+                        )
+        if best is None:
+            return None
+        warnings.append(
+            "CAD 메시 변환이 지원되지 않아 CATIA의 모든 정면 후보 중 "
+            f"최적 화면을 사용했습니다(화면 회전 {best[2].rotation}°)."
+        )
+        return best[1]
+
+    import time as _time
+    step_t0 = _time.time()
+    try:
+        mesh = load_any_mesh(match_path, cache_dir=_cad_cache_dir())
+    except Exception as exc:
+        _log(f"load_any_mesh FAIL after {(_time.time()-step_t0):.1f}s: {type(exc).__name__}: {exc}")
+        rendered_fallback = _capture_without_mesh()
+        if rendered_fallback is None:
+            warnings.append(f"등록된 mesh 를 열지 못했습니다({match_path.name}): {exc}")
+            return None
+        return (
+            rendered_fallback,
+            f"CATIA 후보 비교 캡처 · {match_name} ({match_path.suffix.lstrip('.').upper()})",
+            warnings,
+        )
+    _log(f"mesh loaded {_time.time()-step_t0:.1f}s v={len(mesh.vertices)} f={len(mesh.faces)}")
+
+    step_t0 = _time.time()
+    try:
+        scan_mask = build_part_silhouette(scan_image)
+    except Exception as exc:
+        _log(f"scan mask FAIL: {exc}")
+        warnings.append(f"스캔 마스크를 만들지 못했습니다: {exc}")
+        return None
+    mask_pixels = int((scan_mask > 0).sum())
+    _log(f"scan mask {_time.time()-step_t0:.1f}s nonzero={mask_pixels}")
+    if mask_pixels == 0:
+        _log("scan mask empty — cannot fit")
+        warnings.append("스캔에서 부품 영역을 찾지 못해 mesh 뷰를 정렬할 수 없습니다.")
+        return None
+
+    # 현업 CATPart 는 좌우 대칭쌍(LH+RH)을 한 파일에 같이 담아 두는 경우가
+    # 있다(실측 71XX2). 스캔은 그중 한쪽만 찍은 것이라, 둘을 합친 mesh 로
+    # fit_view 를 돌리면 "합쳐진 실루엣" 과 "부품 하나짜리 스캔" 을 맞추려다
+    # 엉뚱한 축으로 수렴한다. 정점 좌표에 큰 빈틈이 있으면(=몸통이 둘) 둘로
+    # 쪼개 각각 fit_view 를 돌리고, 스캔과 더 잘 맞는 쪽을 쓴다.
+    mesh_parts = split_symmetric_pair(
+        np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64)
+    )
+    if len(mesh_parts) > 1:
+        _log(f"mesh split into {len(mesh_parts)} candidate parts (symmetric-pair gap detected)")
+
+    step_t0 = _time.time()
+    fit = None
+    fit_vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    fit_faces = np.asarray(mesh.faces, dtype=np.int64)
+    for idx, (part_vertices, part_faces) in enumerate(mesh_parts):
+        try:
+            candidate_fit = fit_mesh_view(part_vertices, part_faces, scan_mask)
+        except Exception as exc:
+            _log(f"fit_view candidate {idx} FAIL: {type(exc).__name__}: {exc}")
+            continue
+        candidate_score = float(candidate_fit.detail_iou or candidate_fit.iou)
+        _log(f"fit candidate {idx} v={len(part_vertices)} axis={candidate_fit.axis} "
+             f"sign={candidate_fit.sign} iou={candidate_fit.iou} detail={candidate_fit.detail_iou}")
+        if fit is None or candidate_score > float(fit.detail_iou or fit.iou):
+            fit = candidate_fit
+            fit_vertices, fit_faces = part_vertices, part_faces
+    if fit is None:
+        _log(f"fit_view FAIL after {(_time.time()-step_t0):.1f}s: all candidates failed")
+        warnings.append("mesh 뷰를 스캔에 맞추지 못했습니다.")
+        return None
+    if len(mesh_parts) > 1:
+        warnings.append("이 CAD 파일은 대칭쌍(좌우 한 쌍)으로 보여 스캔과 더 잘 맞는 한쪽만 사용했습니다.")
+    _log(f"fit {_time.time()-step_t0:.1f}s (winner v={len(fit_vertices)}) axis={fit.axis} sign={fit.sign} "
+         f"flip_u={fit.flip_u} flip_v={fit.flip_v} swap={getattr(fit,'swap',False)} "
+         f"angle={getattr(fit,'angle',0.0):.4f} mm_per_px={fit.mm_per_px:.4f} "
+         f"origin_u={fit.origin_u:.2f} origin_v={fit.origin_v:.2f} "
+         f"iou={fit.iou} detail={fit.detail_iou}")
+
+    # CATIA 를 열어 fit 이 고른 축 방향(axis/sign/swap)의 실제 셰이딩(부품별
+    # 지정 색상·재질)을 캡처하고, 부품만 딱 잘라낸다. 정밀한 각도·스케일·
+    # 좌우 방향은 여기서 안 맞춘다 — 아래에서 호출자가 이 이미지를 실제
+    # 제품데이터 PNG 와 동일하게 `_align_to_product` 로 넘겨 그 검증된 2D
+    # 매칭 엔진이 정하게 한다. 첫 캡처는 CATIA 기동 포함 20~50초, 이후 같은
+    # (파일,axis,sign,swap) 조합은 캐시로 즉시.
+    # 메시 투영만으로는 앞면/뒷면을 구분할 수 없다. 선택된 축의 양쪽 면과
+    # 화면 축 교환 후보를 실제 CATIA로 캡처한 뒤, 원본 스캔의 외곽선과
+    # 내부 홀 윤곽이 가장 잘 맞는 화면을 제품 이미지로 선택한다.
+    from types import SimpleNamespace
+    step_t0 = _time.time()
+    rendered_candidates: list[tuple[float, np.ndarray, int, bool]] = []
+    capture_errors: list[str] = []
+    for candidate_sign in (1, -1):
+        for candidate_swap in (False, True):
+            try:
+                candidate_image = capture_catia_product_image(
+                    match_path,
+                    SimpleNamespace(axis=fit.axis, sign=candidate_sign, swap=candidate_swap),
+                    _cad_cache_dir(),
+                )
+                candidate_alignment = estimate_alignment(
+                    scan_mask, build_product_mask(candidate_image)
+                )
+                rendered_candidates.append((
+                    float(candidate_alignment.score), candidate_image,
+                    candidate_sign, candidate_swap,
+                ))
+                _log(
+                    f"catia face candidate axis={fit.axis} sign={candidate_sign} "
+                    f"swap={candidate_swap} score={candidate_alignment.score:.4f} "
+                    f"rotation={candidate_alignment.rotation}"
+                )
+            except Exception as exc:
+                capture_errors.append(str(exc))
+    if not rendered_candidates:
+        reason = capture_errors[0] if capture_errors else "캡처 후보 없음"
+        _log(f"catia capture FAIL after {(_time.time()-step_t0):.1f}s: {reason}")
+        warnings.append(f"CATIA 캡처에 실패했습니다: {reason}")
+        return None
+    rendered_candidates.sort(key=lambda item: item[0], reverse=True)
+    _, rendered, chosen_sign, chosen_swap = rendered_candidates[0]
+    _log(
+        f"catia capture selected in {_time.time()-step_t0:.1f}s "
+        f"axis={fit.axis} sign={chosen_sign} swap={chosen_swap} shape={rendered.shape}"
+    )
+
+    fit_iou = float(getattr(fit, "detail_iou", 0.0) or getattr(fit, "iou", 0.0))
+    source_note = f"CATIA 캡처 · {match_name} ({match_path.suffix.lstrip('.').upper()})"
+    if fit_iou < 0.6:
+        warnings.append(
+            f"mesh 뷰 실루엣 겹침이 낮습니다({fit_iou:.2f}) — 스캔이 정투영이 아니거나 부품이 다를 수 있습니다."
+        )
+    return rendered, source_note, warnings
+
+
+def _align_to_product(
+    image: np.ndarray,
+    product_image: np.ndarray,
+    part_number: str | None,
+    flip_x: bool | None,
+    flip_y: bool | None,
+    rotation: int | None = None,
+) -> tuple[Any, np.ndarray | None, list[str]]:
+    """Estimate the scan-to-product transform, reusing a confirmed direction."""
+    warnings: list[str] = []
+    scan_silhouette = build_part_silhouette(image)
+    product_mask = build_product_mask(product_image)
+    # 캡처가 바뀌었거나 예전에 잘못 저장된 방향이 현재 분석을 오염시키지
+    # 않도록 매번 원본 스캔과 현재 제품 이미지에서 방향을 다시 판정한다.
+    alignment = estimate_alignment(
+        scan_silhouette, product_mask,
+        flip_x=flip_x, flip_y=flip_y, rotation=rotation,
+    )
+    # 충분히 구분되는 방향은 별도 확인 버튼 없이 품번에 자동 저장한다.
+    # 이후 같은 품번은 회전까지 동일하게 재사용하므로 대칭 부품에서 방향이
+    # 실행할 때마다 달라지는 현상을 막는다.
+    if part_number and alignment.confident and not alignment.overridden:
+        try:
+            ALIGNMENT_STORE.save(part_number, alignment)
+        except OSError as exc:
+            warnings.append(f"자동 정렬 저장 실패: {exc}")
+    overlay = render_alignment_overlay(product_image, warp_scan_mask(alignment, scan_silhouette))
+    return alignment, overlay, warnings + list(alignment.warnings)
+
+
+def analyze_image(
+    image: np.ndarray,
+    filename: str,
+    product_upload: np.ndarray | None = None,
+    flip_x: bool | None = None,
+    flip_y: bool | None = None,
+) -> dict[str, Any]:
     height, width = image.shape[:2]
     errors: dict[str, str] = {}
-    # 단계별 소요 시간. "왜 이렇게 오래 걸리나" 를 짐작이 아니라 숫자로
-    # 답하려는 것이다. 따로 프로파일러를 띄우면 이 서버와 GPU 를 두고
-    # 다퉈 값이 왜곡된다 — 실제로 그렇게 재다가 13분을 버렸다.
-    spent: dict[str, float] = {}
+    part_number = part_number_from_name(filename)
 
-    from contextlib import contextmanager
+    product_image, product_source, product_warnings = _resolve_product_image(
+        filename, product_upload
+    )
+    alignment = None
+    alignment_overlay: np.ndarray | None = None
+    # PNG 등록/업로드가 없으면 mesh 라이브러리에서 CATIA 캡처로 즉석 제품
+    # 이미지를 만든다. 이 이미지는 실제 촬영된 제품데이터 PNG 와 완전히
+    # 동일하게 취급한다 — 아래 _align_to_product(2D 실루엣·구멍 매칭, 좌우
+    # 반전 4가지 실측 비교) 를 그대로 거친다. mesh/CATIA 쪽에서 좌우 방향을
+    # 미리 장담하지 않는 이유는 capture_product_image 모듈 docstring 참고.
+    if product_image is None and product_upload is None:
+        mesh_result = _resolve_product_from_mesh(part_number, image)
+        if mesh_result is not None:
+            product_image, product_source, mesh_warnings = mesh_result
+            product_warnings.extend(mesh_warnings)
+        else:
+            # 매칭 실패 이유를 사용자에게 명확히 알려 준다 — 조용히 넘어가면
+            # UI 는 그냥 "제품데이터 없음"으로만 보이고 이유를 알 수 없다.
+            product_warnings.append(_mesh_not_found_message(part_number))
 
-    @contextmanager
-    def _timed(label: str):
-        start = time.perf_counter()
+    if product_image is not None:
         try:
-            yield
-        finally:
-            spent[label] = round(spent.get(label, 0.0)
-                                 + time.perf_counter() - start, 2)
-    # 품번을 먼저 정한다 — 컬러바 검출이 실패했을 때 대신 쓸 범위를
-    # 고르는 데 필요하다(zero_line.detect_zero_line 의 대체 경로).
-    part_key = (part_no or "").strip().upper() or part_no_from_name(filename)
-    part_span = colorbar_span_for(part_key)
-    # 현업 파일명 규칙에서 보정시트 머리말 거리를 읽어 둔다
-    # (차종·품명·공정·적용일자). 원소재만 파일명에 없다.
-    naming = parse_filename(filename)
+            # 포인트·편차·제로라인은 반드시 업로드된 원본 스캔 좌표에서
+            # 검출한다. 제품 방향은 스캔 픽셀을 먼저 뒤집지 않고 이 affine
+            # 행렬에만 담아, 제품 화면에 표시할 때 좌표를 한 번만 변환한다.
+            alignment, alignment_overlay, alignment_warnings = _align_to_product(
+                image, product_image, part_number, flip_x, flip_y
+            )
+            product_warnings.extend(alignment_warnings)
+        except Exception as exc:  # engine errors must be shown per engine
+            errors["product"] = str(exc)
+
+    # 분석 전 과정은 업로드된 원본 스캔 크기와 좌표계를 유지한다.
+    height, width = image.shape[:2]
 
     clean_image: np.ndarray | None = None
+    points_removed_image: np.ndarray | None = None
     label_count = 0
+    image_analysis_context: dict[str, Any] = {}
     try:
-        with _timed("라벨 박스 검출"):
+        label_versions = create_versions(image, context=image_analysis_context)
+        if "label_boxes" in image_analysis_context:
+            label_count = len(image_analysis_context["label_boxes"])
+        else:
             label_count = len(detect_label_boxes(image))
-        with _timed("라벨 지우기"):
-            clean_image = create_versions(image)["2_labels_inpainted"]
+        clean_image = label_versions["2_labels_inpainted"]
+        points_removed_image = label_versions["4_labels_points_inpainted"]
     except Exception as exc:  # engine errors must be shown per engine
         errors["label"] = str(exc)
 
-    # clean_image(라벨 제거·복원본)를 값 추출 소스로 써보려 했으나,
-    # label_removal 엔진이 컬러바 범례의 눈금 숫자까지 "라벨"로 오인해
-    # 범례 전체를 흰색으로 지워버려서 컬러바 검출 자체가 깨진다(확인함).
-    # 그래서 원본 이미지를 그대로 쓰고, 주석 제거는 zero_line_detection
-    # 자체 마스킹(annotations.py, 컬러바 영역은 건드리지 않음)에 맡긴다.
     zero_output = None
+    zero_overlay: np.ndarray | None = None
+    zero_candidates: list = []
+    zero_datum_mask: np.ndarray | None = None
+    zero_lines: list = []
+    zero_anchors: list = []
+    zero_patches: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        with _timed("컬러바+제로영역"):
-            zero_output = detect_zero_line(
-                rgb,
-                # PRODUCT_COLORBAR_MM 은 (위, 아래) = (vmax, vmin) 순서다
-                ZeroLineConfig(
-                    vmax=part_span[0] if part_span else None,
-                    vmin=part_span[1] if part_span else None,
-                ),
-                source_name=filename)
+        zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
+        overlay_base = cv2.cvtColor(
+            clean_image if clean_image is not None else image,
+            cv2.COLOR_BGR2RGB,
+        )
+
+        # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
+        # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
+        zero_candidates, flat, _ = find_zero_candidates(
+            zero_output.values,
+            zero_output.part_mask,
+            float(zero_output.result.tolerance),
+        )
+        zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
+
+        # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
+        # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
+        # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
+        # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
+        # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
+        zero_anchors = find_boundary_anchors(
+            zero_output.values, zero_output.part_mask
+        )
+        zero_patches = grow_patches(
+            zero_output.values, zero_output.part_mask, zero_anchors,
+            tolerance=float(zero_output.result.tolerance),
+        )
+        zero_lines = extract_zero_polylines(
+            zero_output.values, zero_output.part_mask
+        )
+        if zero_patches:
+            zero_overlay = draw_zero_boundary(overlay_base, zero_anchors, zero_patches)
+        elif zero_lines:
+            zero_overlay = draw_zero_polylines(overlay_base, zero_lines)
+        elif zero_datum_mask is not None and zero_datum_mask.any():
+            zero_overlay = draw_polygons(
+                overlay_base, polygonize(zero_datum_mask, preset="balanced")
+            )
+        else:
+            zero_overlay = make_overlay(
+                overlay_base,
+                zero_output.mask,
+                zero_output.centerline,
+                zero_crossing=zero_output.zero_crossing,
+            )
+        # UI 응답은 합의한 하이브리드 엔진 결과를 우선한다. 위의 기존
+        # 결과는 후보/앵커 호환 필드를 유지하기 위한 보조 계산이다.
+        hybrid_zero = detect_hybrid_zero_line(image, filename, base=zero_output)
+        zero_datum_mask = hybrid_zero.mask
+        zero_overlay = hybrid_zero.overlay_rgb
+        zero_lines = hybrid_zero.lines
+        print(f"[zero] hybrid case={hybrid_zero.case} lines={len(zero_lines)} "
+              f"ratio={hybrid_zero.ratio:.4f} regions={hybrid_zero.regions} "
+              f"warnings={hybrid_zero.warnings}",
+              file=sys.stderr, flush=True)
     except Exception as exc:
+        print(f"[zero] pipeline FAIL: {type(exc).__name__}: {exc}",
+              file=sys.stderr, flush=True)
         errors["zero"] = str(exc)
 
     points: list[dict[str, Any]] = []
     qwen_reads = 0
     unread_labels = 0
-    # 다시 읽지 않고 캐시에서 가져온 라벨 수. 판독까지 못 가고 예외가
-    # 나도 아래 응답에서 쓰므로 여기서 잡아 둔다.
-    reused_labels = 0
     detected_candidates = 0
     valid_candidates_count = 0
     deviation_warnings: list[str] = []
     try:
-        candidates = detect_labels(image)
+        if "deviation_candidates" in image_analysis_context:
+            candidates = image_analysis_context["deviation_candidates"]
+        else:
+            candidates = detect_labels(image)
+        if clean_image is not None and points_removed_image is not None:
+            _refine_candidates_from_removed_markers(
+                image,
+                candidates,
+                clean_image,
+                points_removed_image,
+            )
         detected_candidates = len(candidates)
         deviation_scan_mask = build_scan_mask(image)
         scan_present = bool(np.any(deviation_scan_mask))
@@ -510,28 +1500,23 @@ def analyze_image(image: np.ndarray, filename: str,
         qwen_values: list[float | None] = [None] * len(crops)
         qwen_failure: str | None = None
         if crops:
-            # 이미 읽어 본 라벨은 다시 읽지 않는다
             keys = [_crop_key(crop) for crop in crops]
             cached = [_label_cache.get(key, _MISSING) for key in keys]
-            todo = [i for i, value in enumerate(cached) if value is _MISSING]
-            # timings 는 **초**만 담는다. 개수를 같이 넣었더니 합계가
-            # 엉뚱하게 나왔다(라벨 79개가 79초로 더해졌다).
-            reused_labels = len(crops) - len(todo)
+            todo = [index for index, value in enumerate(cached) if value is _MISSING]
             if todo:
                 try:
-                    with _timed("Qwen 모델 적재"):
-                        reader = _get_qwen_reader()
-                    with _timed("Qwen 숫자 판독"):
-                        fresh, qwen_failure = _read_qwen_values(
-                            reader, [crops[i] for i in todo])
-                    _remember_labels([keys[i] for i in todo], fresh)
+                    reader = _get_qwen_reader()
+                    fresh, qwen_failure = _read_qwen_values(
+                        reader, [crops[index] for index in todo]
+                    )
+                    _remember_labels([keys[index] for index in todo], fresh)
                     for slot, value in zip(todo, fresh):
                         cached[slot] = value
                 except Exception as exc:
                     qwen_failure = str(exc)
                     for slot in todo:
                         cached[slot] = None
-            qwen_values = [None if v is _MISSING else v for v in cached]
+            qwen_values = [None if value is _MISSING else value for value in cached]
 
         for candidate, qwen_value in zip(valid_candidates, qwen_values):
             x, y = candidate.point_xy
@@ -571,366 +1556,78 @@ def analyze_image(image: np.ndarray, filename: str,
     except Exception as exc:
         errors["deviation"] = str(exc)
 
-    zero_overlay: np.ndarray | None = None
-    zero_candidates: list = []
-    zero_datum_mask: np.ndarray | None = None
-    zero_lines: list = []
-    zero_anchors: list = []
-    zero_patches: list = []
-    zero_line_candidates: list = []
-    calibration_stats: dict | None = None
-    calibrated_values: np.ndarray | None = None
-    if zero_output is not None:
-        try:
-            overlay_base = cv2.cvtColor(
-                clean_image if clean_image is not None else image,
-                cv2.COLOR_BGR2RGB,
+    # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
+    transferred = 0
+    if alignment is not None:
+        product_width, product_height = alignment.product_size
+        for point in points:
+            product_x, product_y = map_point(alignment, point["xPx"], point["yPx"])
+            if not is_inside(alignment, product_x, product_y):
+                continue
+            point["xProduct"] = round(product_x / product_width * 100, 3)
+            point["yProduct"] = round(product_y / product_height * 100, 3)
+            transferred += 1
+        if points and transferred < len(points):
+            product_warnings.append(
+                f"제품데이터 범위를 벗어난 포인트 {len(points) - transferred}개는 "
+                "전사하지 않았습니다."
             )
 
-            # VLM이 라벨에서 직접 읽은 실측값(points)으로 컬러바 추정치를
-            # 보정한다. 부품마다 --vmin/--vmax 를 손으로 넣던 걸 대신한다.
-            calibrated_values, calibration_stats = calibrate_with_points(
-                zero_output.values, points
-            )
-
-            # 색만 보고 잡은 0 밴드에서, 실제로 기준이 될 수 있는 곳만 추린다.
-            # 편차가 0에 가깝고 + 주변이 평탄한 곳이 스프링백의 기준면/기준선이다.
-            calibration_scale = abs(float((calibration_stats or {}).get("scale", 1.0)))
-            calibrated_tolerance = float(zero_output.result.tolerance) * calibration_scale
-
-            zero_candidates, flat, _ = find_zero_candidates(
-                calibrated_values,
-                zero_output.part_mask,
-                calibrated_tolerance,
-            )
-            zero_datum_mask = candidates_to_mask(zero_candidates, flat, top_n=8)
-
-            # 2026-08-25 아진산업 방문 확인 사항: 제로라인의 시작/끝점은
-            # 부품 가장자리에서 편차 부호가 바뀌는 지점이다. RING SUNROOF
-            # 실측 시트로 정량 검증했다 — 실제 패치 7개 중 5개 적중,
-            # 평균 위치 오차 대각선의 7.2% (zero_line_detection/README.md 참고).
-            # 아직 완벽하지 않으므로 후보로 제시하고 최종 판단은 사람이 한다.
-            zero_anchors = find_boundary_anchors(
-                calibrated_values, zero_output.part_mask
-            )
-            # 근처 실측 라벨값이 뚜렷하게 크면(0.5mm 초과) 리브·나사구멍
-            # 잡음으로 생긴 가짜 앵커일 확률이 높다 — 탈락시킨다("정답
-            # 확정"이 아니라 "명백히 아닌 것만 거르는" 필터다).
-            zero_anchors = filter_anchors_by_labels(zero_anchors, points)
-            zero_patches = grow_patches(
-                calibrated_values, zero_output.part_mask, zero_anchors,
-                tolerance=calibrated_tolerance,
-            )
-            zero_lines = extract_zero_polylines(
-                calibrated_values, zero_output.part_mask
-            )
-            # 앵커 쌍을 사람이 고르지 않아도 되도록, 모든 쌍의 경로를
-            # "부품을 실제로 둘로 가르는 정도"로 순위 매겨 상위 4개만
-            # 내보낸다. 1등이 항상 정답은 아니라서(실측: 정답이 3·4위)
-            # 하나로 확정하지 않고 후보 목록으로 준다.
-            zero_line_candidates = rank_zero_line_candidates(
-                calibrated_values, zero_output.part_mask, zero_anchors, top_n=4
-            )
-            # 기본 화면에는 검증된 것만 보여준다. zero_lines(전체 내부
-            # 스켈레톤 추적)와 zero_datum_mask(평탄도 기반 후보)는 실측
-            # 시트 대비 검증에서 지저분하고 신뢰도가 낮았던 예전 방식이라
-            # 자동 오버레이에서는 뺐다 — 대신 사람이 앵커 2개를 골라
-            # /api/zero-valley-line 으로 선을 그리는 방식(검증됨, 오차
-            # 대각선의 3.68%)을 쓴다.
-            # 자동 후보 패치의 붉은 외곽선은 보정시트의 기준선처럼 보이지만
-            # 실제로는 후보일 뿐이라 화면을 지저분하게 만들었다. 기본 화면은
-            # 원본 스캔만 보여주고, 사용자가 앵커 두 개를 고르면 그 사이의
-            # 단일 골짜기 경로만 프런트엔드에서 붉은 선으로 표시한다.
-            zero_overlay = overlay_base
-        except Exception as exc:
-            errors["zero"] = str(exc)
-
-    # AI 1차 제안(zero_line_advance): 라벨 숫자를 컬러바가 아니라 직접
-    # 읽어서(폰트 템플릿 매칭) "0.0" 표시점과 부호가 바뀌는 지점을 찾고,
-    # 그 사이를 꼭짓점 몇 개짜리 깔끔한 직선으로 잇는다. 컬러바 클리핑에
-    # 영향받지 않아 사람이 앵커를 고르지 않아도 자동으로 선을 만든다.
-    # "0.0" 표시점이 2개 이상이면 신뢰도가 높고, 1개 이하이면 반대쪽
-    # 끝점을 추정해야 해서 신뢰도가 낮다 — 후자는 warnings 로 표시하고
-    # 사람이 위 앵커-클릭 방식으로 직접 고쳐야 한다(회의록 "AI 제안 →
-    # 작업자 수정" 방향).
-    advance_line: dict[str, Any] | None = None
-    if zero_output is not None and calibration_stats is not None:
-        try:
-            advance_vmin_vmax = calibrate_vmin_vmax(zero_output.values, calibration_stats)
-            if advance_vmin_vmax is not None:
-                advance_vmin, advance_vmax = advance_vmin_vmax
-                advance_result = detect_advanced_zero_line(
-                    image,
-                    clean_image if clean_image is not None else image,
-                    vmin=advance_vmin,
-                    vmax=advance_vmax,
-                    config=AdvanceConfig(),
-                )
-                advance_line = {
-                    "points": [
-                        [round(float(x), 1), round(float(y), 1)]
-                        for x, y in advance_result.smooth_path
-                    ],
-                    "warnings": advance_result.warnings,
-                    "confidence": "low" if advance_result.warnings else "high",
-                }
-        except Exception as exc:
-            errors["zeroAdvance"] = str(exc)
-
-    zero_regions = len(zero_output.result.regions) if zero_output is not None else 0
-    zero_ratio = zero_output.result.zero_ratio if zero_output is not None else 0.0
-    zero_warnings = list(zero_output.warnings) if zero_output is not None else []
-    warnings = zero_warnings + deviation_warnings
+    hybrid_zero = locals().get("hybrid_zero")
+    zero_regions = hybrid_zero.regions if hybrid_zero is not None else (len(zero_output.result.regions) if zero_output is not None else 0)
+    zero_ratio = hybrid_zero.ratio if hybrid_zero is not None else (zero_output.result.zero_ratio if zero_output is not None else 0.0)
+    zero_warnings = hybrid_zero.warnings if hybrid_zero is not None else (list(zero_output.warnings) if zero_output is not None else [])
+    warnings = zero_warnings + deviation_warnings + product_warnings
 
     if qwen_reads:
         value_mode = "Qwen2.5-VL-3B 로컬 판독"
     else:
         value_mode = "판독 결과 없음"
 
-    # 라벨 실측값 기반 0포인트 -> 군집(점/존) -> 선으로 잇기
-    zero_point_clusters: list = []
-    simple_key_points: list = []
-    label_zero_line = None
-    try:
-        points_file = ZERO_POINTS_DIR / f"{part_key}.json"
-        if points_file.is_file():
-            raw_points = load_zero_points(points_file)
-            loop_paths = {}
-            for folder in LOOP_PATHS_DIR.glob("*"):
-                if part_key in folder.name.upper():
-                    candidate = folder / "scan_point_loops.json"
-                    if candidate.is_file():
-                        loop_paths = load_loop_paths(candidate)
-                    break
-            # 현업 제공 key_zero_point_engine(2026-08-25)을 두 군데에 쓴다.
-            #  1) 필터 — 0포인트 후보 중 "주요 0포인트"(K1..Kn)만 남긴다.
-            #  2) 순위 — 그 주요 점들 중 어느 둘을 제로라인 끝점으로 삼을지
-            #     엔진이 잰 컬러바 실측 |편차|(mean_abs_deviation_mm)로 고른다.
-            # 전에는 1)만 쓰고 끝점은 우리 strength(라벨 부호전환 크기)로
-            # 골랐는데, 그건 엔진이 실제로 잰 값을 버리는 셈이었다.
-            key_scores = None
-            for key_folder in KEY_ZERO_POINTS_DIR.glob("*"):
-                if part_key in key_folder.name.upper():
-                    key_json = key_folder / "key_zero_points.json"
-                    if key_json.is_file():
-                        raw_points = filter_to_key_points(raw_points, key_json)
-                        key_scores = load_key_scores(key_json)
-                    break
-            zero_point_clusters = cluster_zero_points(
-                raw_points, loop_paths=loop_paths, key_scores=key_scores)
-            # 직선 영라인의 시작·끝점은 반드시 이 주요 0포인트여야 한다
-            # (현업 zero_line_drawing README). 존으로 넓히기 전 중심을 쓴다.
-            if zero_output is not None:
-                for cluster in zero_point_clusters:
-                    x, y, moved = snap_into_mask(
-                        zero_output.part_mask, cluster.center[0], cluster.center[1])
-                    if moved <= 60.0:
-                        simple_key_points.append(
-                            (x, y, max(float(cluster.span) / 2.0, 20.0)))
-            if zero_output is not None and zero_point_clusters:
-                line = connect_strongest_pair(
-                    zero_point_clusters,
-                    calibrated_values if calibrated_values is not None else zero_output.values,
-                    zero_output.part_mask,
-                    float(zero_output.result.tolerance),
-                )
-                if line is not None:
-                    label_zero_line = line.to_dict()
-            # 선을 만든 뒤 모든 군집을 존으로 넓힌다(끝점 선택은 원래
-            # 군집 중심으로 이미 끝났으므로 영향 없다). 시트가 제로를
-            # 여러 존으로 표기하는 부품(67XX6=9개, 71XX2=5개)에서
-            # "점 2개를 이은 선 하나"만으로는 정답을 크게 놓쳤다 —
-            # 실측 커버리지가 각각 19.8%/42.4%였고 존으로 내면
-            # 5.6%/18.6%로 좋아진다(zero_points.py 문서 참고).
-            zero_point_clusters = expand_clusters_to_zones(
-                zero_point_clusters, loop_paths=loop_paths,
-                part_mask=zero_output.part_mask if zero_output is not None else None)
-    except Exception as exc:
-        errors["zeroPoints"] = str(exc)
-
-    # 현업이 준 영라인 선정 방법(2026-08-25) 그대로 — "녹색 영역" 과
-    # "플러스/마이너스 전환대" 가 겹치는 **길쭉한 벨트**를 찾는다.
-    # 두 0포인트를 억지로 잇지 않으므로, 측정 근거가 없는 자리에는
-    # 아무것도 그리지 않는다(green_belt.py 문서에 실측 근거 있음).
-    green_belts: list = []
-    try:
-        if zero_output is not None:
-            belt_values = (
-                calibrated_values if calibrated_values is not None
-                else zero_output.values
-            )
-            green_belts = find_green_belts(belt_values, zero_output.part_mask)
-    except Exception as exc:
-        errors["greenBelts"] = str(exc)
-
-    # 현업 zero_line_drawing(2026-08-26) 방식 — 주요 0포인트를 직선
-    # 정렬도로 묶고, 편차 -0.5~+0.5mm 허용범위를 얼마나 지나가는지로
-    # 채점한다. 곡선을 쓰지 않으므로 결과가 시트처럼 깔끔한 직선이다.
-    simple_zero_lines: list = []
-    try:
-        if zero_output is not None and len(simple_key_points) >= 2:
-            simple_zero_lines = find_simple_zero_lines(
-                zero_output.values, zero_output.part_mask,
-                simple_key_points, part_no=part_key,
-            )
-    except Exception as exc:
-        errors["simpleZeroLines"] = str(exc)
-
-    # my_lab 파이프라인이 그린 영라인(있는 품번만). 데모 화면은 이것을
-    # 영라인으로 표시하고, 우리 검출은 대조용으로 숨겨 둔다.
-    #
-    # 처음엔 이걸 "승인 도면" 으로 알고 정답처럼 썼는데 아니었다 —
-    # my_lab/zero_line_drawing 스크립트의 출력이다(lab_profile.py 참고).
-    # 게다가 우리 검출과 같은 key_zero_points 를 끝점으로 쓰므로, 둘이
-    # 가깝다는 것이 정확도의 근거가 되지 못한다.
-    lab_profile: list = []
-    lab_distance = None
-    try:
-        lab_profile = lab_shapes_for(part_key, width, height)
-        if lab_profile and simple_zero_lines:
-            lab_distance = distance_report(
-                [l.points for l in simple_zero_lines], part_key, width, height)
-    except Exception as exc:
-        errors["labProfile"] = str(exc)
-
-    # 이 품번에 확정된 제로라인이 등록돼 있으면 그걸 정답으로 쓴다.
-    reference_line = None
-    try:
-        entry = load_library(ZERO_LINE_LIBRARY).get(part_key)
-        if entry:
-            # 부품에 따라 시트가 제로를 선으로 그리기도, 여러 존(면)으로
-            # 칠하기도 한다 — 등록된 형태 그대로 내보낸다.
-            reference_line = {
-                "kind": entry.get("kind", "line"),
-                "points": entry.get("points") or [],
-                "contours": entry.get("contours") or [],
-                "partNo": entry["part_no"],
-                "sourceSheet": Path(entry["source_sheet"]).name,
-                "mirrored": entry.get("mirrored", False),
+    analysis_id: str | None = None
+    if zero_output is not None:
+        hybrid_lines = [
+            line.get("points", [])
+            for line in (getattr(hybrid_zero, "lines", []) if hybrid_zero is not None else [])
+            if isinstance(line, dict) and len(line.get("points", [])) >= 2
+        ]
+        hybrid_case = int(getattr(hybrid_zero, "case", 2)) if hybrid_zero is not None else 2
+        analysis_id = _cache_analysis(
+            {
+                "values": zero_output.values,
+                "part_mask": zero_output.part_mask,
+                "tolerance": float(zero_output.result.tolerance),
+                "anchors": zero_anchors,
+                "overlay_base": cv2.cvtColor(
+                    clean_image if clean_image is not None else image,
+                    cv2.COLOR_BGR2RGB,
+                ),
+                # 현재 확정된 하이브리드 결과를 CAD 브랜치 입력 형식으로만
+                # 변환한다. 제로라인 자체를 다시 계산하지 않는다.
+                "lab_zero_lines": hybrid_lines if hybrid_case == 2 else [],
+                "lab_zero_areas": hybrid_lines if hybrid_case == 1 else [],
+                "simple_zero_lines": [],
+                "deviation_points": points,
+                "part_no": part_number,
+                "zero_reference": None,
             }
-    except Exception as exc:
-        errors["zeroReference"] = str(exc)
-
-    # 클릭용 앵커는 라벨 실측값에서 나온 0포인트를 우선 쓴다. 컬러바
-    # 색에서 추정한 앵커보다 근거가 확실하고, 부품 윤곽선 위에 있다.
-    class _ClusterAnchor:
-        def __init__(self, anchor_id, x, y, kind, strength):
-            self.anchor_id, self.x, self.y = anchor_id, int(x), int(y)
-            self.kind, self.strength = kind, strength
-
-        def to_dict(self):
-            return {
-                "anchor_id": self.anchor_id, "x": self.x, "y": self.y,
-                "boundary_arclen": 0.0, "source": "label_zero_point",
-                "kind": self.kind, "strength": self.strength,
-            }
-
-    if zero_point_clusters and zero_output is not None:
-        snapped = []
-        for index, cluster in enumerate(zero_point_clusters, start=1):
-            sx, sy, moved = snap_into_mask(
-                zero_output.part_mask, cluster.center[0], cluster.center[1])
-            if moved <= 60.0:
-                snapped.append(_ClusterAnchor(
-                    len(snapped) + 1, sx, sy, cluster.kind, cluster.strength))
-        if len(snapped) >= 2:
-            zero_anchors = snapped
-
-    # 현업이 준 제로라인 파이프라인(lab_pipeline). 근거가 가장 분명한
-    # 경로다 — "허용범위 밖 영역을 윤곽 위 제로포인트 둘로 닫는다".
-    # 등록된 품번(64XX2·67XX6·71XX2)에서만 돈다.
-    lab_zero: dict = {}
-    if lab_runner.prefix_for(part_key):
-        try:
-            with _timed("현업 제로라인"):
-                lab_zero = lab_runner.run(image, part_key)
-            if lab_zero.get("error"):
-                errors["labZero"] = lab_zero["error"]
-        except Exception as exc:
-            errors["labZero"] = str(exc)
-
-    # 받은 제로 영역을 네모 몇 개로 바꾼다(zero_shapes 참고). 여기서 한
-    # 번만 해 두면 시트와 3D 가 같은 도형을 본다 — 서로 다르게 보이던
-    # 것이 이 때문이었다.
-    lab_areas = zero_shapes.clean(lab_zero.get("areas") or [])
-
-    # 67XX6 은 **적응형 제로라인**(zero_line (2) 묶음)이 더 낫다.
-    #
-    # 앞서 쓰던 7·8단계는 링을 따라 구불구불한 띠 하나를 냈다. 네모로
-    # 다듬어도 굽은 띠를 싸는 이상 헛덮음이 40% 아래로 안 내려갔다.
-    # 새 묶음은 부품 윤곽을 안쪽으로 여섯 겹 뜬 뒤 보정 경계와의 교점을
-    # **직선으로 이어** 다각형을 만든다 — 실측 Z1~Z8 여덟 구역, 꼭짓점
-    # 7~14 개다. 실패하면 기존 결과를 그대로 쓴다.
-    #
-    # 지금은 67XX6 에만 쓴다. 나머지 둘은 이 묶음에서 Case 2(보로노이
-    # 분리선)로 가는데 그 결과는 **선**이라 영역으로 바꾸면 실오라기가
-    # 된다 — 그 둘은 지금 선으로 잘 나온다(얹힘 99.7% · 90.0%).
-    if adaptive_runner.key_for(part_key) in ADAPTIVE_PARTS:
-        try:
-            with _timed("적응형 제로라인"):
-                cleaned = lab_runner.cleaned_scan(image, part_key)
-                if cleaned is not None:
-                    fresh = adaptive_runner.run(image, cleaned, part_key)
-                    if fresh.get("error"):
-                        errors["adaptiveZero"] = fresh["error"]
-                    elif fresh.get("areas"):
-                        # 이미 직선 다각형이라 네모로 다시 싸지 않는다
-                        lab_areas = fresh["areas"]
-        except Exception as exc:
-            errors["adaptiveZero"] = str(exc)
-
-    # 보정시트에 실제로 적을 포인트를 고른다. 스캔에는 수십~백여 개가
-    # 찍히지만 현업 시트에 적히는 건 열몇 개다(향후 계획 02번).
-    key_points: list = []
-    key_rejected: list = []
-    try:
-        key_points, key_rejected = select_key_points(
-            points, width, height, part_no=part_key)
-    except Exception as exc:
-        errors["keyPoints"] = str(exc)
-
-    analysis_id = None
-    if zero_output is not None and zero_anchors and calibrated_values is not None:
-        analysis_id = _cache_analysis({
-            "values": calibrated_values,
-            "part_mask": zero_output.part_mask,
-            "tolerance": calibrated_tolerance,
-            "anchors": zero_anchors,
-            "overlay_base": cv2.cvtColor(
-                clean_image if clean_image is not None else image, cv2.COLOR_BGR2RGB
-            ),
-            # /api/cad-overlay 가 3D 표면 위로 옮길 대상들
-            "simple_zero_lines": [l.to_dict() for l in simple_zero_lines],
-            # 현업 파이프라인 결과가 있으면 3D 에는 이걸 쓴다
-            "lab_zero_lines": lab_zero.get("lines") or [],
-            # 67XX6 처럼 7단계(가지 확장)가 있는 부품은 제로라인이
-            # 선이 아니라 **영역**으로 나온다. 받은 그대로는 링을 따라
-            # 구불구불한 띠라서 시트에도 3D 에도 못 쓴다 — 여기서 한 번만
-            # 네모로 바꿔 두고 시트와 3D 가 **같은 것**을 쓴다.
-            "lab_zero_areas": lab_areas,
-            "deviation_points": points,
-            "part_no": part_key,
-            # 시트에 등록된 제로 표기. 67XX6 은 선이 아니라 **영역**이라
-            # 3D 에서도 면으로 칠해야 한다.
-            "zero_reference": reference_line,
-        })
+        )
 
     return {
         "analysisId": analysis_id,
-        "partNo": part_key,
-        "naming": naming.to_dict(),
-        "labZeroLines": lab_zero.get("lines") or [],
-        "labZeroAreas": lab_areas,
-        "labZeroRegions": lab_zero.get("regions") or [],
-        "timings": spent,
-        # 다시 읽지 않고 캐시에서 가져온 라벨 수. timings 와 단위가
-        # 달라 따로 둔다.
-        "reusedLabels": reused_labels,
-        "keyPoints": [k.to_dict() for k in key_points],
-        "keyPointsRejected": key_rejected,
-        "knownParts": sorted(PRODUCT_COLORBAR_MM),
         "source": {"name": filename, "width": width, "height": height},
+        "partNumber": part_number,
         "cleanImage": _png_data_url(clean_image) if clean_image is not None else None,
+        "productImage": (
+            _png_data_url(product_image) if product_image is not None else None
+        ),
+        "productSource": product_source,
+        "alignment": alignment.to_dict() if alignment is not None else None,
+        "alignmentOverlay": (
+            _png_data_url(alignment_overlay)
+            if alignment_overlay is not None
+            else None
+        ),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)
@@ -938,18 +1635,9 @@ def analyze_image(image: np.ndarray, filename: str,
             else (_png_data_url(zero_output.mask) if zero_output is not None else None)
         ),
         "zeroCandidates": [c.to_dict() for c in zero_candidates[:8]],
-        "zeroLines": [l.to_dict() for l in zero_lines],
+        "zeroLines": zero_lines if hybrid_zero is not None else [l.to_dict() for l in zero_lines],
         "zeroAnchors": [a.to_dict() for a in zero_anchors],
         "zeroPatches": [pt.to_dict() for pt in zero_patches],
-        "advanceLine": advance_line,
-        "zeroLineCandidates": [c.to_dict() for c in zero_line_candidates],
-        "zeroPointClusters": [c.to_dict() for c in zero_point_clusters],
-        "greenBelts": [b.to_dict() for b in green_belts],
-        "simpleZeroLines": [l.to_dict() for l in simple_zero_lines],
-        "labProfile": lab_profile,
-        "labDistance": lab_distance,
-        "labelZeroLine": label_zero_line,
-        "referenceLine": reference_line,
         "points": points,
         "stats": {
             "labelsRemoved": label_count,
@@ -958,19 +1646,16 @@ def analyze_image(image: np.ndarray, filename: str,
             "validCandidates": valid_candidates_count,
             "zeroRegions": zero_regions,
             "zeroRatio": round(zero_ratio, 4),
-            "zeroTolerance": (
-                round(float(zero_output.result.tolerance), 4)
-                if zero_output is not None
-                else None
-            ),
+            "zeroTolerance": 0.6,
             "qwenReads": qwen_reads,
             "qwenUnread": unread_labels,
-            "calibration": calibration_stats,
+            "pointsTransferred": transferred,
         },
         "warnings": warnings,
         "warningsByEngine": {
             "deviation": deviation_warnings,
             "zero": zero_warnings,
+            "product": product_warnings,
         },
         "errors": errors,
         "valueMode": value_mode,
@@ -981,88 +1666,1300 @@ async def health(_: Request) -> JSONResponse:
     import torch
 
     model_path = _find_qwen_model()
+    if model_path is not None and torch.cuda.is_available():
+        _start_qwen_preload()
     return JSONResponse(
         {
             "ok": True,
-            "engines": ["label_removal", "deviation_extraction", "zero_line_detection"],
+            "engines": [
+                "label_removal",
+                "deviation_extraction",
+                "zero_line_detection",
+                "product_alignment",
+            ],
             "folderAvailable": FOLDER_ROOT.is_dir(),
+            "registeredProducts": len(PRODUCT_LIBRARY.registered()),
+            "registeredMeshes": len(MESH_LIBRARY.registered()),
             "qwenCached": model_path is not None,
             "qwenLoaded": _reader is not None,
+            "qwenStatus": _reader_status,
+            "qwenWarmupError": _reader_warmup_error,
             "cuda": torch.cuda.is_available(),
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "correctionDatabase": (
+                "mysql" if _active_correction_db_url() else "sqlite"
+            ),
         }
     )
 
 
-def read_sheet_callouts(payload: bytes) -> dict[str, Any]:
-    """보정시트 이미지에서 보정치 콜아웃(값+좌표)을 전부 읽는다.
-
-    학습 데이터 생성용 — 같은 위치의 스캔 실측값과 비교해 "측정값을
-    그대로 뒤집은 것과 실제 보정치가 얼마나 다른지"를 계산하는 데 쓴다.
-    """
-    from zero_line_detection.sheet_values import (
-        assemble_callouts, build_callout_crops, detect_callout_regions,
-        detect_instruction_notes, detect_red_dots,
-    )
-
-    image = _decode_image(payload)
-    boxes = detect_callout_regions(image)
-    dots = detect_red_dots(image)
-    crops = build_callout_crops(image, boxes)
-
-    values: list[float | None] = []
-    warning: str | None = None
-    if crops:
-        reader = _get_qwen_reader()
-        values, warning = _read_qwen_values(reader, crops)
-
-    callouts = assemble_callouts(boxes, dots, values)
-    # "OO ea 절대높이 유지" 같은 지시문은 숫자가 아니라 값으로 안 읽힌다.
-    # 어느 점에 적용되는지까지는 자동으로 못 풀어서(sheet_values.py 문서
-    # 참고) 위치만 알려주고 사람이 확인하게 한다.
-    notes = detect_instruction_notes(image)
-    result: dict[str, Any] = {
-        "width": image.shape[1],
-        "height": image.shape[0],
-        "callouts": [c.to_dict() for c in callouts],
-        "boxesDetected": len(boxes),
-        "dotsDetected": len(dots),
-        "instructionNotes": [list(box) for box in notes],
-    }
-    if warning:
-        result["warning"] = warning
-    return result
+def _optional_flag(form: Any, name: str) -> bool | None:
+    """Read a tri-state form flag: absent means 'decide automatically'."""
+    raw = form.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def sheet_values(request: Request) -> JSONResponse:
-    try:
-        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
-        upload = form.get("file")
-        if upload is None or not hasattr(upload, "read"):
-            return JSONResponse({"error": "보정시트 이미지가 필요합니다."}, status_code=400)
-        payload = await upload.read()
-        result = await run_in_threadpool(read_sheet_callouts, payload)
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=422)
+def _optional_rotation(form: Any, name: str = "rotation") -> int | None:
+    raw = form.get(name)
+    if raw is None or str(raw).strip() == "":
+        return None
+    rotation = int(str(raw)) % 360
+    if rotation not in {0, 90}:
+        raise ValueError("rotation은 0 또는 90이어야 합니다.")
+    return rotation
 
 
 async def analyze(request: Request) -> JSONResponse:
     try:
-        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        form = await request.form(max_files=2, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
         payload = await upload.read()
         image = _decode_image(payload)
-        part_no = form.get("partNo")
+
+        product_upload = form.get("product")
+        product_image = None
+        if product_upload is not None and hasattr(product_upload, "read"):
+            product_image = _decode_image(await product_upload.read())
+
         result = await run_in_threadpool(
-            analyze_image, image, getattr(upload, "filename", "scan.png"),
-            part_no if isinstance(part_no, str) else None,
+            analyze_image,
+            image,
+            getattr(upload, "filename", "scan.png"),
+            product_image,
+            _optional_flag(form, "flipX"),
+            _optional_flag(form, "flipY"),
         )
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+def realign_image(
+    image: np.ndarray,
+    filename: str,
+    product_upload: np.ndarray | None,
+    flip_x: bool | None,
+    flip_y: bool | None,
+    rotation: int | None,
+    points: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Redo only the alignment and the point transfer.
+
+    Changing the orientation must not cost another Qwen pass, so the values
+    already read stay untouched and only the coordinates are recomputed.
+    """
+    part_number = part_number_from_name(filename)
+    product_image, product_source, warnings = _resolve_product_image(
+        filename, product_upload
+    )
+    if product_image is None:
+        raise ValueError("제품데이터 이미지가 없어 정렬을 다시 계산할 수 없습니다.")
+
+    alignment, overlay, alignment_warnings = _align_to_product(
+        image, product_image, part_number, flip_x, flip_y, rotation
+    )
+    warnings.extend(alignment_warnings)
+
+    product_width, product_height = alignment.product_size
+    mapped: list[dict[str, Any]] = []
+    for point in points:
+        try:
+            x_px = float(point["xPx"])
+            y_px = float(point["yPx"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        product_x, product_y = map_point(alignment, x_px, y_px)
+        if not is_inside(alignment, product_x, product_y):
+            continue
+        mapped.append(
+            {
+                "id": point.get("id"),
+                "xProduct": round(product_x / product_width * 100, 3),
+                "yProduct": round(product_y / product_height * 100, 3),
+            }
+        )
+    if points and len(mapped) < len(points):
+        warnings.append(
+            f"제품데이터 범위를 벗어난 포인트 {len(points) - len(mapped)}개는 "
+            "전사하지 않았습니다."
+        )
+
+    return {
+        "partNumber": part_number,
+        "productImage": _png_data_url(product_image),
+        "productSource": product_source,
+        "alignment": alignment.to_dict(),
+        "alignmentOverlay": _png_data_url(overlay),
+        "points": mapped,
+        "warnings": warnings,
+    }
+
+
+async def realign(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=2, max_fields=8, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "스캔 이미지가 필요합니다."}, status_code=400)
+        image = _decode_image(await upload.read())
+
+        product_upload = form.get("product")
+        product_image = None
+        if product_upload is not None and hasattr(product_upload, "read"):
+            product_image = _decode_image(await product_upload.read())
+
+        raw_points = form.get("points")
+        points = json.loads(str(raw_points)) if raw_points else []
+        if not isinstance(points, list):
+            return JSONResponse({"error": "points는 배열이어야 합니다."}, status_code=400)
+
+        result = await run_in_threadpool(
+            realign_image,
+            image,
+            getattr(upload, "filename", "scan.png"),
+            product_image,
+            _optional_flag(form, "flipX"),
+            _optional_flag(form, "flipY"),
+            _optional_rotation(form),
+            points,
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+_ANNOTATION_KINDS = {"rect", "ellipse", "text", "arrow"}
+
+
+def _apply_placement(view: SheetView, placement: Any) -> None:
+    """Position a view's picture inside the sheet the way the UI shows it.
+
+    ``placement`` is ``{x, y, w, h}`` in percent of the UI's sheet canvas.
+    That canvas maps 1:1 to the Excel drawing area (from just below the
+    title block to the bottom guide), so multiplying by the drawing area's
+    size gives the exact pixel box for the picture. When placement is
+    missing the view is left alone and ``default_layout`` falls back to
+    its auto-fit behaviour.
+    """
+    if not isinstance(placement, dict):
+        return
+    try:
+        x = float(placement["x"]) / 100.0
+        y = float(placement["y"]) / 100.0
+        w = float(placement["w"]) / 100.0
+        h = float(placement["h"]) / 100.0
+    except (KeyError, TypeError, ValueError):
+        return
+    if w <= 0 or h <= 0:
+        return
+    from sheet_export import config as sheet_config  # local — avoid startup cost
+    drawing_height = sheet_config.DRAWING_BOTTOM - sheet_config.DRAWING_TOP
+    view.box = (
+        x * sheet_config.SHEET_WIDTH,
+        sheet_config.DRAWING_TOP + y * drawing_height,
+        w * sheet_config.SHEET_WIDTH,
+        h * drawing_height,
+    )
+
+
+def _sheet_annotations(raw: Any) -> list[SheetAnnotation]:
+    """Convert the UI annotation payload into ``SheetAnnotation`` values.
+
+    The frontend keeps ``x``/``y``/``w``/``h`` in percent (0–100) of the
+    preview layer, which shares its coordinate frame with the product image
+    dropped into the sheet, so a simple ``/100`` gives the ratios the
+    exporter expects. Unknown kinds are dropped so a bad payload cannot
+    poison the whole sheet.
+    """
+    if not isinstance(raw, list):
+        return []
+    result: list[SheetAnnotation] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind", "")).lower()
+        if kind not in _ANNOTATION_KINDS:
+            continue
+        try:
+            x = float(item.get("x", 0.0)) / 100.0
+            y = float(item.get("y", 0.0)) / 100.0
+            w = float(item.get("w", 0.0)) / 100.0
+            h = float(item.get("h", 0.0)) / 100.0
+        except (TypeError, ValueError):
+            continue
+        color = str(item.get("color") or "#e8802f")
+        text = str(item.get("text") or "")
+        font_size_raw = item.get("fontSize")
+        font_size: float | None
+        try:
+            font_size = float(font_size_raw) if font_size_raw is not None else None
+        except (TypeError, ValueError):
+            font_size = None
+        font_family = item.get("fontFamily")
+        font_family = str(font_family) if isinstance(font_family, str) else None
+        result.append(SheetAnnotation(
+            kind=kind, x_ratio=x, y_ratio=y, w_ratio=w, h_ratio=h,
+            color=color, text=text, font_size_px=font_size,
+            font_family=font_family,
+        ))
+    return result
+
+
+def build_sheet_bytes(
+    product_image: np.ndarray, payload: dict[str, Any],
+    previous_bytes: bytes | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """Turn the sheet the operator sees into the company Excel form.
+
+    Point coordinates arrive as percentages of the product image, which is the
+    same frame the UI draws in, so no alignment work is repeated here. When
+    ``previous_bytes`` is provided, the new block is appended to that
+    workbook via ``sheet_export.stack_workbooks``.
+    """
+    raw_points = payload.get("points") or []
+    points = [
+        SheetPoint(
+            point_id=str(item.get("id", index)),
+            text=str(item.get("text") or f"{float(item['value']):+.1f}"),
+            x_ratio=float(item["x"]) / 100.0,
+            y_ratio=float(item["y"]) / 100.0,
+        )
+        for index, item in enumerate(raw_points)
+    ]
+
+    raw_annotations = payload.get("annotations") or []
+    annotations = _sheet_annotations(raw_annotations)
+
+    title_values = payload.get("title") or {}
+    title = TitleBlock(
+        heading=str(title_values.get("heading", "보정 적용 내용")),
+        management_label=str(title_values.get("managementLabel", "관리 NO")),
+        management_no=str(title_values.get("managementNo", "")),
+        part_name_label=str(title_values.get("partNameLabel", "PART NAME")),
+        part_name=str(title_values.get("partName", "")),
+        process_label=str(title_values.get("processLabel", "공정")),
+        process=str(title_values.get("process", "")),
+        part_no_label=str(title_values.get("partNoLabel", "PART NO")),
+        part_no=str(title_values.get("partNo", "")),
+        material_label=str(title_values.get("materialLabel", "원소재")),
+        material=str(title_values.get("material", "")),
+        applied_date_label=str(title_values.get("appliedDateLabel", "적용일자")),
+        applied_date=str(title_values.get("appliedDate", "")),
+    )
+
+    front_view = SheetView(
+        image=product_image, points=points, annotations=annotations,
+    )
+    _apply_placement(front_view, payload.get("frontPlacement"))
+    views = [front_view]
+    skipped: list[str] = []
+    for index, region in enumerate(payload.get("details") or [], start=1):
+        label = str(region.get("label") or f"DETAIL {index}")
+        try:
+            detail_view = crop_view(
+                product_image,
+                points,
+                (
+                    float(region["x"]) / 100.0,
+                    float(region["y"]) / 100.0,
+                    float(region["w"]) / 100.0,
+                    float(region["h"]) / 100.0,
+                ),
+                label,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            skipped.append(f"{label}: {exc}")
+            continue
+        _apply_placement(detail_view, region.get("placement"))
+        views.append(detail_view)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        output = Path(temp_dir) / "correction-sheet.xlsx"
+        report = build_sheet(
+            views,
+            title,
+            output=output,
+            title_fonts=payload.get("titleFonts") if isinstance(payload.get("titleFonts"), dict) else None,
+            title_font_sizes=payload.get("titleFontSizes") if isinstance(payload.get("titleFontSizes"), dict) else None,
+            point_font_family=str(payload.get("pointFontFamily") or "").strip() or None,
+        )
+        data = output.read_bytes()
+
+    stacked_warnings: list[str] = []
+    if previous_bytes:
+        try:
+            data = stack_workbooks(previous_bytes, data)
+        except Exception as exc:
+            stacked_warnings.append(f"이전 시트에 이어붙이지 못했습니다: {exc}")
+
+    summary = {
+        "pictures": report.pictures,
+        "labels": report.labels,
+        "leaders": report.leaders,
+        "warnings": report.warnings + skipped + stacked_warnings,
+    }
+    return data, summary
+
+
+async def sheet(request: Request) -> Response:
+    """Return the correction sheet as an .xlsx download.
+
+    The optional ``previous`` file part carries an existing sheet the new
+    block should be appended to. When present, ``sheet_export.stack_workbooks``
+    merges the freshly built single-block workbook onto the previous one so
+    the two print as consecutive pages of the same file.
+    """
+    try:
+        form = await request.form(max_files=2, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        payload = json.loads(str(form.get("payload") or "{}"))
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "payload는 객체여야 합니다."}, status_code=400)
+
+        upload = form.get("product")
+        product_image = None
+        if upload is not None and hasattr(upload, "read"):
+            product_image = _decode_image(await upload.read())
+        else:
+            part_number = str(payload.get("partNumber", "")).strip().upper()
+            match = PRODUCT_LIBRARY.find(part_number) if part_number else None
+            if match is None:
+                return JSONResponse(
+                    {"error": "제품데이터 이미지를 찾지 못했습니다."}, status_code=400
+                )
+            product_image = read_image(match.path)
+
+        previous_upload = form.get("previous")
+        previous_bytes: bytes | None = None
+        if previous_upload is not None and hasattr(previous_upload, "read"):
+            previous_bytes = await previous_upload.read() or None
+
+        data, summary = await run_in_threadpool(
+            build_sheet_bytes, product_image, payload, previous_bytes
+        )
+        name = f"{payload.get('partNumber') or 'correction'}-보정시트.xlsx"
+        quoted = quote(name)
+        return Response(
+            data,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ),
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}",
+                # HTTP 헤더는 latin-1만 허용한다. 한글 경고는 JSON escape로
+                # 보내고, UI가 필요하면 정상적으로 JSON.parse 할 수 있다.
+                "X-Sheet-Summary": json.dumps(summary, ensure_ascii=True),
+            },
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def products(request: Request) -> JSONResponse:
+    """List the registered product-data images, or register one."""
+    if request.method == "GET":
+        return JSONResponse(
+            {
+                "entries": PRODUCT_LIBRARY.entries(),
+                "directory": str(PRODUCT_LIBRARY.directory),
+            }
+        )
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "제품데이터 이미지가 필요합니다."}, status_code=400)
+
+        raw_part_number = str(form.get("partNumber", "")).strip().upper()
+        part_number = raw_part_number or part_number_from_name(
+            getattr(upload, "filename", "")
+        )
+        if not part_number:
+            return JSONResponse(
+                {"error": "품번을 찾지 못했습니다. partNumber를 함께 보내 주세요."},
+                status_code=400,
+            )
+        if part_number_from_name(f"{part_number}.png") != part_number:
+            return JSONResponse(
+                {"error": f"품번 형식이 올바르지 않습니다: {part_number}"},
+                status_code=400,
+            )
+
+        image = _decode_image(await upload.read())
+        path = await run_in_threadpool(PRODUCT_LIBRARY.register, part_number, image)
+        return JSONResponse({"partNumber": part_number, "path": str(path)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+# 실측 CATPart 중 67XX6 원본이 약 280MB다. 뷰어(/api/cad)는 300MB를
+# 받으면서 등록(/api/mesh)만 200MB에서 막혀 같은 파일이 한 화면에서는
+# 열리고 다른 화면에서는 등록되지 않았다. 두 경로의 상한을 하나로 맞춘다.
+MAX_MESH_UPLOAD_BYTES = MAX_CAD_UPLOAD_BYTES
+
+
+async def meshes(request: Request) -> JSONResponse:
+    """CATIA 에서 export 한 STEP/STL 을 품번당 하나 보관/조회한다.
+
+    등록해 두면 이후 스캔 분석에서 제품 PNG 대신 이 mesh 로 뷰를 즉석
+    렌더한다. 삭제(DELETE)와 등록(POST) 은 partNumber 하나로 판단한다.
+    """
+    if request.method == "GET":
+        return JSONResponse({
+            "entries": MESH_LIBRARY.entries(),
+            "directory": str(MESH_LIBRARY.directory),
+            "supportedSuffixes": sorted(MeshLibrary.SUPPORTED_SUFFIXES),
+        })
+
+    if request.method == "DELETE":
+        raw_part_number = str(request.query_params.get("partNumber", "")).strip().upper()
+        if not raw_part_number:
+            return JSONResponse({"error": "품번이 필요합니다."}, status_code=400)
+        removed = await run_in_threadpool(MESH_LIBRARY.forget, raw_part_number)
+        if not removed:
+            return JSONResponse(
+                {"error": f"등록된 mesh 가 없습니다: {raw_part_number}"},
+                status_code=404,
+            )
+        return JSONResponse({"partNumber": raw_part_number, "removed": True})
+
+    # POST: mesh 파일 업로드.
+    try:
+        form = await request.form(
+            max_files=1, max_fields=4, max_part_size=MAX_MESH_UPLOAD_BYTES
+        )
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "CAD 파일이 필요합니다."}, status_code=400)
+
+        filename = getattr(upload, "filename", "") or ""
+        suffix = Path(filename).suffix.lower()
+        if suffix not in MeshLibrary.SUPPORTED_SUFFIXES:
+            allowed = ", ".join(sorted(MeshLibrary.SUPPORTED_SUFFIXES))
+            return JSONResponse(
+                {"error": f"지원하지 않는 확장자입니다: '{suffix or filename}'. 허용: {allowed}"},
+                status_code=400,
+            )
+
+        raw_part_number = str(form.get("partNumber", "")).strip().upper()
+        part_number = raw_part_number or part_number_from_name(filename)
+        if not part_number:
+            return JSONResponse(
+                {"error": "품번을 찾지 못했습니다. partNumber를 함께 보내 주세요."},
+                status_code=400,
+            )
+        if part_number_from_name(f"{part_number}.png") != part_number:
+            return JSONResponse(
+                {"error": f"품번 형식이 올바르지 않습니다: {part_number}"},
+                status_code=400,
+            )
+
+        data = await upload.read()
+        if len(data) > MAX_MESH_UPLOAD_BYTES:
+            return JSONResponse(
+                {"error": f"파일이 너무 큽니다({len(data):,} B). 상한 {MAX_MESH_UPLOAD_BYTES:,} B."},
+                status_code=400,
+            )
+
+        path = await run_in_threadpool(
+            MESH_LIBRARY.register, part_number, suffix, data
+        )
+        # CATPart 검증은 CATIA 기동과 변환 때문에 수분이 걸릴 수 있다.
+        # 등록 요청 안에서 끝까지 기다리게 하면 브라우저에는 아무 변화가
+        # 없어 실패처럼 보이고, 연결이 끊기면 정상 저장된 파일도 실패로
+        # 오해한다. 원본 보관을 먼저 확정하고 실제 변환은 분석/3D 열기 때
+        # 캐시와 함께 수행한다. STEP/STL 등 직접 읽는 형식만 즉시 검증한다.
+        if suffix in {".catpart", ".catproduct"}:
+            return JSONResponse({
+                "partNumber": part_number,
+                "path": str(path),
+                "format": suffix.lstrip("."),
+                "validation": "deferred",
+                "message": "CATPart 등록 완료 · 형상 변환은 처음 사용할 때 수행됩니다.",
+            })
+        # 등록된 mesh 가 실제로 열리는지 즉시 검증한다. 열리지 않으면
+        # 지우고 오류를 반환해 사용자가 export 를 다시 하도록 유도한다.
+        try:
+            mesh = await run_in_threadpool(load_any_mesh, path)
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            return JSONResponse(
+                {"error": f"등록된 파일을 읽지 못했습니다: {exc}"}, status_code=422
+            )
+        return JSONResponse({
+            "partNumber": part_number,
+            "path": str(path),
+            "format": suffix.lstrip("."),
+            "vertices": int(len(mesh.vertices)),
+            "faces": int(len(mesh.faces)),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def mesh_source(request: Request) -> JSONResponse:
+    """CATIA 원본이 사는 사용자 폴더를 관리한다.
+
+    GET  : 현재 경로, 존재 여부, 그 안에서 잡히는 CAD 파일 개수 요약.
+    POST : {"path": "..."} 로 새 경로 저장. 빈 문자열이면 설정 해제.
+    """
+    global CAD_SOURCE_ROOT
+
+    if request.method == "GET":
+        path = CAD_SOURCE_ROOT
+        info: dict[str, Any] = {
+            "configured": path is not None,
+            "path": str(path) if path is not None else "",
+            "exists": bool(path is not None and path.is_dir()),
+        }
+        if info["exists"]:
+            # 미리보기는 threadpool 에서 돌린다 — 큰 폴더는 몇 초 걸릴 수 있고,
+            # 그 사이 uvicorn 이벤트 루프가 잠기면 안 된다. 노이즈 폴더는
+            # _walk_cad_source 가 프루닝해 준다.
+            supported = tuple(MeshLibrary.SUPPORTED_SUFFIXES)
+
+            def _preview() -> tuple[int, list[str], str | None]:
+                samples: list[str] = []
+                count = 0
+                try:
+                    for candidate in _walk_cad_source(path):  # type: ignore[arg-type]
+                        if candidate.suffix.lower() not in supported:
+                            continue
+                        count += 1
+                        if len(samples) < 5:
+                            try:
+                                samples.append(str(candidate.relative_to(path)))  # type: ignore[arg-type]
+                            except ValueError:
+                                samples.append(candidate.name)
+                        if count >= 500:
+                            break
+                except (OSError, PermissionError) as exc:
+                    return count, samples, str(exc)
+                return count, samples, None
+
+            count, samples, scan_error = await run_in_threadpool(_preview)
+            info["fileCount"] = count
+            info["sampleFiles"] = samples
+            if scan_error:
+                info["scanError"] = scan_error
+        return JSONResponse(info)
+
+    # POST
+    try:
+        payload = await request.json()
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    raw = str((payload or {}).get("path", "")).strip()
+    if raw:
+        candidate = Path(raw).resolve()
+        if not candidate.is_dir():
+            return JSONResponse(
+                {"error": f"폴더가 존재하지 않거나 접근할 수 없습니다: {candidate}"},
+                status_code=400,
+            )
+        CAD_SOURCE_ROOT = candidate
+        try:
+            _CAD_SOURCE_PATH_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _CAD_SOURCE_PATH_FILE.write_text(
+                json.dumps({"path": str(candidate)}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            return JSONResponse(
+                {"error": f"경로를 저장하지 못했습니다: {exc}"}, status_code=500
+            )
+        return JSONResponse({"configured": True, "path": str(candidate)})
+
+    # 빈 값이면 설정 해제.
+    CAD_SOURCE_ROOT = None
+    try:
+        if _CAD_SOURCE_PATH_FILE.is_file():
+            _CAD_SOURCE_PATH_FILE.unlink()
+    except OSError:
+        pass
+    return JSONResponse({"configured": False, "path": ""})
+
+
+async def mesh_reveal(_: Request) -> JSONResponse:
+    """CATIA .CATPart 를 직접 던져 넣을 폴더를 Windows 탐색기로 연다.
+
+    UI 상 "폴더 열기" 버튼이 여기 붙는다. 사용자가 파일을 그 폴더에 두면
+    다음 분석부터 자동으로 매칭되어 STEP 변환·렌더가 이어진다.
+    """
+    target = MESH_LIBRARY.directory
+    target.mkdir(parents=True, exist_ok=True)
+    if not hasattr(os, "startfile"):
+        return JSONResponse(
+            {"error": "이 서버 환경에서는 탐색기 열기를 지원하지 않습니다."},
+            status_code=400,
+        )
+    try:
+        os.startfile(str(target))  # noqa: S606
+    except OSError as exc:
+        return JSONResponse({"error": f"탐색기를 열지 못했습니다: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True, "directory": str(target)})
+
+
+async def confirm_alignment(request: Request) -> JSONResponse:
+    """Store a human-confirmed orientation so later scans reuse it.
+
+    The orientation cannot always be decided from the masks -- a symmetric
+    panel scores every flip almost the same -- so this is what turns one
+    person's check into a permanent answer for that part number.
+    """
+    try:
+        payload = await request.json()
+        part_number = str(payload.get("partNumber", "")).strip().upper()
+        if not part_number:
+            return JSONResponse({"error": "품번이 필요합니다."}, status_code=400)
+
+        if payload.get("forget"):
+            removed = ALIGNMENT_STORE.forget(part_number)
+            return JSONResponse({"partNumber": part_number, "removed": removed})
+
+        alignment_payload = payload.get("alignment")
+        if not isinstance(alignment_payload, dict):
+            return JSONResponse({"error": "alignment 값이 필요합니다."}, status_code=400)
+
+        alignment = Alignment.from_dict(alignment_payload)
+        alignment.overridden = True
+        path = ALIGNMENT_STORE.save(part_number, alignment)
+        return JSONResponse({"partNumber": part_number, "path": str(path)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+def sample_point(image: np.ndarray, x_norm: float, y_norm: float) -> dict[str, Any]:
+    """클릭한 지점의 표면색을 컬러바로 되짚어 편차값을 추정한다.
+
+    라벨을 판독해 얻는 값과 달리 이건 어디까지나 추정치다. 파이프라인도 색 역산을
+    판독값 검증용으로만 쓰고 있어(point_extractor 의 교차검증), 여기서도 같은 함수를
+    그대로 불러 써서 기준이 갈라지지 않게 한다.
+    """
+    height, width = image.shape[:2]
+    x = int(round(x_norm / 100.0 * (width - 1)))
+    y = int(round(y_norm / 100.0 * (height - 1)))
+    if not (0 <= x < width and 0 <= y < height):
+        raise ValueError("이미지 범위를 벗어난 지점입니다.")
+
+    scan_mask = build_scan_mask(image)
+    if np.any(scan_mask) and scan_mask[y, x] == 0:
+        raise ValueError("스캔 본체 바깥은 편차값을 추정할 수 없습니다.")
+
+    annotation_mask = build_blue_annotation_mask(image)
+    color = _sample_deviation_color(image, (x, y), scan_mask, annotation_mask)
+    if color is None:
+        raise ValueError("주변 표면색을 읽지 못했습니다. 다른 지점을 눌러 보세요.")
+
+    value = build_lut(image).to_value(color)
+    return {
+        "xPx": x,
+        "yPx": y,
+        "x": round(x / width * 100, 3),
+        "y": round(y / height * 100, 3),
+        "value": round(float(value), 3),
+        "source": "colormap",
+        "bgr": [int(c) for c in color],
+    }
+
+
+async def sample(request: Request) -> JSONResponse:
+    try:
+        form = await request.form(max_files=1, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
+        x_norm = float(str(form.get("x", "")))
+        y_norm = float(str(form.get("y", "")))
+        image = _decode_image(await upload.read())
+        result = await run_in_threadpool(sample_point, image, x_norm, y_norm)
+        return JSONResponse(result)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def create_correction(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("Request body must be a JSON object.")
+        part_no = str(body.get("partNo") or "").strip()
+        point_id = str(body.get("pointId") or "").strip()
+        if not part_no or not point_id:
+            return JSONResponse({"error": "partNo와 pointId가 필요합니다."}, status_code=400)
+        scan_name = str(body.get("scanName") or "").strip()
+        old_value = _optional_finite_number(body.get("oldValue"), "oldValue")
+        new_value = _optional_finite_number(body.get("newValue"), "newValue")
+        worker = str(body.get("worker") or "").strip() or None
+        action = body["action"] if "action" in body else "edit"
+        if not isinstance(action, str) or action not in CORRECTION_ACTIONS:
+            choices = ", ".join(sorted(CORRECTION_ACTIONS))
+            raise ValueError(f"action must be one of: {choices}.")
+        old_mode = _optional_correction_mode(body.get("oldMode"), "oldMode")
+        new_mode = _optional_correction_mode(body.get("newMode"), "newMode")
+        coefficient = _optional_finite_number(body.get("coefficient"), "coefficient")
+        source_entry_id = _optional_source_entry_id(body.get("sourceEntryId"))
+        created_at = datetime.now().isoformat(timespec="seconds")
+        with _get_correction_db() as conn:
+            cursor = conn.execute(
+                "INSERT INTO correction_history "
+                "(part_no, scan_name, point_id, old_value, new_value, worker, created_at, "
+                "action, old_mode, new_mode, coefficient, source_entry_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    part_no,
+                    scan_name,
+                    point_id,
+                    old_value,
+                    new_value,
+                    worker,
+                    created_at,
+                    action,
+                    old_mode,
+                    new_mode,
+                    coefficient,
+                    source_entry_id,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM correction_history WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return JSONResponse(_correction_row_to_dict(row))
+    except (TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
+        )
+
+
+async def delete_correction(request: Request) -> JSONResponse:
+    raw_id = request.query_params.get("id")
+    try:
+        entry_id = int(raw_id) if raw_id is not None else None
+    except ValueError:
+        entry_id = None
+    if not entry_id or entry_id <= 0:
+        return JSONResponse({"error": "삭제할 이력 id가 필요합니다."}, status_code=400)
+    try:
+        with _get_correction_db() as conn:
+            cursor = conn.execute(
+                "DELETE FROM correction_history WHERE id = ?", (entry_id,)
+            )
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
+        )
+    if cursor.rowcount == 0:
+        return JSONResponse({"error": "해당 이력을 찾을 수 없습니다."}, status_code=404)
+    return JSONResponse({"id": entry_id, "deleted": True})
+
+
+async def list_corrections(request: Request) -> JSONResponse:
+    part_no = request.query_params.get("partNo")
+    scan_name = request.query_params.get("scanName")
+    query = "SELECT * FROM correction_history"
+    conditions: list[str] = []
+    params: list[Any] = []
+    if part_no:
+        conditions.append("part_no = ?")
+        params.append(part_no)
+    if scan_name:
+        conditions.append("scan_name = ?")
+        params.append(scan_name)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY id DESC LIMIT 200"
+    try:
+        with _get_correction_db() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+    except CorrectionDatabaseError:
+        return JSONResponse(
+            {"error": "중앙 보정 이력 데이터베이스에 연결할 수 없습니다."},
+            status_code=503,
+        )
+    return JSONResponse({"entries": [_correction_row_to_dict(row) for row in rows]})
+
+
+def _safe_folder(relative_path: str) -> Path:
+    candidate = (FOLDER_ROOT / relative_path).resolve()
+    if candidate != FOLDER_ROOT and FOLDER_ROOT not in candidate.parents:
+        raise ValueError("허용된 품번별 폴더 밖은 조회할 수 없습니다.")
+    return candidate
+
+
+def _folder_entry(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "path": path.relative_to(FOLDER_ROOT).as_posix(),
+        "isDirectory": path.is_dir(),
+        "size": stat.st_size if path.is_file() else None,
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+async def folders(request: Request) -> JSONResponse:
+    if not FOLDER_ROOT.is_dir():
+        return JSONResponse({"available": False, "entries": []})
+    try:
+        relative_path = request.query_params.get("path", "")
+        folder = _safe_folder(relative_path)
+        if not folder.is_dir():
+            return JSONResponse({"error": "폴더가 아닙니다."}, status_code=400)
+        entries = sorted(
+            (_folder_entry(path) for path in folder.iterdir()),
+            key=lambda item: (not item["isDirectory"], item["name"].lower()),
+        )
+        return JSONResponse(
+            {
+                "available": True,
+                "rootName": FOLDER_ROOT.name,
+                "path": relative_path.replace("\\", "/").strip("/"),
+                "entries": entries,
+            }
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _active_file_database_url() -> str:
+    return os.environ.get("AJIN_FILE_DB_URL", "").strip() or load_database_url(
+        FILE_ORGANIZER_DIR
+    )
+
+
+def _active_folder_order() -> list[str]:
+    return load_folder_order(FILE_ORGANIZER_DIR, FILE_ORGANIZER_RULES.get("folder_order"))
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _safe_organizer_source(value: str) -> Path:
+    candidate = Path(value).resolve()
+    allowed_roots = (FILE_SOURCE_ROOT, FILE_STAGING_ROOT.resolve())
+    if not any(_path_is_within(candidate, root) for root in allowed_roots):
+        raise ValueError("허용된 원본 또는 업로드 폴더 밖의 파일은 처리할 수 없습니다.")
+    if not candidate.is_file():
+        raise ValueError("원본 파일을 찾을 수 없습니다.")
+    return candidate
+
+
+def _safe_organizer_target(relative_path: str) -> Path:
+    candidate = (FOLDER_ROOT / relative_path).resolve()
+    if not _path_is_within(candidate, FOLDER_ROOT):
+        raise ValueError("허용된 정리 대상 폴더 밖으로 저장할 수 없습니다.")
+    return candidate
+
+
+def _organizer_item(path: Path, classification: Any, *, source_kind: str) -> dict[str, Any]:
+    target_dir = classification.target_dir
+    if target_dir is None or target_dir == FOLDER_ROOT:
+        target_relative = ""
+    else:
+        try:
+            target_relative = target_dir.relative_to(FOLDER_ROOT).as_posix()
+        except ValueError:
+            target_relative = ""
+    stat = path.stat()
+    return {
+        "id": uuid.uuid5(uuid.NAMESPACE_URL, str(path.resolve())).hex,
+        "name": path.name,
+        "sourcePath": str(path),
+        "sourceKind": source_kind,
+        "size": stat.st_size,
+        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+        "customer": classification.customer,
+        "itemNo": classification.item_no,
+        "family": classification.family,
+        "productName": classification.product_name,
+        "process": classification.process,
+        "categoryKey": classification.category_key,
+        "categoryLabel": classification.category_label,
+        "confidence": classification.confidence,
+        "reasons": classification.reasons,
+        "targetDir": target_relative,
+        "targetPath": (Path(target_relative) / path.name).as_posix(),
+        "matchedProductFolder": classification.matched_product_folder,
+        "detailPath": classification.detail_path,
+    }
+
+
+def _scan_organizer_source() -> list[dict[str, Any]]:
+    if not FILE_SOURCE_ROOT.is_dir():
+        return []
+    ignored = {name.casefold() for name in FILE_ORGANIZER_RULES.get("ignored_names", [])}
+    paths = sorted(
+        (
+            path for path in FILE_SOURCE_ROOT.rglob("*")
+            if path.is_file()
+            and not path.name.startswith("~$")
+            and path.name.casefold() not in ignored
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    classifications = classify_batch(classifier, paths)
+    return [
+        _organizer_item(path, classification, source_kind="source")
+        for path, classification in zip(paths, classifications)
+    ]
+
+
+def _file_database_status(check_connection: bool) -> dict[str, Any]:
+    database_url = _active_file_database_url()
+    response: dict[str, Any] = {
+        "configured": bool(database_url),
+        "label": safe_database_label(database_url),
+        "connected": None,
+        "catalogCount": 0,
+        "operationCount": 0,
+    }
+    if not database_url or not check_connection:
+        return response
+    try:
+        summary = MariaDBRepository(database_url).get_summary()
+        response.update(summary, connected=True)
+    except FileDatabaseError as exc:
+        response.update(connected=False, error=str(exc))
+    return response
+
+
+async def file_organizer_status(request: Request) -> JSONResponse:
+    check_database = request.query_params.get("checkDb") == "1"
+    database = await run_in_threadpool(_file_database_status, check_database)
+    return JSONResponse(
+        {
+            "sourceRoot": str(FILE_SOURCE_ROOT),
+            "destinationRoot": str(FOLDER_ROOT),
+            "sourceAvailable": FILE_SOURCE_ROOT.is_dir(),
+            "destinationAvailable": FOLDER_ROOT.is_dir(),
+            "database": database,
+        }
+    )
+
+
+async def file_organizer_scan(_request: Request) -> JSONResponse:
+    try:
+        items = await run_in_threadpool(_scan_organizer_source)
+        return JSONResponse({"items": items, "count": len(items)})
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_upload(request: Request) -> JSONResponse:
+    FILE_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        form = await request.form(
+            max_files=100,
+            max_fields=4,
+            max_part_size=MAX_FILE_ORGANIZER_UPLOAD_BYTES,
+        )
+    except Exception as exc:
+        return JSONResponse({"error": f"업로드를 읽지 못했습니다: {exc}"}, status_code=400)
+    uploads = form.getlist("files")
+    if not uploads:
+        return JSONResponse({"error": "업로드할 파일이 없습니다."}, status_code=400)
+    destinations: list[Path] = []
+    for upload in uploads:
+        filename = Path(getattr(upload, "filename", "") or "").name
+        if not filename or filename.startswith("~$"):
+            continue
+        upload_dir = FILE_STAGING_ROOT / uuid.uuid4().hex
+        upload_dir.mkdir(parents=True, exist_ok=False)
+        destination = upload_dir / filename
+        total = 0
+        try:
+            with destination.open("wb") as stream:
+                while chunk := await upload.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > MAX_FILE_ORGANIZER_UPLOAD_BYTES:
+                        raise ValueError("파일 한 개는 500MB 이하만 업로드할 수 있습니다.")
+                    stream.write(chunk)
+            destinations.append(destination)
+        except Exception as exc:
+            destination.unlink(missing_ok=True)
+            upload_dir.rmdir()
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        finally:
+            await upload.close()
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    classifications = classify_batch(classifier, destinations)
+    items = [
+        _organizer_item(destination, classification, source_kind="upload")
+        for destination, classification in zip(destinations, classifications)
+    ]
+    return JSONResponse({"items": items, "count": len(items)})
+
+
+def _discard_staged_upload(source_path: str) -> None:
+    """대기열에서 지운 업로드 파일의 임시 사본을 정리한다.
+
+    원본 폴더(FILE_SOURCE_ROOT)에서 스캔한 실제 회사 파일은 절대 지우지 않도록,
+    file_staging 아래에 있는 업로드 임시 파일일 때만 지운다 — 그 밖의 경로는
+    조용히 무시한다(대기열에서 빼는 것 자체는 프론트엔드가 이미 처리했으므로).
+    """
+    try:
+        candidate = Path(source_path).resolve()
+    except OSError:
+        return
+    if not _path_is_within(candidate, FILE_STAGING_ROOT.resolve()):
+        return
+    candidate.unlink(missing_ok=True)
+    try:
+        candidate.parent.rmdir()
+    except OSError:
+        pass
+
+
+async def file_organizer_discard(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        source_path = str(payload.get("sourcePath", ""))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not source_path:
+        return JSONResponse({"error": "sourcePath가 필요합니다."}, status_code=400)
+    await run_in_threadpool(_discard_staged_upload, source_path)
+    return JSONResponse({"ok": True})
+
+
+def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_items = payload.get("items")
+    if not isinstance(raw_items, list) or not raw_items or len(raw_items) > 200:
+        raise ValueError("한 번에 1~200개 파일을 선택해야 합니다.")
+    operation = str(payload.get("operation", "copy"))
+    conflict = str(payload.get("conflict", "rename"))
+    if operation not in {"copy", "move"} or conflict not in {"rename", "skip", "overwrite"}:
+        raise ValueError("지원하지 않는 파일 작업 설정입니다.")
+
+    parsed_items: list[tuple[Path, str | None]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("파일 항목 형식이 올바르지 않습니다.")
+        source = _safe_organizer_source(str(raw_item.get("sourcePath", "")))
+        # 분류가 안 된 파일은 화면이 대상 폴더를 빈 문자열로 돌려보내고 그 자리에
+        # '_미분류' 를 보여 준다. 빈 값을 "사용자가 고른 폴더"로 받으면 정리 폴더
+        # 루트가 되어, 화면 표시와 달리 파일이 품번 폴더들 옆에 쌓인다.
+        manual_target = str(raw_item.get("targetDir") or "").strip() or None
+        parsed_items.append((source, manual_target))
+
+    classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
+    sources = [source for source, _ in parsed_items]
+    batch_classifications = classify_batch(classifier, sources)
+
+    pairs: list[tuple[Path, Path]] = []
+    classifications: dict[str, Any] = {}
+    for (source, manual_target), classification in zip(parsed_items, batch_classifications):
+        target_dir = (
+            _safe_organizer_target(manual_target)
+            if manual_target is not None
+            else classification.target_dir
+        )
+        if target_dir is None:
+            target_dir = FOLDER_ROOT / FILE_ORGANIZER_RULES.get("unclassified_folder", "_미분류")
+        pairs.append((source, target_dir / source.name))
+        classifications[MariaDBRepository._source_key(source)] = classification
+
+    results = execute_batch(pairs, operation=operation, conflict=conflict)
+    write_history(results, FILE_LOG_ROOT)
+    database_note = "MariaDB 미설정 · 로컬 감사 로그 저장"
+    database_url = _active_file_database_url()
+    if database_url:
+        try:
+            db_result = MariaDBRepository(database_url).record_batch(
+                batch_id=str(uuid.uuid4()),
+                results=results,
+                classifications=classifications,
+                storage_root=FOLDER_ROOT,
+            )
+            database_note = (
+                f"MariaDB 이력 {db_result.operation_count}건 · "
+                f"카탈로그 {db_result.catalog_count}건"
+            )
+        except FileDatabaseError as exc:
+            database_note = f"MariaDB 기록 실패 · 로컬 감사 로그 보존 ({exc})"
+
+    for source, result in zip(sources, results):
+        if result.status == "success" and _path_is_within(source, FILE_STAGING_ROOT.resolve()):
+            try:
+                source.unlink(missing_ok=True)
+                source.parent.rmdir()
+            except OSError:
+                pass
+    return {
+        "results": [
+            {
+                "source": result.source,
+                "destination": result.destination,
+                "operation": result.operation,
+                "status": result.status,
+                "message": result.message,
+            }
+            for result in results
+        ],
+        "databaseNote": database_note,
+    }
+
+
+async def file_organizer_execute(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        response = await run_in_threadpool(_execute_file_organizer, payload)
+        return JSONResponse(response)
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_database(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        status = await run_in_threadpool(_file_database_status, True)
+        return JSONResponse(status)
+    try:
+        payload = await request.json()
+        database_url = str(payload.get("databaseUrl", "")).strip()
+        if not database_url:
+            raise ValueError("MariaDB 연결 URL을 입력해 주세요.")
+        version = await run_in_threadpool(
+            MariaDBRepository(database_url).test_and_initialize
+        )
+        save_database_url(FILE_ORGANIZER_DIR, database_url)
+        return JSONResponse(
+            {
+                "configured": True,
+                "connected": True,
+                "label": safe_database_label(database_url),
+                "version": version,
+            }
+        )
+    except (FileDatabaseError, OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+_AXIS_OPTIONS = [{"id": axis, "label": AXIS_LABELS[axis]} for axis in AXES]
+
+
+async def file_organizer_folder_order(request: Request) -> JSONResponse:
+    if request.method == "GET":
+        order = await run_in_threadpool(_active_folder_order)
+        return JSONResponse({"folderOrder": order, "axes": _AXIS_OPTIONS})
+    try:
+        payload = await request.json()
+        order = payload.get("folderOrder")
+        if not is_valid_folder_order(order):
+            raise ValueError(
+                "folderOrder는 품번, 차종, 카테고리, 세부 하위폴더를 "
+                "각각 한 번씩 포함해야 합니다."
+            )
+        migration = await run_in_threadpool(
+            migrate_folder_structure, FOLDER_ROOT, FILE_ORGANIZER_RULES, order,
+        )
+        await run_in_threadpool(save_folder_order, FILE_ORGANIZER_DIR, order)
+        return JSONResponse(
+            {
+                "folderOrder": order,
+                "axes": _AXIS_OPTIONS,
+                "migration": {
+                    "moved": migration.moved,
+                    "skipped": migration.skipped,
+                    "structureMoved": migration.structure_moved,
+                    "errors": migration.errors,
+                },
+            }
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _organizer_path_locks() -> tuple[bool, bool]:
+    source_locked = bool(os.environ.get("AJIN_FILE_SOURCE_ROOT", "").strip())
+    destination_locked = bool(os.environ.get("AJIN_FOLDER_ROOT", "").strip())
+    return source_locked, destination_locked
+
+
+def _set_organizer_roots(source_root: str, destination_root: str) -> None:
+    global FILE_SOURCE_ROOT, FOLDER_ROOT
+    source_path = Path(source_root).expanduser().resolve()
+    destination_path = Path(destination_root).expanduser().resolve()
+    source_path.mkdir(parents=True, exist_ok=True)
+    destination_path.mkdir(parents=True, exist_ok=True)
+    FILE_ORGANIZER_DIR.mkdir(parents=True, exist_ok=True)
+    _ORGANIZER_PATHS_FILE.write_text(
+        json.dumps(
+            {"sourceRoot": str(source_path), "destinationRoot": str(destination_path)},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    FILE_SOURCE_ROOT = source_path
+    FOLDER_ROOT = destination_path
+
+
+async def file_organizer_paths(request: Request) -> JSONResponse:
+    source_locked, destination_locked = _organizer_path_locks()
+    if request.method == "GET":
+        return JSONResponse(
+            {
+                "sourceRoot": str(FILE_SOURCE_ROOT),
+                "destinationRoot": str(FOLDER_ROOT),
+                "sourceLocked": source_locked,
+                "destinationLocked": destination_locked,
+            }
+        )
+    try:
+        if source_locked or destination_locked:
+            raise ValueError(
+                "ui/.env 의 AJIN_FILE_SOURCE_ROOT/AJIN_FOLDER_ROOT 로 경로가 고정되어 "
+                "있어 웹에서 바꿀 수 없습니다. .env 값을 지우거나 바꾼 뒤 서버를 다시 "
+                "시작해 주세요."
+            )
+        payload = await request.json()
+        source_root = str(payload.get("sourceRoot", "")).strip()
+        destination_root = str(payload.get("destinationRoot", "")).strip()
+        if not source_root or not destination_root:
+            raise ValueError("원본 폴더와 정리 대상 폴더 경로를 모두 입력해 주세요.")
+        await run_in_threadpool(_set_organizer_roots, source_root, destination_root)
+        return JSONResponse(
+            {
+                "sourceRoot": str(FILE_SOURCE_ROOT),
+                "destinationRoot": str(FOLDER_ROOT),
+                "sourceLocked": False,
+                "destinationLocked": False,
+            }
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def file_organizer_reveal(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        which = str(payload.get("which", ""))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    target = {"source": FILE_SOURCE_ROOT, "destination": FOLDER_ROOT}.get(which)
+    if target is None:
+        return JSONResponse({"error": "which은 source 또는 destination이어야 합니다."}, status_code=400)
+    if not target.is_dir():
+        return JSONResponse({"error": "폴더가 아직 없습니다."}, status_code=400)
+    if not hasattr(os, "startfile"):
+        return JSONResponse({"error": "이 서버 환경에서는 탐색기 열기를 지원하지 않습니다."}, status_code=400)
+    try:
+        os.startfile(str(target))  # noqa: S606 - 로컬 데스크톱 전용 앱, 사용자 자신의 PC 탐색기를 연다.
+    except OSError as exc:
+        return JSONResponse({"error": f"탐색기를 열지 못했습니다: {exc}"}, status_code=400)
+    return JSONResponse({"ok": True})
+
+
 
 
 def _shift_centers(features: list[dict], offset) -> list[dict]:
@@ -1080,6 +2977,119 @@ def _shift_centers(features: list[dict], offset) -> list[dict]:
                               round(centre[2] - oz, 4)]
         moved.append(item)
     return moved
+
+
+def _pick_symmetric_viewer_mesh(mesh, analysis_id: str | None = None):
+    """좌우 대칭쌍이면 스캔에 더 잘 맞는 한쪽 메시만 고른다.
+
+    분석 결과가 아직 없으면 좌표가 작은 쪽을 일관되게 고른다. 실제 스캔
+    분석이 생기면 프론트가 CAD를 다시 열어 두 절반의 실루엣 점수를 비교한다.
+    반환한 절반 메시를 CAD 캐시에도 넣기 때문에 뷰어만 반쪽이고 제로라인·
+    보정 형상은 전체인 불일치가 생기지 않는다.
+    """
+    import trimesh
+    from cad_import import overlay as ov
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    halves = ov.split_sides(vertices, faces)
+    if len(halves) != 2:
+        return mesh, None
+
+    selected_index = 0
+    matched_to_scan = False
+    analysis = _analysis_cache.get(str(analysis_id or ""))
+    scan_mask = analysis.get("part_mask") if isinstance(analysis, dict) else None
+    if scan_mask is not None and np.any(scan_mask):
+        best_score = -1.0
+        for index, (part_vertices, part_faces, *_split) in enumerate(halves):
+            try:
+                fit = fit_mesh_view(part_vertices, part_faces, scan_mask)
+                score = float(fit.detail_iou or fit.iou)
+            except Exception:
+                continue
+            if score > best_score:
+                best_score = score
+                selected_index = index
+                matched_to_scan = True
+
+    part_vertices, part_faces, axis, middle, side = halves[selected_index]
+    selected = trimesh.Trimesh(
+        vertices=part_vertices,
+        faces=part_faces,
+        process=False,
+    )
+    return selected, {
+        "axis": int(axis),
+        "middle": float(middle),
+        "side": int(side),
+        "part": selected_index + 1,
+        "matchedToScan": matched_to_scan,
+    }
+
+
+def _features_inside_mesh(features: list, mesh) -> list:
+    """선택한 대칭 절반 안에 중심점이 있는 STEP 특징만 남긴다."""
+    bounds = np.asarray(mesh.bounds, dtype=float)
+    tolerance = max(1.0, float(np.ptp(bounds, axis=0).max()) * 0.01)
+    low, high = bounds[0] - tolerance, bounds[1] + tolerance
+    selected = []
+    for feature in features:
+        center = feature.get("center") if isinstance(feature, dict) else None
+        if not isinstance(center, (list, tuple)) or len(center) != 3:
+            continue
+        point = np.asarray(center, dtype=float)
+        if np.all(point >= low) and np.all(point <= high):
+            selected.append(feature)
+    return selected
+
+
+def _load_step_cad_path(
+    path: Path,
+    display_name: str | None = None,
+    analysis_id: str | None = None,
+) -> dict[str, Any]:
+    """STEP 경로를 복사하지 않고 파싱해 브라우저용 메시를 만든다."""
+    from cad_import import mesh_io, step_reader
+
+    parsed = step_reader.read_step_full(path)
+    viewer_mesh, symmetric = _pick_symmetric_viewer_mesh(
+        parsed["mesh"], analysis_id
+    )
+    web = mesh_io.to_web_mesh(
+        viewer_mesh, name=display_name or path.stem, source_format="step"
+    )
+    offset = web["summary"]["bounds"]["center"] if web.get("recentered") else None
+    holes = parsed["holes"]
+    planes = parsed["planes"]
+    cylinders = parsed.get("cylinders", [])
+    if symmetric is not None:
+        holes = _features_inside_mesh(holes, viewer_mesh)
+        planes = _features_inside_mesh(planes, viewer_mesh)
+        cylinders = _features_inside_mesh(cylinders, viewer_mesh)
+        web["symmetricPair"] = symmetric
+        web["note"] = (
+            "좌우 대칭쌍 CAD에서 "
+            + ("스캔과 더 잘 맞는" if symmetric["matchedToScan"] else "한")
+            + "쪽 파트만 표시했습니다."
+        )
+    web["holes"] = _shift_centers(holes, offset)
+    web["planes"] = _shift_centers(planes[:50], offset)
+    web["counts"] = {
+        "cylinders": len(cylinders) if symmetric is not None else parsed["counts"]["cylinders"],
+        "holes": len(holes) if symmetric is not None else parsed["counts"]["holes"],
+        "planes": len(planes) if symmetric is not None else parsed["counts"]["planes"],
+    }
+
+    web["cadId"] = _cache_cad({
+        "mesh": viewer_mesh,
+        "offset": np.asarray(offset, dtype=float) if offset else np.zeros(3),
+        "name": display_name or path.stem,
+        "display_vertices": np.asarray(
+            web["positions"], dtype=float).reshape(-1, 3),
+        "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
+    })
+    return web
 
 
 def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
@@ -1149,15 +3159,70 @@ def load_cad_payload(payload: bytes, filename: str) -> dict[str, Any]:
             )
             return web
 
-    if suffix == ".catpart":
-        raise ValueError(
-            "CATIA 네이티브(.CATPart)는 독자 포맷이라 읽을 수 없습니다. "
-            "CATIA에서 STEP(AP214) 또는 STL로 내보내 주세요."
-        )
+        if suffix == ".catpart":
+            # CATPart 자체는 브라우저용으로 읽을 수 없으므로 설치된 CATIA를
+            # 통해 임시 메시로 변환한 뒤 동일한 웹 메시 형식으로 돌려준다.
+            mesh = mesh_io.load_any(path, cache_dir=Path(tmp) / ".cache")
+            web = mesh_io.to_web_mesh(mesh, name=path.stem, source_format="catpart")
+            web["holes"] = []
+            web["planes"] = []
+            web["counts"] = {"cylinders": 0, "holes": 0, "planes": 0}
+            web["note"] = "CATPart를 CATIA로 변환하여 표시했습니다."
+            web["cadId"] = _cache_cad({
+                "mesh": mesh,
+                "offset": np.asarray(web["summary"]["bounds"]["center"], dtype=float) if web.get("recentered") else np.zeros(3),
+                "name": path.stem,
+                "display_vertices": np.asarray(web["positions"], dtype=float).reshape(-1, 3),
+                "display_faces": np.asarray(web["indices"]).reshape(-1, 3),
+            })
+            return web
+
     raise ValueError(
         f"지원하지 않는 형식입니다: {suffix or '확장자 없음'} "
         f"(지원: STEP/STP, STL, PLY, OBJ, GLB/GLTF, 3MF)"
     )
+
+
+def load_registered_cad(
+    part_number: str,
+    analysis_id: str | None = None,
+) -> dict[str, Any]:
+    """품번에 등록된 CAD를 영구 캐시를 사용해 뷰어 데이터로 만든다.
+
+    CATIA 원본은 반드시 STEP으로 변환한 뒤 ``load_cad_payload``의 STEP
+    경로를 탄다. 따라서 단순 삼각망 표시뿐 아니라 홀과 기준 평면 정보도
+    유지되고, 같은 원본을 다시 열 때 CATIA 변환을 반복하지 않는다.
+    """
+    match = MESH_LIBRARY.find(part_number)
+    if match is None:
+        raise FileNotFoundError(f"등록된 CAD가 없습니다: {part_number}")
+
+    source_path = match.path
+    display_name = match.part_number
+    viewer_path = source_path
+    converted_from: str | None = None
+    if source_path.suffix.lower() in {".catpart", ".catproduct"}:
+        from cad_import.catia_convert import convert_to_step
+
+        viewer_path = convert_to_step(source_path, _cad_cache_dir())
+        converted_from = source_path.suffix.lower().lstrip(".")
+
+    if viewer_path.suffix.lower() in {".step", ".stp"}:
+        result = _load_step_cad_path(viewer_path, display_name, analysis_id)
+    else:
+        result = load_cad_payload(viewer_path.read_bytes(), viewer_path.name)
+    summary = result.get("summary")
+    if isinstance(summary, dict):
+        summary["name"] = display_name
+    result["registered"] = True
+    result["registeredPartNumber"] = display_name
+    if converted_from is not None:
+        result["convertedFrom"] = converted_from
+        conversion_note = "등록된 CATIA 파일을 STEP으로 변환했습니다."
+        result["note"] = " ".join(
+            item for item in (conversion_note, result.get("note")) if item
+        )
+    return result
 
 
 # CAD 파일명과 스캔 품번이 다르다. 현업 제품데이터 폴더가 짝을 보여준다 —
@@ -1201,8 +3266,31 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
             continue
         dx = float(edit.get("dx") or 0.0)
         dy = float(edit.get("dy") or 0.0)
-        moved.append({**line, "points": [[p[0] + dx, p[1] + dy]
-                                         for p in line["points"]]})
+        custom_vertices = edit.get("vertices")
+        source_points = (custom_vertices if isinstance(custom_vertices, list)
+                         and len(custom_vertices) >= 2 else line["points"])
+        point_edits = edit.get("points") if isinstance(edit.get("points"), dict) else {}
+        adjusted = []
+        for point_index, point in enumerate(source_points):
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            point_edit = point_edits.get(str(point_index), {})
+            point_dx = float(point_edit.get("dx") or 0.0) if isinstance(point_edit, dict) else 0.0
+            point_dy = float(point_edit.get("dy") or 0.0) if isinstance(point_edit, dict) else 0.0
+            adjusted.append([float(point[0]) + dx + point_dx,
+                             float(point[1]) + dy + point_dy])
+        adjusted_line = {**line, "points": adjusted}
+        if isinstance(edit.get("splineSegments"), list):
+            adjusted_line["splineSegments"] = [
+                int(index) for index in edit["splineSegments"]
+                if isinstance(index, (int, float)) and int(index) == index
+            ]
+        elif "spline" in edit:
+            adjusted_line["splineSegments"] = (
+                list(range(max(len(adjusted) - 1, 0)))
+                if edit.get("spline") else []
+            )
+        moved.append(adjusted_line)
     return moved
 
 
@@ -1226,7 +3314,9 @@ def reset_overlay_cache() -> None:
 
 def _overlay_key(cad_id: str, analysis_id: str, zero_edits,
                  fit_adjust=None) -> str:
-    return "|".join([cad_id, analysis_id,
+    # Keep stale 0%-hit results from the former optional-ray implementation
+    # out of both hot-reloaded development sessions and long-lived servers.
+    return "|".join(["surface-v2", cad_id, analysis_id,
                      json.dumps(zero_edits or [], sort_keys=True),
                      json.dumps(fit_adjust or {}, sort_keys=True)])
 
@@ -1439,13 +3529,39 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
 
     # 표면에 얹지 못한 점(광선이 빗나간 자리)은 뺀다. 예전에는 아무
     # 정점으로나 채워서 제로라인이 부품 밖으로 길게 뻗었다.
-    def _densify(points: list, step_px: float = 4.0) -> list:
+    def _densify(points: list, step_px: float = 4.0,
+                 spline_segments: list | None = None) -> list:
         """선 위를 촘촘히 채운다.
 
         꼭짓점만 표면에 얹으면 그 사이는 공중을 가로지른다. 촘촘히
         쏴야 곡면을 그대로 따라간다 — 3D 에서 "선을 얹은 느낌" 을
         없애는 진짜 방법이다(표면을 칠하면 리브와 구멍에서 조각난다).
         """
+        spline_set = {int(index) for index in (spline_segments or [])}
+        if spline_set and len(points) >= 3:
+            curved: list = []
+            for index in range(len(points) - 1):
+                if index not in spline_set:
+                    (ax, ay), (bx, by) = points[index], points[index + 1]
+                    count = max(int(np.hypot(bx - ax, by - ay) / step_px), 1)
+                    for k in range(count):
+                        t = k / count
+                        curved.append([ax + (bx - ax) * t, ay + (by - ay) * t])
+                    continue
+                before = np.asarray(points[max(0, index - 1)], dtype=float)
+                start = np.asarray(points[index], dtype=float)
+                end = np.asarray(points[index + 1], dtype=float)
+                after = np.asarray(points[min(len(points) - 1, index + 2)], dtype=float)
+                count = max(int(np.linalg.norm(end - start) / step_px), 4)
+                for k in range(count):
+                    t = k / count
+                    t2, t3 = t * t, t * t * t
+                    spot = 0.5 * ((2 * start) + (-before + end) * t
+                                  + (2 * before - 5 * start + 4 * end - after) * t2
+                                  + (-before + 3 * start - 3 * end + after) * t3)
+                    curved.append(spot.tolist())
+            curved.append(list(points[-1]))
+            return curved
         dense: list = []
         for (ax, ay), (bx, by) in zip(points[:-1], points[1:]):
             span = float(np.hypot(bx - ax, by - ay))
@@ -1471,7 +3587,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         pts = line["points"]
         if len(pts) < 2:
             continue
-        placed = ov.unproject(_densify(pts), vertices, faces, fit, shifted)
+        placed = ov.unproject(_densify(
+            pts, spline_segments=line.get("splineSegments")), vertices, faces, fit, shifted)
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
         if len(kept) < 2:
@@ -1967,7 +4084,7 @@ async def cad_morph_stl(request: Request) -> Response:
         mesh = trimesh.Trimesh(vertices=moved, faces=faces, process=False)
         payload = mesh.export(file_type="stl")
         name = f"{entry.get('name', 'part')}_{tail}.stl"
-        quoted = urllib.parse.quote(name)
+        quoted = quote(name)
         return Response(payload, media_type="model/stl", headers={
             "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})
     except ValueError as exc:
@@ -2069,15 +4186,29 @@ async def cad_overlay(request: Request) -> JSONResponse:
 
 async def cad(request: Request) -> JSONResponse:
     try:
-        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_UPLOAD_BYTES)
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_CAD_UPLOAD_BYTES)
+        source = str(form.get("source", "")).strip().lower()
+        if source == "registered":
+            part_number = str(form.get("partNumber", "")).strip().upper()
+            analysis_id = str(form.get("analysisId", "")).strip() or None
+            if not part_number:
+                return JSONResponse({"error": "등록 CAD를 열려면 품번이 필요합니다."}, status_code=400)
+            try:
+                result = await run_in_threadpool(
+                    load_registered_cad, part_number, analysis_id
+                )
+            except FileNotFoundError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=404)
+            return JSONResponse(result)
+
         upload = form.get("file")
         if upload is None or not hasattr(upload, "read"):
             return JSONResponse({"error": "3D 파일이 필요합니다."}, status_code=400)
         payload = await upload.read()
-        if len(payload) > MAX_UPLOAD_BYTES:
+        if len(payload) > MAX_CAD_UPLOAD_BYTES:
             return JSONResponse(
                 {"error": f"파일이 너무 큽니다 ({len(payload) / 1024 / 1024:.0f}MB). "
-                          f"최대 {MAX_UPLOAD_BYTES // 1024 // 1024}MB"},
+                          f"최대 {MAX_CAD_UPLOAD_BYTES // 1024 // 1024}MB"},
                 status_code=413,
             )
         result = await run_in_threadpool(
@@ -2088,165 +4219,53 @@ async def cad(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
-def zero_valley_line_for(analysis_id: str, anchor_id_a: int, anchor_id_b: int) -> dict[str, Any]:
-    entry = _analysis_cache.get(analysis_id)
-    if entry is None:
-        raise ValueError("분석 결과가 만료됐습니다. 이미지를 다시 분석하세요.")
-    anchors = entry["anchors"]
-    by_id = {a.anchor_id: a for a in anchors}
-    if anchor_id_a not in by_id or anchor_id_b not in by_id:
-        raise ValueError("존재하지 않는 앵커 ID 입니다.")
-    if anchor_id_a == anchor_id_b:
-        raise ValueError("서로 다른 앵커 2개를 선택하세요.")
-
-    pair = [by_id[anchor_id_a], by_id[anchor_id_b]]
-    lines = find_valley_lines(
-        entry["values"], entry["part_mask"], pair, entry["tolerance"],
-        max_quality_ratio=100.0,   # 사람이 직접 고른 쌍이므로 비용으로 거르지 않는다
-        min_length_px=0.0,
-        max_uses_per_anchor=2,
-    )
-    if not lines:
-        raise ValueError("두 앵커를 잇는 경로를 찾지 못했습니다 (부품 영역 밖일 수 있음).")
-    line = lines[0]
-    return {"line": line.to_dict()}
-
-
-async def zero_valley_line(request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-        analysis_id = body.get("analysisId")
-        anchor_ids = body.get("anchorIds")
-        if not analysis_id or not isinstance(anchor_ids, list) or len(anchor_ids) != 2:
-            return JSONResponse(
-                {"error": "analysisId 와 anchorIds(길이 2) 가 필요합니다."}, status_code=400
-            )
-        result = await run_in_threadpool(
-            zero_valley_line_for, analysis_id, int(anchor_ids[0]), int(anchor_ids[1])
-        )
-        return JSONResponse(result)
-    except ValueError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=422)
-
-
-def sample_point(image: np.ndarray, x_norm: float, y_norm: float) -> dict[str, Any]:
-    """클릭한 지점의 표면색을 컬러바로 되짚어 편차값을 추정한다.
-
-    라벨을 판독해 얻는 값과 달리 이건 어디까지나 추정치다. 파이프라인도 색 역산을
-    판독값 검증용으로만 쓰고 있어(point_extractor 의 교차검증), 여기서도 같은 함수를
-    그대로 불러 써서 기준이 갈라지지 않게 한다.
-    """
-    height, width = image.shape[:2]
-    x = int(round(x_norm / 100.0 * (width - 1)))
-    y = int(round(y_norm / 100.0 * (height - 1)))
-    if not (0 <= x < width and 0 <= y < height):
-        raise ValueError("이미지 범위를 벗어난 지점입니다.")
-
-    scan_mask = build_scan_mask(image)
-    if np.any(scan_mask) and scan_mask[y, x] == 0:
-        raise ValueError("스캔 본체 바깥은 편차값을 추정할 수 없습니다.")
-
-    annotation_mask = build_blue_annotation_mask(image)
-    color = _sample_deviation_color(image, (x, y), scan_mask, annotation_mask)
-    if color is None:
-        raise ValueError("주변 표면색을 읽지 못했습니다. 다른 지점을 눌러 보세요.")
-
-    value = build_lut(image).to_value(color)
-    return {
-        "xPx": x,
-        "yPx": y,
-        "x": round(x / width * 100, 3),
-        "y": round(y / height * 100, 3),
-        "value": round(float(value), 3),
-        "source": "colormap",
-        "bgr": [int(c) for c in color],
-    }
-
-
-async def sample(request: Request) -> JSONResponse:
-    try:
-        form = await request.form(max_files=1, max_fields=6, max_part_size=MAX_UPLOAD_BYTES)
-        upload = form.get("file")
-        if upload is None or not hasattr(upload, "read"):
-            return JSONResponse({"error": "이미지 파일이 필요합니다."}, status_code=400)
-        x_norm = float(str(form.get("x", "")))
-        y_norm = float(str(form.get("y", "")))
-        image = _decode_image(await upload.read())
-        result = await run_in_threadpool(sample_point, image, x_norm, y_norm)
-        return JSONResponse(result)
-    except (TypeError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=422)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
-
-
-def _safe_folder(relative_path: str) -> Path:
-    candidate = (FOLDER_ROOT / relative_path).resolve()
-    if candidate != FOLDER_ROOT and FOLDER_ROOT not in candidate.parents:
-        raise ValueError("허용된 품번별 폴더 밖은 조회할 수 없습니다.")
-    return candidate
-
-
-def _folder_entry(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {
-        "name": path.name,
-        "path": path.relative_to(FOLDER_ROOT).as_posix(),
-        "isDirectory": path.is_dir(),
-        "size": stat.st_size if path.is_file() else None,
-        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-    }
-
-
-async def folders(request: Request) -> JSONResponse:
-    if not FOLDER_ROOT.is_dir():
-        return JSONResponse({"available": False, "entries": []})
-    try:
-        relative_path = request.query_params.get("path", "")
-        folder = _safe_folder(relative_path)
-        if not folder.is_dir():
-            return JSONResponse({"error": "폴더가 아닙니다."}, status_code=400)
-        entries = sorted(
-            (_folder_entry(path) for path in folder.iterdir()),
-            key=lambda item: (not item["isDirectory"], item["name"].lower()),
-        )
-        return JSONResponse(
-            {
-                "available": True,
-                "rootName": FOLDER_ROOT.name,
-                "path": relative_path.replace("\\", "/").strip("/"),
-                "entries": entries,
-            }
-        )
-    except (OSError, ValueError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-
 app = Starlette(
     routes=[
         Route("/api/health", health, methods=["GET"]),
         Route("/api/analyze", analyze, methods=["POST"]),
-        Route("/api/sheet-values", sheet_values, methods=["POST"]),
-        Route("/api/zero-valley-line", zero_valley_line, methods=["POST"]),
+        Route("/api/sample", sample, methods=["POST"]),
+        Route("/api/corrections", create_correction, methods=["POST"]),
+        Route("/api/corrections", list_corrections, methods=["GET"]),
+        Route("/api/corrections", delete_correction, methods=["DELETE"]),
+        Route("/api/folders", folders, methods=["GET"]),
+        Route("/api/realign", realign, methods=["POST"]),
+        Route("/api/sheet", sheet, methods=["POST"]),
+        Route("/api/products", products, methods=["GET", "POST"]),
+        Route("/api/mesh", meshes, methods=["GET", "POST", "DELETE"]),
+        Route("/api/mesh/reveal", mesh_reveal, methods=["POST"]),
+        Route("/api/mesh/source", mesh_source, methods=["GET", "POST"]),
+        Route("/api/alignment", confirm_alignment, methods=["POST"]),
+        # 보정시트 엑셀. main 은 프론트가 이 라우트를 두 곳에서 부르는데
+        # 백엔드에서 지워져 있었다 — 눌러도 아무 일도 안 일어난다.
+        Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
         Route("/api/scan-workspace", scan_workspace, methods=["POST"]),
         Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
-        Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),
         Route("/api/cad-morph-open", cad_morph_open, methods=["POST"]),
-        Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
-        Route("/api/sample", sample, methods=["POST"]),
-        Route("/api/folders", folders, methods=["GET"]),
+        Route("/api/cad-morph-stl", cad_morph_stl, methods=["POST"]),
+        Route("/api/file-organizer/status", file_organizer_status, methods=["GET"]),
+        # 원본 폴더를 읽어 분류 결과만 돌려주는 조회다(바꾸는 것이 없다) — 화면은
+        # GET 으로 부른다. POST 로만 열어 두면 "원본 스캔" 버튼이 405 를 받았다.
+        # 핸들러가 요청 본문을 읽지 않으므로 예전 POST 호출도 그대로 받아 준다.
+        Route("/api/file-organizer/scan", file_organizer_scan, methods=["GET", "POST"]),
+        Route("/api/file-organizer/upload", file_organizer_upload, methods=["POST"]),
+        Route("/api/file-organizer/discard", file_organizer_discard, methods=["POST"]),
+        Route("/api/file-organizer/execute", file_organizer_execute, methods=["POST"]),
+        Route("/api/file-organizer/database", file_organizer_database, methods=["GET", "POST"]),
+        Route("/api/file-organizer/folder-order", file_organizer_folder_order, methods=["GET", "POST"]),
+        Route("/api/file-organizer/paths", file_organizer_paths, methods=["GET", "POST"]),
+        Route("/api/file-organizer/reveal", file_organizer_reveal, methods=["POST"]),
     ]
 )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
+    # 시트 생성 결과 요약은 헤더로 오므로 브라우저가 읽을 수 있게 열어 준다.
+    expose_headers=["Content-Disposition", "X-Sheet-Summary"],
 )
 
 

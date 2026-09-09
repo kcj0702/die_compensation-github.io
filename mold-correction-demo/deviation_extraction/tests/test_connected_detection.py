@@ -13,9 +13,21 @@ from PIL import Image
 
 from deviation_extraction.calibrate_colorbar import _end_crop
 from deviation_extraction.image_io import read_image, write_image
-from deviation_extraction.label_detector import build_scan_mask, detect_labels
+from deviation_extraction.label_detector import (
+    _deduplicate_rectangles,
+    build_scan_mask,
+    detect_labels,
+)
 from deviation_extraction.point_extractor import _read_label_values
 from deviation_extraction.vlm_reader import LabelValueReader
+
+
+class LabelRectangleDeduplicationTests(unittest.TestCase):
+    def test_fully_contained_inner_outline_is_removed(self) -> None:
+        outer = (659, 157, 712, 201)
+        inner = (661, 159, 710, 188)
+
+        self.assertEqual(_deduplicate_rectangles([inner, outer]), [outer])
 
 
 def _scan_image() -> np.ndarray:
@@ -505,6 +517,23 @@ class ConnectedLeaderTest(unittest.TestCase):
         x, y = candidates[0].point_xy
         self.assertGreater(scan_mask[y, x], 0)
         self.assertLessEqual(math.dist((x, y), expected_contact), 10.0)
+
+    def test_internal_label_keeps_the_drawn_endpoint_without_inward_shift(self) -> None:
+        image = np.full((300, 500, 3), 255, dtype=np.uint8)
+        cv2.rectangle(image, (20, 20), (480, 280), (20, 180, 120), -1)
+        _draw_gray_label(image, (210, 70), (300, 102), "-1.8")
+        expected_endpoint = (175, 130)
+        cv2.line(image, (210, 86), expected_endpoint, (255, 0, 0), 1)
+
+        candidate = detect_labels(image)[0]
+
+        self.assertTrue(candidate.traced)
+        self.assertIsNotNone(candidate.point_xy)
+        self.assertLessEqual(
+            math.dist(candidate.point_xy, expected_endpoint),
+            1.5,
+            msg=candidate.point_xy,
+        )
 
     def test_straight_scan_feature_does_not_run_to_opposite_boundary(self) -> None:
         image = _boundary_scan_image()

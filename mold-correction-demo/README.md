@@ -7,14 +7,8 @@
 
 | 경로 | 상태 | 역할 |
 |---|---|---|
-| `label_removal/` | 구현 | 숫자 라벨 검출과 인페인팅 |
-| `deviation_extraction/` | 구현 | 라벨 박스 검출, 리더선 끝점 좌표, VLM 숫자 판독, CSV 저장 |
-| `zero_line_detection/` | 구현 | 컬러바 판독, 제로라인 검출, 핵심 포인트 선별, 현업 양식 엑셀 |
-| `zero_line_advance/` | 구현 | 편차 계곡을 따라가는 제로라인 후보 |
-| `cad_import/` | 구현 | STEP 읽기(OCCT), 홀·평면 추출, 실루엣 정합, 메시 변형 |
-| `ui/backend/` | 구현 | 세 엔진을 묶는 로컬 API 서버 (11개 엔드포인트) |
-| `ui/app/` | 구현 | 화면 4개와 three.js 3D 뷰어 |
-| `shared/` | 구현 | 엔진 사이 공통 스키마 |
+| `deviation_extraction/` | 구현 | 라벨 검출, 좌표 산정, 편차값 판독, CSV 저장 |
+| `product_alignment/` | 구현 | 제품데이터 등록·정렬, 측정점을 제품데이터 좌표로 전사 |
 | `depth_measurement/` | 골격 | 깊이 측정 단계 예정 |
 | `pipeline/` | 골격 | `run_demo.py` 는 아직 빈 파일이다 |
 | `docs/` | 부분 구현 | 편차 추출 단계의 입출력 계약 |
@@ -29,17 +23,38 @@
 ## 처리 흐름
 
 ```text
-편차 맵(PNG)
-  → 라벨 검출·인페인팅            label_removal
-  → 리더선 끝점 + VLM 숫자 판독   deviation_extraction
-  → 컬러바 판독 → 색을 mm 로      zero_line_detection
-  → 제로라인 · 핵심 포인트
-  → 보정치 시트(현업 양식 xlsx)
-  → CAD 표면에 얹기 · 보정 후 형상 cad_import
+편차 맵 → 라벨 박스 검출 → 리더 선분 기반 좌표 산정 → VLM 숫자 판독 → CSV·디버그 이미지
+                                                       └→ 선택: 제로 라인·컬러맵 확인
+                                                       └→ 선택: 제품데이터 정렬 후 좌표 전사
 ```
 
-좌표는 이미지 픽셀 기준이다. **부품 좌표계나 차량 좌표계로는 아직 변환하지 않는다** —
-그러려면 3D 스캔 원본이 필요하다(아래 "현재 제약" 참고).
+검출 결과는 이미지 좌표계의 2차원 픽셀 좌표다. 부품 좌표계나 3차원 좌표로 변환하지 않는다.
+
+보정시트에 들어가는 그림은 편차 히트맵이 아니라 깨끗한 제품데이터 렌더다.
+`product_alignment`이 두 이미지를 맞춰 측정점을 옮기며, 좌표만 옮기고 편차값을
+보정치로 바꾸지는 않는다. 자세한 내용은
+[`product_alignment/README.md`](product_alignment/README.md)에 있다.
+
+## 실행 환경
+
+- Python 3.10 이상
+- 최초 모델 로드 시 Hugging Face 모델을 받을 수 있는 환경 또는 준비된 로컬 캐시
+- CUDA 사용 가능 시 FP16, 그 외에는 CPU FP32로 추론
+
+저장소 루트에서 의존성을 설치한다. `run-ui.cmd`가 찾는 위치도 이곳의 `.venv`다.
+
+torch는 PyPI 기본 휠이 CPU 전용이라 CUDA 인덱스에서 먼저 받는다. UI 백엔드는
+CUDA가 없으면 Qwen 판독을 건너뛴다.
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+.venv\Scripts\python.exe -m pip install -r mold-correction-demo\deviation_extraction\requirements.txt
+.venv\Scripts\python.exe -m pip install -r mold-correction-demo\ui\backend\requirements.txt
+```
+
+`ui/backend/requirements.txt`에는 파일 업로드 파싱에 필요한 `python-multipart`가
+들어 있다. 이걸 빠뜨리면 서버는 뜨지만 `/api/analyze`가 form 파싱 오류로 실패한다.
 
 ## 실행
 
@@ -74,10 +89,10 @@ C:\Users\KDT033\Downloads\die_compensation-github.io-main\die_compensation-githu
 | 무엇 | 어디에 | 실측 |
 |---|---|---|
 | Qwen 라벨 판독 | `ui/backend/.label_cache.json` | 64XX2 한 장 71초 -> 0초 |
-| 현업 제로라인 파이프라인 | `zero_line_detection/.lab_cache/` | 64XX2 117초 -> 0.05초 |
+| 현업 제로라인 파이프라인 | `zero_line_detection/.lab_cache/` | 64XX2 91.3초 -> 6.4초(첫 실행) -> 0.04초(재실행) |
 | STEP 파싱 | `cad_import/_parsed/` | 113MB 57초 -> 3초 |
 
-분석 한 장이 **195초 -> 3.1초**가 된다. 열쇠는 내용 해시라 그림이나
+제로라인 캐시는 입력 이미지와 관련 스크립트의 내용 해시를 함께 사용하므로 그림이나
 스크립트가 바뀌면 저절로 다시 돈다. 자리를 옮기려면 `ADC_LABEL_CACHE`
 `ADC_LAB_CACHE` 환경변수를 쓴다(시험이 이걸로 실제 캐시를 지킨다).
 `GET /api/health` 의 `qwenLoaded` 가 분석을 돌린 뒤에도 `false` 면 라벨 판독이
@@ -162,27 +177,8 @@ npm run build
 
 ## 현재 제약
 
-### 3D 스캔 원본이 없다
-
-지금 받는 것은 검사 소프트웨어가 만든 **편차 히트맵 그림(PNG)** 한 장이다. 그 그림을
-만들어 낸 측정 데이터 자체 — 점군, 측정 메시, 검사 프로젝트 파일, 점별 편차 표 — 는
-아직 없다. 그래서 이런 것들이 막혀 있다.
-
-- **좌표계가 픽셀이다.** 현업이 정한 제로라인 기준은 "가이드레일 장착 중심선",
-  "차량 센터 Y0" 처럼 전부 **조립 기준 좌표**인데, 히트맵 색에는 그 정보가 없다.
-- **RPS 정렬을 못 한다.** 현업 자료가 정리한 제로라인 판정 4가지 중 3가지
-  (RPS 정렬 · 수축 중심선 · 단면 분석)가 3D 데이터를 전제한다. 지금은 4번째인
-  컬러맵 제로존 하나만 쓴다. CAD 쪽 홀 좌표는 뽑아 뒀으니 스캔 쪽만 오면 된다.
-- **값을 색과 글자로 추정한다.** 실측 67XX6 에서 편차 포인트 130개 중 33개가
-  컬러바 범위를 벗어난 판독값이었다. 원본 수치가 있으면 이 오차가 통째로 사라진다.
-
-### 그 밖에
-
-- CAD 정합은 데이텀이 아니라 **실루엣 겉모양**으로 맞춘다. 겹침 비율(IoU)을 함께
-  내보내므로 낮으면 화면에서 경고한다.
-- 핵심 포인트 선별 기준은 **현업 확인 전**이다. 보정시트를 보고 세운 규칙이다.
-- "보정 후 형상"은 B-Rep 이 아니라 **삼각망을 민 것**이라 그대로 가공에 쓸 수 없다.
-  눈으로 견주고 STL 로 넘기는 용도다.
-- 검출 임계값이 픽셀 크기와 색상에 묶여 있어 입력 해상도와 스캔 조건에 민감하다.
-- 꺾이거나 교차하는 리더선은 단일 Hough 선분만으로 정확히 잇기 어렵다.
-- `pipeline/run_demo.py` 를 포함한 일괄 실행 파이프라인은 아직 없다.
+- 대칭 부품은 제품데이터 정렬 방향을 이미지만으로 정할 수 없어 사람이 한 번 확인해야 한다.
+- 검출 임계값이 픽셀 크기와 색상에 고정되어 있어 입력 해상도와 스캔 조건에 민감하다.
+- 꺾이거나 교차하는 리더라인은 단일 Hough 선분만으로 정확히 연결하기 어렵다.
+- 저장소에 검증 이미지와 정답 데이터가 없어 검출 정확도는 아직 계량되지 않았다.
+- `pipeline/run_demo.py`를 포함한 전체 보정 파이프라인은 아직 구현되지 않았다.

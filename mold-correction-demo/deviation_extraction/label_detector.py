@@ -175,6 +175,17 @@ def _rect_iou(first: Rect, second: Rect) -> float:
     return intersection / float(area + second_area - intersection)
 
 
+def _rect_containment(first: Rect, second: Rect) -> float:
+    """Return intersection area divided by the smaller rectangle area."""
+    x0, y0, x1, y1 = first
+    sx0, sy0, sx1, sy1 = second
+    intersection = max(0, min(x1, sx1) - max(x0, sx0)) * max(
+        0, min(y1, sy1) - max(y0, sy0)
+    )
+    smaller_area = min((x1 - x0) * (y1 - y0), (sx1 - sx0) * (sy1 - sy0))
+    return intersection / float(max(1, smaller_area))
+
+
 def _deduplicate_rectangles(rectangles: list[Rect]) -> list[Rect]:
     """동일 contour 중복과 인접 라벨을 합친 composite 박스를 제거한다."""
     ordered = sorted(
@@ -220,7 +231,36 @@ def _deduplicate_rectangles(rectangles: list[Rect]) -> list[Rect]:
         )
         if not merged_pair:
             atomic.append(candidate)
-    return atomic
+    # A single label outline can yield both its outer border and a shorter
+    # inner border. Their IoU may stay below the ordinary duplicate threshold
+    # even though the inner rectangle is fully contained. Composite parents
+    # have already been removed above, so suppress only similarly sized nested
+    # rectangles here and retain the outer box used by leader association.
+    nested_unique: list[Rect] = []
+    for candidate in sorted(
+        atomic,
+        key=lambda item: (item[2] - item[0]) * (item[3] - item[1]),
+        reverse=True,
+    ):
+        candidate_area = (candidate[2] - candidate[0]) * (
+            candidate[3] - candidate[1]
+        )
+        is_nested_duplicate = False
+        for kept in nested_unique:
+            kept_area = (kept[2] - kept[0]) * (kept[3] - kept[1])
+            area_ratio = min(candidate_area, kept_area) / float(
+                max(candidate_area, kept_area)
+            )
+            if (
+                area_ratio >= config.LABEL_NESTED_DUPLICATE_MIN_AREA_RATIO
+                and _rect_containment(candidate, kept)
+                >= config.LABEL_NESTED_DUPLICATE_MIN_CONTAINMENT
+            ):
+                is_nested_duplicate = True
+                break
+        if not is_nested_duplicate:
+            nested_unique.append(candidate)
+    return nested_unique
 
 
 def _find_label_rectangles(
@@ -940,6 +980,9 @@ def _endpoint_from_component(
 
     anchor, direction = _leader_anchor_and_direction(xs, ys, box, scan_mask.shape)
     inside_scan = scan_mask[ys, xs] > 0
+    anchor_x = int(np.clip(round(anchor[0]), 0, scan_mask.shape[1] - 1))
+    anchor_y = int(np.clip(round(anchor[1]), 0, scan_mask.shape[0] - 1))
+    anchor_inside_scan = scan_mask[anchor_y, anchor_x] > 0
     if np.any(inside_scan):
         candidate_xs = xs[inside_scan]
         candidate_ys = ys[inside_scan]
@@ -975,7 +1018,7 @@ def _endpoint_from_component(
         if boundary_scan is None:
             boundary_scan = _scan_boundary_mask(scan_mask)
         on_boundary = boundary_scan[candidate_ys, candidate_xs]
-        if np.any(on_boundary):
+        if np.any(on_boundary) and not anchor_inside_scan:
             contact_x, contact_y, contact_alignment = _best_directional_point(
                 candidate_xs[on_boundary],
                 candidate_ys[on_boundary],
@@ -1030,9 +1073,14 @@ def _endpoint_from_component(
 
     if scan_mask[point_y, point_x] == 0:
         return None
-    point_x, point_y = _move_point_inside_scan(
-        point_x, point_y, anchor, scan_mask
-    )
+    # Labels placed on the scan already terminate at the drawn measurement
+    # marker.  Moving those endpoints farther along the leader direction puts
+    # the reported point several pixels beyond the marker.  Only leaders that
+    # enter the scan from the white background need the inward sampling shift.
+    if not anchor_inside_scan:
+        point_x, point_y = _move_point_inside_scan(
+            point_x, point_y, anchor, scan_mask
+        )
     if scan_mask[point_y, point_x] == 0:
         return None
     return point_x, point_y
