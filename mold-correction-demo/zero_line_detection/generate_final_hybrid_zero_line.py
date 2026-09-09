@@ -502,16 +502,8 @@ def draw_team_route_view(
         point = tuple(np.rint(item["point"]).astype(np.int32).tolist())
         cv2.circle(construction, point, 7, ZERO_POINT_RGB, -1, cv2.LINE_AA)
         cv2.circle(construction, point, 7, (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(
-            construction,
-            item["label"],
-            (point[0] + 8, point[1] - 7),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.42,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
+        # Z1/Z2 labels remain internal route identifiers, but do not need to be
+        # printed on the operator-facing Method 2 image.
     for selection in case2["selections"]:
         for region_contour in selection["region"]["contours"]:
             cv2.drawContours(

@@ -54,6 +54,23 @@ class HybridCaseSelectionTests(unittest.TestCase):
         self.assertGreater(int(mask[5, 20]), 0)
         self.assertGreater(int(mask[30, 10]), 0)
 
+    def test_method2_view_does_not_draw_zero_point_numbers(self) -> None:
+        image = np.zeros((40, 40, 3), dtype=np.uint8)
+        case2 = {
+            "contour_points": np.asarray([[2, 2], [37, 2], [37, 37], [2, 37]]),
+            "zero_points": [{"label": "Z1", "point": np.asarray([20, 2])}],
+            "selections": [],
+        }
+
+        with mock.patch.object(hybrid.cv2, "putText") as put_text:
+            hybrid.draw_team_route_view(
+                image,
+                case2,
+                np.zeros((40, 40), dtype=bool),
+            )
+
+        put_text.assert_not_called()
+
     def test_single_entry_point_dispatches_case1(self) -> None:
         common = {"zero_ratio": 0.2, "zero_count": 2}
         expected = np.ones((3, 4), dtype=bool)

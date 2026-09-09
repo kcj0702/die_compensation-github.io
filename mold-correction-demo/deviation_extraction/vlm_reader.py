@@ -70,6 +70,7 @@ class LabelValueReader:
                 use_8bit = False
         self.use_8bit = use_8bit
         self._inference_lock = Lock()
+        self._warmed_up = False
 
         self.processor = AutoProcessor.from_pretrained(
             model_id,
@@ -113,6 +114,22 @@ class LabelValueReader:
         self.model = AutoModelForImageTextToText.from_pretrained(
             model_id, **load_kwargs
         ).to(self.device).eval()
+
+    def warmup(self) -> None:
+        """첫 실제 라벨 전에 CUDA 컨텍스트와 생성 커널을 한 번 준비한다.
+
+        서버의 상태 확인 뒤 백그라운드에서 호출된다. 흰색 작은 이미지는
+        결과로 저장하지 않고, 모델 로드와 첫 CUDA 실행 비용만 미리 낸다.
+        """
+        if self._warmed_up:
+            return
+        blank = Image.new("RGB", (96, 96), "white")
+        self._read_batch(
+            [blank],
+            prompt="No number is visible. Reply with exactly NONE.",
+            max_new_tokens=1,
+        )
+        self._warmed_up = True
 
     def read_value(self, crop: Image.Image) -> float | None:
         """생성문에서 처음 발견한 부호 있는 정수 또는 소수를 반환한다."""
@@ -422,6 +439,7 @@ class LabelValueReader:
         crops: list[Image.Image],
         *,
         prompt: str = _PROMPT,
+        max_new_tokens: int | None = None,
     ) -> list[float | None]:
         """동일한 프롬프트를 적용한 라벨 crop 한 묶음을 생성한다."""
         messages = [
@@ -454,7 +472,10 @@ class LabelValueReader:
         with self._inference_lock, torch.inference_mode():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=config.VLM_MAX_NEW_TOKENS,
+                max_new_tokens=(
+                    config.VLM_MAX_NEW_TOKENS
+                    if max_new_tokens is None else max_new_tokens
+                ),
                 do_sample=False,
                 use_cache=True,
             )

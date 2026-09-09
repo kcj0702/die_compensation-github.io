@@ -412,6 +412,19 @@ class ValueReaderTest(unittest.TestCase):
             vlm_reader.config.VLM_MAX_NEW_TOKENS,
         )
 
+    def test_warmup_runs_one_short_generation_only_once(self) -> None:
+        reader = object.__new__(LabelValueReader)
+        reader._warmed_up = False
+        reader._read_batch = MagicMock(return_value=[None])
+
+        reader.warmup()
+        reader.warmup()
+
+        reader._read_batch.assert_called_once()
+        kwargs = reader._read_batch.call_args.kwargs
+        self.assertEqual(kwargs["max_new_tokens"], 1)
+        self.assertIn("NONE", kwargs["prompt"])
+
     def test_cuda_oom_batch_is_split_without_changing_result_order(self) -> None:
         reader = object.__new__(LabelValueReader)
         reader._read_batch = MagicMock(

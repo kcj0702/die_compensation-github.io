@@ -26,6 +26,8 @@ fit.iou 로 얼마나 믿을 만한지 함께 내보내니, 화면에서도 그 
 """
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 
 import cv2
@@ -234,6 +236,20 @@ FIT_PLACE_SCALES = (0.88, 1.0, 1.12)
 FIT_PLACE_SHIFTS = (-0.06, 0.0, 0.06)
 FIT_PLACE_FINE = 0.5          # 2차에서 간격을 절반으로 좁힌다
 
+# OpenCV 의 삼각형 채우기는 한 후보 안에서는 거의 단일 코어로 돈다. 각
+# 자세 후보는 서로 독립이므로 큰 메시만 소수 작업자로 나눠 계산한다. 너무
+# 많은 작업자를 만들면 OpenCV 자체 작업과 경합하므로 기본값은 4로 제한한다.
+# 문제가 있는 PC에서는 AJIN_CAD_FIT_WORKERS=1 로 즉시 예전 순차 경로를 쓴다.
+FIT_WORKERS = max(1, min(
+    int(os.environ.get("AJIN_CAD_FIT_WORKERS", "4")),
+    os.cpu_count() or 1,
+))
+FIT_PARALLEL_MIN_FACES = 2_000
+_FIT_EXECUTOR = (
+    ThreadPoolExecutor(max_workers=FIT_WORKERS, thread_name_prefix="cad-fit")
+    if FIT_WORKERS > 1 else None
+)
+
 
 def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
              top_k: int = 1):
@@ -298,6 +314,22 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
     mask_angle = _principal_angle(mxs.astype(float), mys.astype(float))
 
     mask_width = max(mx1 - mx0, my1 - my0) + 1
+
+    def parallel_map(function, items):
+        """큰 메시의 독립 후보만 병렬화하고 작은 입력은 그대로 계산한다."""
+        items = list(items)
+        if (_FIT_EXECUTOR is None or len(faces) < FIT_PARALLEL_MIN_FACES
+                or len(items) < 2):
+            return [function(item) for item in items]
+        # executor.map 은 입력 순서대로 결과를 돌려준다. 동점일 때 기존의
+        # 후보 순서까지 유지되어 정합 결과가 병렬화 전과 달라지지 않는다.
+        try:
+            return list(_FIT_EXECUTOR.map(function, items))
+        except Exception:
+            # 작업자 생성이 제한된 배포 환경이나 OpenCV 스레드 오류에서는
+            # 예전 순차 계산을 그대로 다시 사용한다. 입력 자체의 오류라면
+            # 순차 호출도 같은 예외를 내므로 잘못된 결과를 숨기지 않는다.
+            return [function(item) for item in items]
 
     def evaluate(flat, turn, axis, sign, flip_u, flip_v):
         """이 자세로 그려 보고 점수와 ViewFit 을 준다."""
@@ -372,28 +404,37 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
         return detail, hull, f2, mm_per_px, origin_u, origin_v
 
     # ── 1차: 24가지 조합을 주축 각도 하나로 훑는다 ───────────
-    combos: list = []
-    for axis in (0, 1, 2):
+    orientation_specs = [
+        (axis, sign, flip_u, flip_v)
+        for axis in (0, 1, 2)
+        for sign in (1, -1)
+        for flip_u in (False, True)
+        for flip_v in (False, True)
+    ]
+
+    def inspect_orientation(spec):
+        axis, sign, flip_u, flip_v = spec
         u_axis, v_axis = _plane_axes(axis)
-        for sign in (1, -1):
-            for flip_u in (False, True):
-                for flip_v in (False, True):
-                    u = vertices[:, u_axis] * (sign if not flip_u else -sign)
-                    v = vertices[:, v_axis] * (-1 if flip_v else 1)
-                    flat = np.stack([u, v], axis=1)
-                    # 각도는 **채워진 실루엣**에서 잰다. 정점 구름으로
-                    # 재면 작은 피처가 몰린 쪽으로 주축이 끌려가 스캔
-                    # 마스크(픽셀이 고르게 찬다)와 기준이 달라진다.
-                    rough, _lo, _s = _rasterize(flat, faces, FIT_GRID)
-                    rys, rxs = np.nonzero(_hull(rough) > 0)
-                    base = 0.0
-                    if len(rxs):
-                        base = mask_angle - _principal_angle(
-                            rxs.astype(float), rys.astype(float))
-                    got = evaluate(flat, base, axis, sign, flip_u, flip_v)
-                    if got is not None:
-                        combos.append((got[0], flat, base, axis, sign,
-                                       flip_u, flip_v, got[1]))
+        u = vertices[:, u_axis] * (sign if not flip_u else -sign)
+        v = vertices[:, v_axis] * (-1 if flip_v else 1)
+        flat = np.stack([u, v], axis=1)
+        # 각도는 **채워진 실루엣**에서 잰다. 정점 구름으로 재면 작은
+        # 피처가 몰린 쪽으로 주축이 끌려가 스캔 마스크와 기준이 달라진다.
+        rough, _lo, _s = _rasterize(flat, faces, FIT_GRID)
+        rys, rxs = np.nonzero(_hull(rough) > 0)
+        base = 0.0
+        if len(rxs):
+            base = mask_angle - _principal_angle(
+                rxs.astype(float), rys.astype(float))
+        got = evaluate(flat, base, axis, sign, flip_u, flip_v)
+        if got is None:
+            return None
+        return (got[0], flat, base, axis, sign, flip_u, flip_v, got[1])
+
+    combos = [
+        result for result in parallel_map(inspect_orientation, orientation_specs)
+        if result is not None
+    ]
 
     if not combos:
         raise ValueError("CAD 실루엣을 스캔에 맞추지 못했습니다.")
@@ -402,14 +443,23 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
     # ── 2차: 위 몇 개만 각도 둘레를 훑는다 ───────────────────
     found: list = [(item[0], item[7]) for item in combos]
     steps = int(FIT_ANGLE_SPAN / FIT_ANGLE_STEP)
-    for _key, flat, base, axis, sign, flip_u, flip_v, _fit in             combos[:FIT_REFINE_TOP]:
-        for k in range(-steps, steps + 1):
-            if k == 0:
-                continue
-            got = evaluate(flat, base + np.deg2rad(FIT_ANGLE_STEP * k),
-                           axis, sign, flip_u, flip_v)
-            if got is not None:
-                found.append(got)
+    angle_specs = [
+        (flat, base, axis, sign, flip_u, flip_v, k)
+        for _key, flat, base, axis, sign, flip_u, flip_v, _fit
+        in combos[:FIT_REFINE_TOP]
+        for k in range(-steps, steps + 1)
+        if k != 0
+    ]
+
+    def inspect_angle(spec):
+        flat, base, axis, sign, flip_u, flip_v, k = spec
+        return evaluate(flat, base + np.deg2rad(FIT_ANGLE_STEP * k),
+                        axis, sign, flip_u, flip_v)
+
+    found.extend(
+        result for result in parallel_map(inspect_angle, angle_specs)
+        if result is not None
+    )
 
     found.sort(key=lambda item: item[0], reverse=True)
 
@@ -426,21 +476,26 @@ def fit_view(vertices: np.ndarray, faces: np.ndarray, part_mask,
         base_scale = (FIT_GRID - 1) / np.maximum(
             projected.max(axis=0) - base_lo, 1e-9).max()
         def scan_around(scales, shifts_x, shifts_y):
-            here = []
-            for factor in scales:
-                for dx in shifts_x:
-                    for dy in shifts_y:
-                        (detail, hull, f2, mm_per_px,
-                         origin_u, origin_v) = place(
-                            projected, base_lo, base_scale, factor, dx, dy)
-                        moved = ViewFit(
-                            axis=fit.axis, sign=fit.sign, flip_u=fit.flip_u,
-                            flip_v=fit.flip_v, swap=False, angle=fit.angle,
-                            mm_per_px=float(mm_per_px),
-                            origin_u=float(origin_u), origin_v=float(origin_v),
-                            iou=round(hull, 4), detail_iou=round(detail, 4))
-                        tie = f2 if FIT_PLACE_SCORE == 'f2' else detail
-                        here.append((hull, tie, moved, factor, dx, dy))
+            placement_specs = [
+                (factor, dx, dy)
+                for factor in scales for dx in shifts_x for dy in shifts_y
+            ]
+
+            def inspect_place(spec):
+                factor, dx, dy = spec
+                (detail, hull, f2, mm_per_px,
+                 origin_u, origin_v) = place(
+                    projected, base_lo, base_scale, factor, dx, dy)
+                moved = ViewFit(
+                    axis=fit.axis, sign=fit.sign, flip_u=fit.flip_u,
+                    flip_v=fit.flip_v, swap=False, angle=fit.angle,
+                    mm_per_px=float(mm_per_px),
+                    origin_u=float(origin_u), origin_v=float(origin_v),
+                    iou=round(hull, 4), detail_iou=round(detail, 4))
+                tie = f2 if FIT_PLACE_SCORE == 'f2' else detail
+                return (hull, tie, moved, factor, dx, dy)
+
+            here = parallel_map(inspect_place, placement_specs)
             # 껍질 겹침이 **가장 좋은 것과 비슷한** 것들만 남기고, 그
             # 안에서 F2 로 고른다.
             #
