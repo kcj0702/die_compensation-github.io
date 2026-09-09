@@ -486,6 +486,19 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   const addHide = (shape: CadRegion['shape']) => setHideByCad((current) => ({
     ...current, [tintKey]: [...(current[tintKey] ?? []), shape],
   }));
+
+  /* 도구는 한 번에 하나만 켠다.
+     버튼마다 "나 말고 무엇을 끌지" 를 따로 적어 뒀더니 서로 어긋났다 —
+     공정 구역 버튼이 가리기를 안 꺼서, 가리기를 한 번 쓰면 그 뒤로 그리는
+     것이 전부 가림으로 가고 구역은 만들어지지 않았다. 한 곳에서 정한다. */
+  const pickTool = (want: 'none' | 'measure' | 'note' | 'zone' | 'hide') => {
+    setMeasuring(want === 'measure');
+    setNoting(want === 'note');
+    setZoning(want === 'zone');
+    setHiding(want === 'hide');
+    if (want !== 'measure') setMeasure(null);
+    if (want !== 'note') setNoteDraft(null);
+  };
   const setPartTint = (tone: string | null) => setTintByCad((current) => {
     if (tone === null) {
       const next = { ...current };
@@ -686,13 +699,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         const u = new THREE.Vector3(...shape.u);
         const v = new THREE.Vector3(...shape.v);
         const middle = new THREE.Vector3(...shape.center);
-        const normal = new THREE.Vector3().crossVectors(u, v).normalize();
-        // 판금은 앞뒤 껍질이 붙어 있다. 두께 방향으로 넉넉히 잡아야
-        // 가린 자리에서 반대쪽 살이 비쳐 보이지 않는다.
-        const deep = Math.max(shape.hu, shape.hv);
+        /* 그린 도형을 **끝까지 뚫는다.**
+         *
+         * 처음에는 도형 크기만큼만 두께를 잡았는데, 작게 그리면 얇은 층만
+         * 지워져 아무 일도 안 일어난 것처럼 보였다. 가리기는 "이 자리는
+         * 안 보이게 해 달라" 는 뜻이므로, 화면에서 그 도형에 가리는 것은
+         * 앞이든 뒤든 다 걷어 낸다 — 쿠키 커터처럼 관통시킨다. */
         return (p: THREE.Vector3) => {
           const d = p.clone().sub(middle);
-          if (Math.abs(d.dot(normal)) > deep) return false;
           const du = d.dot(u), dv = d.dot(v);
           if (shape.kind === 'rect') {
             return Math.abs(du) <= shape.hu && Math.abs(dv) <= shape.hv;
@@ -2538,12 +2552,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           화면에서만 안 그리는 것이라 언제든 되돌릴 수 있다. */}
       <button type="button" className={hiding ? 'is-on' : undefined}
         title="보고 싶지 않은 자리를 네모·동그라미로 훑어 감춥니다 (형상은 그대로)"
-        onClick={() => {
-          setHiding((v) => {
-            if (!v) { setZoning(false); setMeasuring(false); setNoting(false); }
-            return !v;
-          });
-        }}>
+        onClick={() => pickTool(hiding ? 'none' : 'hide')}>
         가리기 {hides.length ? hides.length : ''}
       </button>
       {hides.length > 0 && (
@@ -2702,16 +2711,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         )}
       </span>}
       <button type="button" className={measuring ? 'is-on' : ''}
-        onClick={() => { setMeasuring((v) => !v); setMeasure(null); setNoting(false); }}>
+        onClick={() => pickTool(measuring ? 'none' : 'measure')}>
         측정
       </button>
       <button type="button" className={noting ? 'is-on' : ''}
-        onClick={() => { setNoting((v) => !v); setNoteDraft(null);
-                         setMeasuring(false); setZoning(false); }}>
+        onClick={() => pickTool(noting ? 'none' : 'note')}>
         주석 {notes?.length ? notes.length : ''}
       </button>
       {onRegionsChange && <button type="button" className={zoning ? 'is-on' : ''}
-        onClick={() => { setZoning((v) => !v); setMeasuring(false); setNoting(false); }}>
+        onClick={() => pickTool(zoning ? 'none' : 'zone')}>
         공정 구역 {regions?.length ? regions.length : ''}
       </button>}
       {paintNote && <span className="cad-viewer__stat">{paintNote}</span>}
