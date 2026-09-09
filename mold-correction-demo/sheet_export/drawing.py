@@ -37,7 +37,7 @@ def emu(pixels: float) -> int:
 
 def _text_box_body(
     shape_id: int, text: str, x: float, y: float, width: float, height: float,
-    font_family: str | None = None,
+    font_family: str | None = None, text_color: str | None = None,
 ) -> str:
     """Bordered white text box body. `txBox="1"` is what makes Excel treat it
     as editable text on double-click.
@@ -47,11 +47,19 @@ def _text_box_body(
     is on. Excel treats a shape without `<a:spLocks>` as locked by default
     once protection is enabled, so writing every attribute as ``0`` is what
     turns the label into an exception.
+
+    ``text_color`` mirrors the on-screen +/- coloring (measure-point__label
+    --plus/--minus in globals.css) so a value's sign reads the same way in
+    the exported sheet.
     """
     typeface = escape(font_family) if font_family else ""
     font_xml = (
         f'<a:latin typeface="{typeface}"/><a:ea typeface="{typeface}"/>'
         if typeface else ""
+    )
+    fill_xml = (
+        f'<a:solidFill><a:srgbClr val="{text_color}"/></a:solidFill>'
+        if text_color else ""
     )
     return (
         f'<sp macro="" textlink="">'
@@ -73,7 +81,7 @@ def _text_box_body(
         f'<a:bodyPr vertOverflow="clip" horzOverflow="clip" wrap="none"'
         f' lIns="9000" tIns="4500" rIns="9000" bIns="4500" anchor="ctr"/>'
         f'<a:lstStyle/><a:p><a:pPr algn="ctr"/>'
-        f'<a:r><a:rPr lang="ko-KR" sz="{config.LABEL_FONT_SIZE}" b="1">{font_xml}</a:rPr>'
+        f'<a:r><a:rPr lang="ko-KR" sz="{config.LABEL_FONT_SIZE}" b="1">{fill_xml}{font_xml}</a:rPr>'
         f'<a:t>{escape(text)}</a:t></a:r></a:p>'
         f'</txBody></sp>'
     )
@@ -160,7 +168,7 @@ def _dot_body(shape_id: int, cx: float, cy: float, radius: float) -> str:
 def text_box(
     shape_id: int, text: str, x: float, y: float,
     width: float | None = None, height: float | None = None,
-    font_family: str | None = None,
+    font_family: str | None = None, text_color: str | None = None,
 ) -> str:
     """Standalone text box anchor for a label.
 
@@ -170,7 +178,7 @@ def text_box(
     """
     width = config.LABEL_WIDTH if width is None else width
     height = config.LABEL_HEIGHT if height is None else height
-    body = _text_box_body(shape_id, text, x, y, width, height, font_family)
+    body = _text_box_body(shape_id, text, x, y, width, height, font_family, text_color)
     return (
         f'<absoluteAnchor>'
         f'<pos x="{emu(x)}" y="{emu(y)}"/>'
@@ -213,6 +221,71 @@ def dot(shape_id: int, cx: float, cy: float, radius: float) -> str:
         f'<absoluteAnchor>'
         f'<pos x="{emu(x)}" y="{emu(y)}"/>'
         f'<ext cx="{emu(diameter)}" cy="{emu(diameter)}"/>'
+        f'{body}<clientData/></absoluteAnchor>'
+    )
+
+
+def _polyline_body(
+    shape_id: int, points: list[tuple[float, float]],
+    left: float, top: float, width: float, height: float,
+    color: str, line_width_px: float,
+) -> str:
+    """Open freeform curve body: a real vector shape, not a raster line.
+
+    ``<a:path>``'s own ``w``/``h`` define its local coordinate space, and
+    every ``<a:pt>`` is relative to the shape's own origin -- not the sheet's
+    absolute EMU -- so points are re-based against ``left``/``top`` here.
+    """
+    path_w, path_h = max(emu(width), 1), max(emu(height), 1)
+    local = [(emu(px) - emu(left), emu(py) - emu(top)) for px, py in points]
+    move_x, move_y = local[0]
+    segments = "".join(
+        f'<a:lnTo><a:pt x="{x}" y="{y}"/></a:lnTo>' for x, y in local[1:]
+    )
+    return (
+        f'<sp macro="" textlink="">'
+        f'<nvSpPr><cNvPr id="{shape_id}" name="ZeroLine {shape_id}"/>'
+        f'<cNvSpPr/></nvSpPr>'
+        f'<spPr>'
+        f'<a:xfrm><a:off x="{emu(left)}" y="{emu(top)}"/>'
+        f'<a:ext cx="{path_w}" cy="{path_h}"/></a:xfrm>'
+        f'<a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/>'
+        f'<a:rect l="0" t="0" r="0" b="0"/>'
+        f'<a:pathLst><a:path w="{path_w}" h="{path_h}">'
+        f'<a:moveTo><a:pt x="{move_x}" y="{move_y}"/></a:moveTo>'
+        f'{segments}'
+        f'</a:path></a:pathLst></a:custGeom>'
+        f'<a:noFill/>'
+        f'<a:ln w="{emu(line_width_px)}" cap="rnd">'
+        f'<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>'
+        f'<a:round/></a:ln>'
+        f'</spPr></sp>'
+    )
+
+
+def zero_line(
+    shape_id: int, points: list[tuple[float, float]],
+    color: str, line_width_px: float,
+) -> str:
+    """Standalone anchor for one zero-line polyline.
+
+    A zero-line has no value to edit, only a reference curve to show, so
+    unlike the point callouts it needs no label/leader -- just geometry and a
+    stroke. Emitted as its own shape (not burned into the picture) so Excel
+    lets the operator select or delete it independently of the part image.
+    """
+    if len(points) < 2:
+        return ""
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    left, top = min(xs), min(ys)
+    width = max(max(xs) - left, 1.0)
+    height = max(max(ys) - top, 1.0)
+    body = _polyline_body(shape_id, points, left, top, width, height, color, line_width_px)
+    return (
+        f'<absoluteAnchor>'
+        f'<pos x="{emu(left)}" y="{emu(top)}"/>'
+        f'<ext cx="{emu(width)}" cy="{emu(height)}"/>'
         f'{body}<clientData/></absoluteAnchor>'
     )
 
