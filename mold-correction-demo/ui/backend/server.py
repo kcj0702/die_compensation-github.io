@@ -1058,6 +1058,18 @@ def _mesh_not_found_message(part_number: str | None) -> str:
     return " · ".join(lines)
 
 
+# 아래 CATIA 캡처 후보(sign x swap) 점수 대결이 부품에 따라 아주 근소한
+# 차이(1% 미만)로 갈릴 때가 있다 — 67XX6-DR000 실측: 세로(swap=True)
+# 4.7776 vs 가로(swap=False) 4.7045, 그 차이가 실루엣 노이즈 수준이라 스캔을
+# 다시 올릴 때마다(재분석) 어느 쪽이 이길지 뒤집힐 수 있다. 점수 계산
+# 자체를 바꾸면 이미 잘 맞는 다른 부품(64XX2 등)까지 흔들릴 위험이 있어,
+# 근소한 차이로 자꾸 뒤집히는 게 확인된 품번만 여기서 방향을 고정한다.
+# 키는 mesh 라이브러리가 실제로 매칭한 품번(match_name) 기준.
+MESH_CAPTURE_POSE_OVERRIDES: dict[str, tuple[int, bool]] = {
+    "67XX6-DR000": (1, False),  # 가로로 고정 — 세로(swap=True)와 근소해서 재분석마다 뒤집혔음
+}
+
+
 def _resolve_product_from_mesh(
     part_number: str | None, scan_image: np.ndarray,
 ) -> tuple[np.ndarray, str, list[str]] | None:
@@ -1273,7 +1285,24 @@ def _resolve_product_from_mesh(
         warnings.append(f"CATIA 캡처에 실패했습니다: {reason}")
         return None
     rendered_candidates.sort(key=lambda item: item[0], reverse=True)
-    _, rendered, chosen_sign, chosen_swap = rendered_candidates[0]
+    override = MESH_CAPTURE_POSE_OVERRIDES.get(match_name)
+    overridden_candidate = next(
+        (
+            item for item in rendered_candidates
+            if override is not None and (item[2], item[3]) == override
+        ),
+        None,
+    ) if override is not None else None
+    if overridden_candidate is not None:
+        _, rendered, chosen_sign, chosen_swap = overridden_candidate
+        _log(
+            f"catia capture pose override applied for {match_name}: "
+            f"forcing sign={chosen_sign} swap={chosen_swap} "
+            f"(auto-picked would have been sign={rendered_candidates[0][2]} "
+            f"swap={rendered_candidates[0][3]})"
+        )
+    else:
+        _, rendered, chosen_sign, chosen_swap = rendered_candidates[0]
     _log(
         f"catia capture selected in {_time.time()-step_t0:.1f}s "
         f"axis={fit.axis} sign={chosen_sign} swap={chosen_swap} shape={rendered.shape}"
