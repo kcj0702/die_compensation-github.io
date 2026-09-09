@@ -2172,49 +2172,54 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
   const [tool, setTool] = useState<AnnotationTool>('select'); const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null); const [showAnnotations, setShowAnnotations] = useState(true); const [detailMode, setDetailMode] = useState(false); const [labelAreaMode, setLabelAreaMode] = useState<'hide' | 'show' | null>(null);
   /* 엑셀 내보내기가 실제 UI 배치(정면도·디테일 뷰의 캔버스 % 좌표)를
      알아야 주석·창 위치를 시트에 그대로 옮길 수 있다. SheetCanvas 안에
-     있는 layouts 상태를 콜백으로 위로 끌어올린다. */
-  const [sheetLayouts, setSheetLayouts] = useState<SheetLayout[]>([]);
+     있는 layouts 상태를 콜백으로 위로 끌어올린다.
+
+     scan.id 로 갈라 두는 이유: "다른 파트로 바뀌면 이전 배치를 지운다"를
+     "바뀌는 순간 useState 를 {} 로 리셋"하는 방식으로 짰다가 실제로
+     라벨이 새로 마운트된 SheetCanvas 로 넘어가는 걸 fiber 단위로 추적해
+     보니, 리렌더 타이밍상 새로 마운트되는 자식이 리셋 *전* 값을 초기
+     시드로 붙잡아 버리고, 그 자식의 lift-up 이펙트가 그 옛 값을 다시
+     부모로 밀어 올려 리셋을 덮어써 버렸다(React 의 "prop 변경 시 렌더링
+     중 setState" 패턴은 이 중첩 key-리마운트 상황에서 보장되지 않았다).
+     리셋 타이밍에 의존하는 대신, 애초에 파트별로 갈라 저장하면 다른
+     파트의 값이 존재할 수 없어 새는 경로 자체가 없다. */
+  const [sheetLayoutsByScan, setSheetLayoutsByScan] = useState<Record<string, SheetLayout[]>>({});
+  const sheetLayouts = sheetLayoutsByScan[scan.id] ?? [];
+  const setSheetLayouts = useCallback((next: SheetLayout[]) => {
+    setSheetLayoutsByScan((current) => ({ ...current, [scan.id]: next }));
+  }, [scan.id]);
   /* 엔진 결과는 그대로 두고 작업자가 찍은 포인트만 따로 얹는다. */
   const [addedPoints, setAddedPoints] = useState<PointResult[]>([]);
   const addedPointSequenceRef = useRef(0);
   const [addPointMode, setAddPointMode] = useState(false);
   const [sampling, setSampling] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
-  /* 엑셀 내보내기 */
-  const [detailRegions, setDetailRegions] = useState<DetailRegion[]>([]);
+  /* 엑셀 내보내기. sheetLayouts 와 같은 이유로 scan.id 로 갈라 저장한다. */
+  const [detailRegionsByScan, setDetailRegionsByScan] = useState<Record<string, DetailRegion[]>>({});
+  const detailRegions = detailRegionsByScan[scan.id] ?? [];
+  const setDetailRegions = useCallback((next: DetailRegion[]) => {
+    setDetailRegionsByScan((current) => ({ ...current, [scan.id]: next }));
+  }, [scan.id]);
   /* 각 레이아웃(정면도 + Detail들)이 화면에 실제로 그린 라벨 위치. 레이어
      대비 0~100% 로, point.x/y 와 같은 규칙이라 엑셀 쪽이 그대로 쓸 수 있다.
-     레이아웃 id 로 갈라 두는 이유: Detail 뷰마다 라벨 배치가 서로 다르다. */
-  const [labelPositionsByLayout, setLabelPositionsByLayout] = useState<Record<string, Record<string, { x: number; y: number }>>>({});
-  /* 다른 파트(스캔)로 바뀌면 이전 파트의 뷰 배치·Detail 영역·라벨 위치는
-     더 이상 의미가 없다. scan.id 가 바뀌면 SheetCanvas 의 key 도 같이
-     바뀌어 통째로 재마운트되는데, useEffect 로 이 값들을 비우면 커밋(=재
-     마운트)이 먼저 끝난 뒤에야 비워진다 -- 새로 마운트되는 SheetCanvas 의
-     useState(() => initialLayouts ?? []) 같은 "최초 1회" 시드가 바로 그
-     찰나에 옛 파트 값을 붙잡아 버려서, 그 뒤에 부모 state 를 비워도
-     SheetCanvas 내부 상태는 그대로 남아 있었다(문제 재발 원인). 렌더링
-     중에 바로 setState 하면(React 공식 "Adjusting state when a prop
-     changes" 패턴) 커밋 전에 다시 렌더링되므로, SheetCanvas 가 실제로
-     마운트되는 시점엔 이미 빈 값이 내려간다. */
-  const [lastSheetScanId, setLastSheetScanId] = useState(scan.id);
-  if (scan.id !== lastSheetScanId) {
-    setLastSheetScanId(scan.id);
-    setSheetLayouts([]);
-    setDetailRegions([]);
-    setLabelPositionsByLayout({});
-  }
+     레이아웃 id 로 한 번, scan.id 로 한 번 더 갈라 둔다 -- Detail 뷰마다
+     라벨 배치가 다르고(레이아웃 id), 다른 파트의 라벨 위치가 존재할 수도
+     없어야 한다(scan.id, 위 sheetLayouts 주석 참고). */
+  const [labelPositionsByScan, setLabelPositionsByScan] = useState<Record<string, Record<string, Record<string, { x: number; y: number }>>>>({});
+  const labelPositionsByLayout = labelPositionsByScan[scan.id] ?? {};
   const handleLabelPositionsChange = useCallback((layoutId: string, positions: Record<string, { x: number; y: number }>) => {
-    setLabelPositionsByLayout((current) => {
+    setLabelPositionsByScan((current) => {
+      const currentForScan = current[scan.id] ?? {};
       /* CorrectionPoints 는 매번 새 객체를 만들어 올리므로 참조 비교로는
          항상 "달라짐" 이 된다. 값까지 같으면 그대로 두어야, 이 setState 가
          부모를 리렌더 -> 자식 리렌더 -> 다시 새 객체로 이어지는 루프의
          꼬리를 확실히 끊는다(콜백 참조는 이미 위에서 고정해 뒀지만, 그와
          별개로 여기서도 막아 둔다). */
-      const previous = current[layoutId];
+      const previous = currentForScan[layoutId];
       if (previous && JSON.stringify(previous) === JSON.stringify(positions)) return current;
-      return { ...current, [layoutId]: positions };
+      return { ...current, [scan.id]: { ...currentForScan, [layoutId]: positions } };
     });
-  }, []);
+  }, [scan.id]);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   const removeAddedPoint = (id: string) => setAddedPoints((current) => current.filter((item) => item.id !== id));
