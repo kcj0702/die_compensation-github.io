@@ -715,29 +715,56 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      * 센다. 원래 순서를 지키며 걸러 내므로 구간은 여전히 이어진 토막이다.
      * 형상 자체는 손대지 않는다 — 목록을 비우면 그대로 돌아온다. */
     const drop = hidesRef.current.filter(Boolean) as NonNullable<CadRegion['shape']>[];
+    const cover = drop.map((shape) => {
+      const u = new THREE.Vector3(...shape.u);
+      const v = new THREE.Vector3(...shape.v);
+      const middle = new THREE.Vector3(...shape.center);
+      /* 그린 도형을 **끝까지 뚫는다.**
+       *
+       * 처음에는 도형 크기만큼만 두께를 잡았는데, 작게 그리면 얇은 층만
+       * 지워져 아무 일도 안 일어난 것처럼 보였다. 가리기는 "이 자리는
+       * 안 보이게 해 달라" 는 뜻이므로, 화면에서 그 도형에 가리는 것은
+       * 앞이든 뒤든 다 걷어 낸다 — 쿠키 커터처럼 관통시킨다. */
+      return (x: number, y: number, z: number) => {
+        const dx = x - middle.x, dy = y - middle.y, dz = z - middle.z;
+        const du = dx * u.x + dy * u.y + dz * u.z;
+        const dv = dx * v.x + dy * v.y + dz * v.z;
+        if (shape.kind === 'rect') {
+          return Math.abs(du) <= shape.hu && Math.abs(dv) <= shape.hv;
+        }
+        const nu = du / (shape.hu || 1), nv = dv / (shape.hv || 1);
+        return nu * nu + nv * nv <= 1;
+      };
+    });
+
+    /* 형상만 지우면 **그 자리에 선과 숫자만 허공에 뜬다.**
+     *
+     * 처음에는 삼각형만 걷어 냈다. 그랬더니 가린 자리에 제로라인 빨간
+     * 선, 보정량 콜아웃(점·지시선·노란 상자), 홀 표시가 그대로 남아
+     * 부품 없는 허공에 떠 있었다. 가리기는 "이 자리를 안 보이게" 라는
+     * 뜻이므로 얹힌 것도 같이 걷는다. */
+    const inHidden = (x: number, y: number, z: number) =>
+      cover.some((inside) => inside(x, y, z));
+    const hiddenAt = (v: THREE.Vector3) => inHidden(v.x, v.y, v.z);
+    /** 선이 가린 자리를 지나면 그 구간만 끊고 남은 토막들을 준다.
+     *  통째로 버리면 부품 한쪽만 가려도 제로라인 전체가 사라진다. */
+    const showable = (run: [number, number, number][]) => {
+      if (!cover.length) return run.length >= 2 ? [run] : [];
+      const pieces: [number, number, number][][] = [];
+      let piece: [number, number, number][] = [];
+      for (const at of run) {
+        if (inHidden(at[0], at[1], at[2])) {
+          if (piece.length >= 2) pieces.push(piece);
+          piece = [];
+        } else piece.push(at);
+      }
+      if (piece.length >= 2) pieces.push(piece);
+      return pieces;
+    };
+
     let keptIndices = mesh.indices;
     let keptGroups = mesh.colourGroups ?? [];
     if (drop.length) {
-      const cover = drop.map((shape) => {
-        const u = new THREE.Vector3(...shape.u);
-        const v = new THREE.Vector3(...shape.v);
-        const middle = new THREE.Vector3(...shape.center);
-        /* 그린 도형을 **끝까지 뚫는다.**
-         *
-         * 처음에는 도형 크기만큼만 두께를 잡았는데, 작게 그리면 얇은 층만
-         * 지워져 아무 일도 안 일어난 것처럼 보였다. 가리기는 "이 자리는
-         * 안 보이게 해 달라" 는 뜻이므로, 화면에서 그 도형에 가리는 것은
-         * 앞이든 뒤든 다 걷어 낸다 — 쿠키 커터처럼 관통시킨다. */
-        return (p: THREE.Vector3) => {
-          const d = p.clone().sub(middle);
-          const du = d.dot(u), dv = d.dot(v);
-          if (shape.kind === 'rect') {
-            return Math.abs(du) <= shape.hu && Math.abs(dv) <= shape.hv;
-          }
-          const nu = du / (shape.hu || 1), nv = dv / (shape.hv || 1);
-          return nu * nu + nv * nv <= 1;
-        };
-      });
       const spot = new THREE.Vector3();
       const middleOf = (a: number, b: number, c: number) => spot.set(
         (mesh.positions[a * 3] + mesh.positions[b * 3] + mesh.positions[c * 3]) / 3,
@@ -752,7 +779,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const bandRun: number[] = [];
       for (let t = 0; t < mesh.indices.length / 3; t += 1) {
         const a = mesh.indices[t * 3], b = mesh.indices[t * 3 + 1], c = mesh.indices[t * 3 + 2];
-        if (cover.some((inside) => inside(middleOf(a, b, c)))) continue;
+        if (hiddenAt(middleOf(a, b, c))) continue;
         keep.push(a, b, c);
         bandRun.push(bandOf[t]);
       }
@@ -990,6 +1017,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const pinLength = radius * 0.16;
     const holeMaterial = new THREE.MeshBasicMaterial({ color: HOLE_TINT });
     for (const hole of holes) {
+      // 가린 자리의 홀은 아예 안 만든다. 형상이 없는데 주황 링만 떠 있으면
+      // 그 자리에 홀이 있는 것처럼 읽힌다.
+      if (hiddenAt(new THREE.Vector3(...hole.center))) continue;
       const r = Math.max(hole.radius, radius * 0.0015);
       const tube = Math.max(r * 0.18, radius * 0.0022);
 
@@ -1069,7 +1099,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         // 빈 공간을 지나는 구간은 점선으로. 부품이 없는 자리라 실선으로
         // 그리면 거짓이 된다 — 받은 파이프라인은 구멍을 지나갈 수 있게
         // 돼 있어서 링 부품(선루프)에서 실제로 빈 데를 가로지른다.
-        for (const gap of line.gaps ?? []) {
+        for (const gap of (line.gaps ?? []).flatMap(showable)) {
           if (gap.length < 2) continue;
           const dashed = new THREE.Line(
             new THREE.BufferGeometry().setFromPoints(
@@ -1084,8 +1114,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         }
 
         // 표면에 얹힌 구간만 실선(관)으로 그린다
-        const runs = line.runs?.length
-          ? line.runs : (line.points?.length ? [line.points] : []);
+        const runs = (line.runs?.length
+          ? line.runs : (line.points?.length ? [line.points] : []))
+          .flatMap(showable);
         for (const run of runs) {
         const pts = run.map(([x, y, z]) => new THREE.Vector3(x, y, z));
         if (pts.length < 2) continue;
@@ -1142,6 +1173,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         }
         if (seen) {
           seat.divideScalar(seen);
+        }
+        if (seen && !hiddenAt(seat)) {
           const tag = makeZoneLabel('제로라인 (영역)', radius * 0.04);
           tag.position.copy(seat).add(new THREE.Vector3(0, 0, radius * 0.06));
           tag.renderOrder = 15;
@@ -1153,7 +1186,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 삼각형을 따라 들쭉날쭉하므로, 그 위에 반듯한 테두리를 덧그려야
       // 어디까지가 그 영역인지 읽힌다. 시트도 영역을 네모로 표기한다.
       for (const area of overlay.zeroAreas ?? []) {
-        for (const run of area.runs ?? []) {
+        for (const run of (area.runs ?? []).flatMap(showable)) {
           const pts = run.map(([x, y, z]) => new THREE.Vector3(x, y, z));
           if (pts.length < 2) continue;
           const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.0);
@@ -1179,7 +1212,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         }
         // 테두리가 부품 밖(구멍·개구부)을 지나는 구간은 점선이다 —
         // 제로라인과 같은 규칙으로 사실대로 보인다.
-        for (const gap of area.gaps ?? []) {
+        for (const gap of (area.gaps ?? []).flatMap(showable)) {
           if (gap.length < 2) continue;
           const dashed = new THREE.Line(
             new THREE.BufferGeometry().setFromPoints(
@@ -1252,7 +1285,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const spots = shown.map(({ point, correction }) => {
         const origin = new THREE.Vector3(...point.position);
         return { origin, correction, pointId: point.id, plane: flat(origin) };
-      });
+      // 콜아웃은 점 하나에 지시선과 숫자 상자가 딸린 한 덩이다. 점이 가린
+      // 자리면 셋을 함께 뺀다 — 숫자만 남으면 어디를 가리키는지 알 수 없다.
+      }).filter((spot) => !hiddenAt(spot.origin));
       const middle = spots.reduce(
         (sum, s) => sum.add(s.plane), new THREE.Vector2()).divideScalar(
           Math.max(spots.length, 1));
@@ -1339,7 +1374,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const tint = new THREE.LineBasicMaterial({
         color: SECTION_TINT, depthTest: false });
       for (const section of sections) {
-        for (const poly of section.polylines) {
+        for (const poly of section.polylines.flatMap(showable)) {
           if (poly.length < 2) continue;
           const line = new THREE.Line(
             new THREE.BufferGeometry().setFromPoints(
@@ -3055,17 +3090,14 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         스캔 위의 점 중 {Math.round((overlay.fit.hit_rate ?? 0) * 100)}% 만
         형상에 얹혔습니다 (기준 60%). 제로라인·보정량을 그리지
         않았습니다 — 틀린 자리에 그리는 것보다 안 그리는 쪽을 택했습니다.
-        {/* 단면 표기는 스캔 정합을 고치는 방법이 아니다. 스캔을 아예
-            쓰지 않고 CAD 를 시트가 적어 준 숫자로 잘라 제로라인을
-            얻는, **따로 가는 길**이다. 그래서 얹힘 비율과 무관하게
-            정확하다 — 여기서 그 점을 분명히 말해 둔다. */}
+        {/* 예전에는 여기서 "시트 단면 표기로 계산하세요" 라고 일러 줬는데,
+            그 입력 줄을 화면에서 뺐다. 없는 것을 가리키면 거짓말이 되므로
+            사실만 남긴다. */}
         {sections?.length
-          ? <> 아래 <b>시트 단면 표기</b>로 그린 제로라인
-              {' '}{sections.length}개는 스캔 정합과 무관하게 맞습니다 —
-              시트가 적어 준 값으로 CAD 를 직접 자른 것이라 추정이 없습니다.</>
-          : <> 이 부품은 <b>시트 단면 표기</b>(H·T 값)로 제로라인을 계산하세요.
-              스캔을 쓰지 않고 CAD 를 그 값으로 직접 자르는 별개의 방법이라,
-              얹힘 비율이 낮아도 결과는 정확합니다.</>}
+          ? <> 아래 <b>시트 단면</b>으로 그린 제로라인 {sections.length}개는
+              스캔 정합과 무관하게 맞습니다 — 시트가 적어 준 값으로 CAD 를
+              직접 자른 것이라 추정이 없습니다.</>
+          : null}
       </p>
     )}
   </>;

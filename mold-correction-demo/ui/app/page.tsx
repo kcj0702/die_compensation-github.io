@@ -12,7 +12,7 @@ import {
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
-import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
+import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -2772,22 +2772,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
   const [morphBusy, setMorphBusy] = useState(false);
   const [morphError, setMorphError] = useState<string | null>(null);
-  const [sections, setSections] = useState<CadSection[] | null>(null);
-  const [sectionNotes, setSectionNotes] = useState('');
-  const [sectionSide, setSectionSide] = useState('both');
-  const [sectionBusy, setSectionBusy] = useState(false);
-  const [sectionError, setSectionError] = useState<string | null>(null);
   /* 시트에 담아둔 3D 화면들. 어느 시점에서 찍었는지 함께 들고 있는다 —
      엑셀 쪽마다 그 이름을 적어 두지 않으면 나중에 보는 사람이 방향을
      못 가린다. 고유 열쇠는 앞 장을 지울 때 뒤 장이 다시 그려지지 않게 한다. */
   const [shots, setShots] = useState<
     { id: string; url: string; label: string }[]>([]);
-  /* 검사 원본(PolyWorks 워크스페이스) 경로.
-     파일을 올리게 하지 않는다 — 실측 워크스페이스가 1.9GB 고 폴더가
-     통째로 딸려 있어 브라우저로 올릴 물건이 아니다. 어차피 이 PC 안에서만
-     도는 게 전제라 경로를 받아 백엔드가 직접 읽는다. */
-  const [workPath, setWorkPath] = useState('');
-  const [workState, setWorkState] = useState<'idle' | 'reading'>('idle');
   const [sheetBusy, setSheetBusy] = useState(false);
   const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
   const [showAlign, setShowAlign] = useState(false);
@@ -3061,30 +3050,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     URL.revokeObjectURL(url);
   };
 
-  /* 검사 원본에서 보정 포인트를 그대로 가져온다.
-     PNG 를 읽어 값을 알아내고 실루엣으로 얹는 길과 달리 추정이 하나도
-     없다 — 워크스페이스에 부품 좌표로 들어 있는 것을 그대로 쓴다. */
-  const openWorkspace = async () => {
-    const cadId = selected?.mesh.cadId;
-    if (!cadId || !workPath.trim()) return;
-    setWorkState('reading');
-    try {
-      const response = await fetch(`${API_BASE}/api/scan-workspace`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cadId, path: workPath.trim() }),
-      });
-      const data = await response.json() as CadOverlay & { error?: string };
-      if (!response.ok || data.error) {
-        throw new Error(data.error || '검사 원본을 읽지 못했습니다.');
-      }
-      setOverlay(data);
-    } catch (err) {
-      setOverlayError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setWorkState('idle');
-    }
-  };
-
   const makeCadSheet = async () => {
     if (!overlayScan?.result?.analysisId || !sheetValues) return;
     setSheetBusy(true); setOverlayError(null);
@@ -3118,28 +3083,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     finally { setSheetBusy(false); }
   };
 
-  const requestSections = async () => {
-    const cadId = selected?.mesh.cadId;
-    if (!cadId) return;
-    setSectionBusy(true); setSectionError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/cad-sections`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cadId, notes: sectionNotes, side: sectionSide }),
-      });
-      const data = await response.json() as { sections?: CadSection[]; error?: string };
-      if (!response.ok) throw new Error(data.error || '단면 제로라인을 계산하지 못했습니다.');
-      setSections(data.sections || []);
-    } catch (err) { setSectionError(String((err as Error).message || err)); }
-    finally { setSectionBusy(false); }
-  };
-
   useEffect(() => {
     if (!selected) return;
     setOverlay(null);
     setOverlayError(null);
     setMorph(null); setMorphMode('off'); setMorphError(null);
-    setSections(null); setSectionError(null);
     if (selected.mesh.summary.source_format === 'morph') {
       setOverlayScanId('');
       return;
@@ -3230,30 +3178,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         <label>배율 <input type="number" min="0.5" max="1.5" step="0.005" value={adjust.scale} onChange={(event) => nudge({ scale: Number(event.target.value) })} /></label>
         <button type="button" className="tool-button" onClick={() => nudge(NO_ADJUST)}>자동값 복원</button>
       </div>}
-      {/* 검사 원본(PolyWorks)에서 보정 포인트를 그대로 가져온다.
-          판독도 정합도 하지 않는다 — 부품 좌표가 이미 들어 있다. */}
-      <div className="cad-overlay-bar">
-        <label htmlFor="cad-workspace">검사 원본 (.pwk)</label>
-        <input id="cad-workspace" type="text" value={workPath}
-          placeholder="예: C:\\Users\\...\\3D스캔 AX과제.pwk"
-          onChange={(event) => setWorkPath(event.target.value)}
-          onKeyDown={(event) => { if (event.key === 'Enter') void openWorkspace(); }} />
-        <button type="button" className="tool-button" onClick={() => void openWorkspace()}
-          disabled={workState === 'reading' || !workPath.trim()}>
-          {workState === 'reading' ? '읽는 중…' : '포인트 가져오기'}
-        </button>
-        {overlay?.source === 'workspace' && (
-          <span className="cad-overlay-bar__note">
-            포인트 {overlay.points.length}개
-            {overlay.surfaceGap
-              ? ` · 표면까지 중앙 ${overlay.surfaceGap.median.toFixed(2)}mm`
-              : ''}
-          </span>
-        )}
-        <span className="cad-overlay-bar__note">
-          판독도 정합도 하지 않습니다 — 검사 원본의 부품 좌표를 그대로 씁니다
-        </span>
-      </div>
       {/* 담은 화면을 눈으로 확인하고 한 장씩 뺀다. 숫자만 보이면 잘못
           담았을 때 전부 비우고 처음부터 다시 찍는 수밖에 없다.
           순서가 곧 엑셀의 쪽 순서다(1쪽은 늘 스캔 전체도). */}
@@ -3275,22 +3199,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
           ))}
         </div>
       </div>}
-      <div className="cad-overlay-bar">
-        <label htmlFor="cad-section-notes">시트 단면 제로라인</label>
-        <input id="cad-section-notes" type="text" value={sectionNotes} onChange={(event) => setSectionNotes(event.target.value)} placeholder="예: H : 300, T : 1700" />
-        <select aria-label="단면 방향" value={sectionSide} onChange={(event) => setSectionSide(event.target.value)}>
-          <option value="both">양쪽</option><option value="positive">+ 방향</option><option value="negative">- 방향</option>
-        </select>
-        <button type="button" className="tool-button" onClick={() => void requestSections()} disabled={sectionBusy || !sectionNotes.trim()}>{sectionBusy ? '계산 중…' : '단면 계산'}</button>
-        {sections && <span className="cad-overlay-bar__note">단면 제로라인 {sections.length}개</span>}
-        {sectionError && <span className="cad-overlay-bar__err">{sectionError}</span>}
-      </div>
       <div className="card cad-viewer" style={{ height: 760 }}>
         <CadViewer
           active={active}
           mesh={selected.mesh}
           showHoles
-          sections={sections}
           overlay={overlay}
           sheetValues={sheetValues}
           morph={morph}
