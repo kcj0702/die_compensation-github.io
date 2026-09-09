@@ -1899,3 +1899,26 @@ button { cursor: pointer; }
 .cad-viewer__tint input{width:20px;height:18px;padding:0;border:0;border-radius:3px;background:none;cursor:pointer}
 .cad-viewer__swatches{display:inline-flex;align-items:center;gap:2px;padding:4px 6px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
 .cad-viewer__swatches i{width:11px;height:11px;border-radius:2px;border:1px solid rgba(255,255,255,.3)}
+
+
+/* ── 3D 뷰어 조작부 (병합 때 사라진 것을 되살림) ──────────
+   main 이 globals.css 를 다시 쓰면서 이 규칙들이 빠졌다. 화면에는
+   여전히 그 요소들이 있어서, 스타일만 없는 채로 떠 있었다. */
+.cad-viewer__bar{position:absolute;right:12px;top:52px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 8px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__bar-low{order:3}
+.cad-viewer__edit{position:absolute;transform:translate(-50%,-140%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #ffef3a;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__edit-reset{color:#8fa3b4}
+.cad-viewer__note{position:absolute;transform:translate(-50%,-130%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #6fb4e8;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__notes{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:4px;max-width:260px;padding:9px 11px;border:1px solid rgba(111,180,232,.4);border-radius:7px;background:rgba(14,22,30,.84);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__zones{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:5px;max-width:270px;padding:9px 11px;border:1px solid rgba(255,95,168,.45);border-radius:7px;background:rgba(14,22,30,.86);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__zone{display:flex;align-items:center;gap:5px}
+.topbar__session{display:flex;align-items:center;gap:6px}
+.topbar__session-note{margin-right:4px;color:#5c8f6b;font-size:8.5px;white-space:nowrap}
+.cad-viewer__zone-pick { padding: 0 5px !important; border: 0 !important; background: transparent !important; color: inherit !important; font-weight: 700; cursor: pointer; }
+.cad-viewer__zone-new { width: 100%; margin-top: 4px; }
+.cad-viewer__puff { border-color: rgba(255,95,168,.45); }
+.cad-align{margin:0 0 8px;padding:9px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb;display:flex;flex-direction:column;gap:7px}
+.sheet-title-block__input{width:100%;border:0;background:transparent;padding:0;font:inherit;color:inherit;text-align:inherit}
+.cad-viewer__morph-key{display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px);font-size:9.5px;color:#b6c6d4}
+.cad-viewer__zone-name{color:#9db0c0;font-size:9px;font-style:normal;flex:1;white-space:nowrap}
+.cad-viewer__zone-pick:disabled{opacity:.7;cursor:default}

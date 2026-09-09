@@ -2555,16 +2555,6 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         onClick={() => pickTool(hiding ? 'none' : 'hide')}>
         가리기 {hides.length ? hides.length : ''}
       </button>
-      {hides.length > 0 && (
-        <button type="button" title="감춘 자리를 모두 되살립니다"
-          onClick={() => setHideByCad((current) => {
-            const next = { ...current };
-            delete next[tintKey];
-            return next;
-          })}>
-          가린 것 되돌리기
-        </button>
-      )}
       <button type="button" onClick={() => setLight((v) => !v)}
         title={light
           ? '어두운 배경으로 바꿉니다 (히트맵 색이 잘 읽힙니다)'
@@ -2760,6 +2750,48 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         <button type="submit">달기</button>
         <button type="button" onClick={() => setNoteDraft(null)}>취소</button>
       </form>
+    )}
+
+    {hiding && (
+      <div className="cad-viewer__zones">
+        <div className="cad-viewer__zones-size">
+          <span className="cad-viewer__zone-tools" role="group" aria-label="가리기 도구">
+            {([['rect', '네모'], ['circle', '동그라미']] as const)
+              .map(([kind, name]) => (
+                <button key={kind} type="button"
+                  className={zoneTool === kind ? 'is-on' : ''}
+                  onClick={() => setZoneTool(kind)}>{name}</button>
+              ))}
+          </span>
+          <em>형상 위에서 끌면 그 자리가 앞뒤로 뚫려 안 보입니다</em>
+        </div>
+        {hides.map((shape, order) => (
+          <div key={order} className="cad-viewer__zone">
+            <button type="button" className="cad-viewer__zone-pick" disabled>
+              {CIRCLED[order] ?? order + 1}
+            </button>
+            <span className="cad-viewer__zone-name">
+              {shape?.kind === 'circle' ? '동그라미' : '네모'}
+            </span>
+            <button type="button" title="이 자리만 되살립니다"
+              onClick={() => setHideByCad((current) => ({
+                ...current,
+                [tintKey]: (current[tintKey] ?? []).filter((_, k) => k !== order),
+              }))}>되살리기</button>
+          </div>
+        ))}
+        {hides.length === 0 && <em className="cad-viewer__zone-name">
+          아직 가린 자리가 없습니다
+        </em>}
+        {hides.length > 0 && (
+          <button type="button" className="cad-viewer__zone-new"
+            onClick={() => setHideByCad((current) => {
+              const next = { ...current };
+              delete next[tintKey];
+              return next;
+            })}>전부 되살리기</button>
+        )}
+      </div>
     )}
 
     {zoning && (
