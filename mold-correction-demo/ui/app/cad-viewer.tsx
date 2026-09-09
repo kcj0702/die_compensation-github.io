@@ -1583,12 +1583,34 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
          * 예전에는 픽셀당 0.005 라디안으로 못 박아 둬서, 창이 크면 한
          * 바퀴 돌리는 데 한참 끌어야 하고 작으면 홱 돌아갔다.
          * 부호는 CATIA 와 같다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다. */
-        /* 부호는 three 의 OrbitControls 와 같게 둔다 — 웹에서 3D 를
-         * 돌려 본 사람은 다 그 감각에 익어 있다. 오른쪽으로 끌면 부품이
-         * 왼쪽으로 돌아 오른쪽 옆면이 보이고, 아래로 끌면 위에서 내려다본다. */
+        /* 끌기를 **화면에 비친 부품의 높이축** 기준으로 읽는다.
+         *
+         * 도는 축은 부품의 높이(월드 Z)인데, 눕히기로 화면을 돌려 놓으면
+         * 그 축이 화면에서 가로로 눕는다. 그런데도 가로 끌기를 그대로
+         * theta 에 넣으면, 사람이 보기에는 끄는 방향과 도는 방향이 어긋난다
+         * — "화면을 돌리니 돌아가는 방향도 같이 돌아간다" 는 게 이것이다.
+         *
+         * 그래서 월드 Z 가 화면에서 어느 쪽인지 먼저 구하고,
+         *   · 그 축을 **가로지르며** 끌면 제자리에서 돌리고(theta)
+         *   · 그 축을 **따라** 끌면 위아래로 넘긴다(phi)
+         * 로 나눈다. 눕히기를 몇 도로 해 두든 손끝 느낌이 같아진다. */
         const perPixel = Math.PI / Math.max(mount.clientHeight || 1, 1);
-        spherical.theta -= dx * perPixel;
-        spherical.phi -= dy * perPixel;
+        const seenUp = new THREE.Vector3(0, 0, 1).applyMatrix4(
+          new THREE.Matrix4().extractRotation(camera.matrixWorldInverse));
+        // 화면 좌표는 y 가 아래로 증가한다(카메라 좌표는 위로).
+        let zx = seenUp.x, zy = -seenUp.y;
+        const span = Math.hypot(zx, zy);
+        if (span < 1e-4) {
+          // 높이축을 정면으로 마주 본 때(평면·저면)는 화면에 점으로 맺혀
+          // 방향을 못 정한다. 그때는 눕히기를 안 한 것처럼 다룬다.
+          zx = 0; zy = -1;
+        } else {
+          zx /= span; zy /= span;
+        }
+        const across = dx * -zy + dy * zx;   // 높이축을 가로지르는 양
+        const along = dx * zx + dy * zy;     // 높이축을 따라가는 양
+        spherical.theta -= across * perPixel;
+        spherical.phi += along * perPixel;
         // 손으로 돌린 순간부터는 표준 뷰가 아니다.
         setViewName((current) => (current === '자유 시점' ? current : '자유 시점'));
       } else if (mode === 'pan') {
