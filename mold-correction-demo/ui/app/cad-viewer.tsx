@@ -454,11 +454,26 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      cadId 는 열 때마다 새로 생겨 새로고침을 못 넘긴다(주석·구역과 같은
      방식이다). */
   const [paintNote, setPaintNote] = useState('');
+  /* 보고 싶지 않은 자리를 가려 둔다.
+     시트에 실을 그림에서 반대편 살이나 옆 부품이 겹쳐 보이는 일이 잦다.
+     네모·동그라미로 훑으면 그 안의 삼각형을 아예 안 그린다 — 형상을
+     지우는 것이 아니라 이 화면에서만 감추는 것이라 되돌릴 수 있다.
+     색과 같이 **부품마다** 따로 기억한다. */
+  const [hiding, setHiding] = useState(false);
+  const [hideByCad, setHideByCad] = useState<Record<string, CadRegion['shape'][]>>({});
   const [tintByCad, setTintByCad] = useState<Record<string, string>>({});
   const tintKey = mesh.summary.name;
   const partTint = tintByCad[tintKey] ?? null;
   const partTintRef = useRef<string | null>(null);
   partTintRef.current = partTint;
+  const hides = hideByCad[tintKey] ?? [];
+  const hidingRef = useRef(false);
+  hidingRef.current = hiding;
+  const hidesRef = useRef<CadRegion['shape'][]>([]);
+  hidesRef.current = hides;
+  const addHide = (shape: CadRegion['shape']) => setHideByCad((current) => ({
+    ...current, [tintKey]: [...(current[tintKey] ?? []), shape],
+  }));
   const setPartTint = (tone: string | null) => setTintByCad((current) => {
     if (tone === null) {
       const next = { ...current };
@@ -645,7 +660,69 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute(
       'position', new THREE.Float32BufferAttribute(mesh.positions, 3));
-    geometry.setIndex(mesh.indices);
+
+    /* 가려 둔 자리는 아예 그리지 않는다.
+     *
+     * 삼각형을 빼면 색 구간(colourGroups)의 번호도 어긋나므로 함께 다시
+     * 센다. 원래 순서를 지키며 걸러 내므로 구간은 여전히 이어진 토막이다.
+     * 형상 자체는 손대지 않는다 — 목록을 비우면 그대로 돌아온다. */
+    const drop = hidesRef.current.filter(Boolean) as NonNullable<CadRegion['shape']>[];
+    let keptIndices = mesh.indices;
+    let keptGroups = mesh.colourGroups ?? [];
+    if (drop.length) {
+      const cover = drop.map((shape) => {
+        const u = new THREE.Vector3(...shape.u);
+        const v = new THREE.Vector3(...shape.v);
+        const middle = new THREE.Vector3(...shape.center);
+        const normal = new THREE.Vector3().crossVectors(u, v).normalize();
+        // 판금은 앞뒤 껍질이 붙어 있다. 두께 방향으로 넉넉히 잡아야
+        // 가린 자리에서 반대쪽 살이 비쳐 보이지 않는다.
+        const deep = Math.max(shape.hu, shape.hv);
+        return (p: THREE.Vector3) => {
+          const d = p.clone().sub(middle);
+          if (Math.abs(d.dot(normal)) > deep) return false;
+          const du = d.dot(u), dv = d.dot(v);
+          if (shape.kind === 'rect') {
+            return Math.abs(du) <= shape.hu && Math.abs(dv) <= shape.hv;
+          }
+          const nu = du / (shape.hu || 1), nv = dv / (shape.hv || 1);
+          return nu * nu + nv * nv <= 1;
+        };
+      });
+      const spot = new THREE.Vector3();
+      const middleOf = (a: number, b: number, c: number) => spot.set(
+        (mesh.positions[a * 3] + mesh.positions[b * 3] + mesh.positions[c * 3]) / 3,
+        (mesh.positions[a * 3 + 1] + mesh.positions[b * 3 + 1] + mesh.positions[c * 3 + 1]) / 3,
+        (mesh.positions[a * 3 + 2] + mesh.positions[b * 3 + 2] + mesh.positions[c * 3 + 2]) / 3);
+      // 삼각형마다 어느 색 구간에 속했는지 미리 적어 둔다.
+      const bandOf = new Int32Array(mesh.indices.length / 3).fill(-1);
+      keptGroups.forEach(([, start, count], slot) => {
+        for (let t = start; t < start + count; t += 1) bandOf[t] = slot;
+      });
+      const keep: number[] = [];
+      const bandRun: number[] = [];
+      for (let t = 0; t < mesh.indices.length / 3; t += 1) {
+        const a = mesh.indices[t * 3], b = mesh.indices[t * 3 + 1], c = mesh.indices[t * 3 + 2];
+        if (cover.some((inside) => inside(middleOf(a, b, c)))) continue;
+        keep.push(a, b, c);
+        bandRun.push(bandOf[t]);
+      }
+      keptIndices = keep;
+      const rebuilt: [string, number, number, boolean?][] = [];
+      let at = 0;
+      while (at < bandRun.length) {
+        const slot = bandRun[at];
+        let run = 1;
+        while (at + run < bandRun.length && bandRun[at + run] === slot) run += 1;
+        if (slot >= 0) {
+          const [tone, , , direct] = keptGroups[slot];
+          rebuilt.push([tone, at, run, direct]);
+        }
+        at += run;
+      }
+      keptGroups = rebuilt;
+    }
+    geometry.setIndex(keptIndices);
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
 
@@ -745,11 +822,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      *
      * 히트맵을 칠할 때나 손으로 색을 정했을 때는 구간을 쓰지 않는다 —
      * 그때는 온 부품이 한 색이어야 뜻이 맞는다. */
-    const groups = mesh.colourGroups ?? [];
+    const groups = keptGroups;
     // 구간이 삼각형을 모두 덮는지 본다. 빠진 삼각형이 있으면 그 자리는
     // 재질이 없어 **아예 안 그려진다** — 색 하나로 칠하는 편이 낫다.
     const covered = groups.reduce((sum, [, , count]) => sum + count, 0);
-    const whole = (mesh.indices?.length ?? 0) / 3;
+    const whole = keptIndices.length / 3;
     const bands = (!painted && !partTintRef.current
                    && groups.length > 1 && whole > 0 && covered === whole)
       ? groups : null;
@@ -1395,17 +1472,36 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       }, 140);
     };
 
+    /* 카메라를 Z 가 위인 채로 돌린다.
+     *
+     * [왜 어색했나]
+     * three 의 Spherical 은 **Y 가 위**인 좌표를 준다. 그런데 이 부품은
+     * 차량 좌표계라 **Z 가 높이**다(축 표시의 X 전후 · Y 좌우 · Z 높이).
+     * 그래서 가로로 끌면 부품이 제자리에서 도는 게 아니라 옆으로 굴렀고,
+     * 화면의 위쪽도 부품의 위가 아니라 차량 좌우였다. 세워 보려고 눕히기
+     * 버튼을 따로 눌러야 했던 것도 이 때문이다.
+     *
+     * 반지름·각도는 그대로 두고 **자리를 잡는 식만** Z 위로 바꾼다 —
+     *     x = r sinφ cosθ · y = r sinφ sinθ · z = r cosφ
+     * 이러면 가로 끌기는 높이축(Z) 둘레를 돌고, 세로 끌기는 위아래로
+     * 넘긴다. 사람이 부품을 손에 들고 돌리는 것과 같은 느낌이 된다. */
     const applyCamera = () => {
       spherical.phi = Math.max(0.001, Math.min(Math.PI - 0.001, spherical.phi));
       spherical.radius = Math.max(radius * 0.05,
         Math.min(radius * 40, spherical.radius));
-      camera.position.copy(target).add(
-        new THREE.Vector3().setFromSpherical(spherical));
+      const { radius: away0, phi, theta } = spherical;
+      camera.position.copy(target).add(new THREE.Vector3(
+        away0 * Math.sin(phi) * Math.cos(theta),
+        away0 * Math.sin(phi) * Math.sin(theta),
+        away0 * Math.cos(phi)));
       // 시선 축을 중심으로 위쪽 방향을 돌린다 — 화면 안에서만 도는
       // 회전이라 부품을 눕혀 볼 수 있다.
       const look = camera.position.clone().sub(target).normalize();
-      camera.up.set(0, 1, 0).applyAxisAngle(look, rollRef.current);
-      if (Math.abs(camera.up.dot(look)) > 0.999) camera.up.set(0, 0, 1);
+      camera.up.set(0, 0, 1).applyAxisAngle(look, rollRef.current);
+      // 바로 위나 아래에서 내려다보면 위쪽 축이 시선과 겹쳐 무너진다.
+      if (Math.abs(camera.up.dot(look)) > 0.999) {
+        camera.up.set(0, 1, 0).applyAxisAngle(look, rollRef.current);
+      }
       camera.lookAt(target);
 
       // 근평면을 **지금 거리에 맞춰** 다시 잡는다.
@@ -1459,9 +1555,13 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       last = { x: event.clientX, y: event.clientY };
 
       if (mode === 'rotate') {
-        // 부호가 CATIA 기준이다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다.
-        spherical.theta += dx * 0.005;
-        spherical.phi += dy * 0.005;
+        /* 화면을 세로로 한 번 훑으면 꼭 반 바퀴(180도) 돌게 맞춘다.
+         * 예전에는 픽셀당 0.005 라디안으로 못 박아 둬서, 창이 크면 한
+         * 바퀴 돌리는 데 한참 끌어야 하고 작으면 홱 돌아갔다.
+         * 부호는 CATIA 와 같다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다. */
+        const perPixel = Math.PI / Math.max(mount.clientHeight || 1, 1);
+        spherical.theta -= dx * perPixel;
+        spherical.phi -= dy * perPixel;
         // 손으로 돌린 순간부터는 표준 뷰가 아니다.
         setViewName((current) => (current === '자유 시점' ? current : '자유 시점'));
       } else if (mode === 'pan') {
@@ -1660,9 +1760,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     };
 
     const onPaintDown = (event: PointerEvent) => {
-      if (!zoningRef.current || event.button !== 0) return;
+      if ((!zoningRef.current && !hidingRef.current) || event.button !== 0) return;
       event.preventDefault();
-      if (zoneToolRef.current === 'brush') {
+      if (zoneToolRef.current === 'brush' && !hidingRef.current) {
         painting = activeZoneRef.current;
         stampAt(event);
         return;
@@ -1676,8 +1776,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     };
 
     const onPaintMove = (event: PointerEvent) => {
-      if (!zoningRef.current || (event.buttons & 1) === 0) return;
-      if (zoneToolRef.current === 'brush') {
+      if ((!zoningRef.current && !hidingRef.current) || (event.buttons & 1) === 0) return;
+      if (zoneToolRef.current === 'brush' && !hidingRef.current) {
         if (painting) stampAt(event);
         return;
       }
@@ -1692,13 +1792,16 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         .add(dragV.clone().multiplyScalar(gap.dot(dragV) / 2));
       preview.geometry.dispose();
       preview.geometry = new THREE.BufferGeometry().setFromPoints(
-        outline(zoneToolRef.current, middle, dragU, dragV, hu, hv));
+        outline(zoneToolRef.current === 'brush' ? 'rect' : zoneToolRef.current,
+                middle, dragU, dragV, hu, hv));
       preview.visible = true;
     };
 
     const onPaintUp = (event: PointerEvent) => {
       painting = null;
-      if (!dragFrom || zoneToolRef.current === 'brush') { dragFrom = null; return; }
+      if (!dragFrom || (zoneToolRef.current === 'brush' && !hidingRef.current)) {
+        dragFrom = null; return;
+      }
       preview.visible = false;
       const spot = surfaceHit(event);
       const start = dragFrom;
@@ -1714,15 +1817,21 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         .add(dragV.clone().multiplyScalar(gap.dot(dragV) / 2));
       const triple = (v: THREE.Vector3): [number, number, number] =>
         [v.x, v.y, v.z];
+      const drawn = {
+        kind: (hidingRef.current && zoneToolRef.current === 'brush'
+               ? 'rect' : zoneToolRef.current) as 'rect' | 'circle',
+        center: triple(middle), u: triple(dragU), v: triple(dragV), hu, hv,
+      };
+      if (hidingRef.current) {
+        // 형상을 지우는 것이 아니라 이 화면에서만 감춘다.
+        addHide(drawn);
+        return;
+      }
       const current = regionsRef.current ?? [];
       const id = `Z-${Date.now().toString(36)}`;
       setActiveZone(id);
       onRegionsChange?.([...current, {
-        id, die: '하형', work: '용접',
-        shape: {
-          kind: zoneToolRef.current, center: triple(middle),
-          u: triple(dragU), v: triple(dragV), hu, hv,
-        },
+        id, die: '하형', work: '용접', shape: drawn,
       }]);
     };
 
@@ -1737,7 +1846,11 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const frame = (direction: THREE.Vector3) => {
       target.copy(centre);
       const dir = direction.clone().normalize();
-      spherical.setFromVector3(dir.multiplyScalar(fitDistance(dir)));
+      const away = fitDistance(dir);
+      // 자리를 잡는 식이 Z 위이므로 각도를 되짚는 것도 Z 위여야 한다.
+      spherical.radius = away;
+      spherical.phi = Math.acos(Math.max(-1, Math.min(1, dir.z)));
+      spherical.theta = Math.atan2(dir.y, dir.x);
       applyCamera();
     };
     /* 화면을 그림으로 굽는다.
@@ -1830,7 +1943,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     };
   }, [mesh, holes, showHoles, overlay, sheetValues, showHeat, threshold,
       morph, morphMode, sections, exaggeration, ceiling, light, partTint,
-      rendererRetry]);
+      hides, rendererRetry]);
 
   // 토글은 씬을 다시 만들지 않고 가시성만 바꾼다.
   useEffect(() => {
@@ -2375,6 +2488,29 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
         {full ? '축소' : '확대'}
       </button>
+      {/* 시트에 실을 그림에서 반대편 살이나 옆 부품이 겹쳐 보일 때
+          네모·동그라미로 훑어 감춘다. 형상을 지우는 것이 아니라 이
+          화면에서만 안 그리는 것이라 언제든 되돌릴 수 있다. */}
+      <button type="button" className={hiding ? 'is-on' : undefined}
+        title="보고 싶지 않은 자리를 네모·동그라미로 훑어 감춥니다 (형상은 그대로)"
+        onClick={() => {
+          setHiding((v) => {
+            if (!v) { setZoning(false); setMeasuring(false); setNoting(false); }
+            return !v;
+          });
+        }}>
+        가리기 {hides.length ? hides.length : ''}
+      </button>
+      {hides.length > 0 && (
+        <button type="button" title="감춘 자리를 모두 되살립니다"
+          onClick={() => setHideByCad((current) => {
+            const next = { ...current };
+            delete next[tintKey];
+            return next;
+          })}>
+          가린 것 되돌리기
+        </button>
+      )}
       <button type="button" onClick={() => setLight((v) => !v)}
         title={light
           ? '어두운 배경으로 바꿉니다 (히트맵 색이 잘 읽힙니다)'
@@ -2541,7 +2677,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           : ''}
       </span>
       <span className="cad-viewer__stat cad-viewer__hint">
-        {zoning ? (zoneTool === 'brush'
+        {hiding ? '형상 위에서 끌어 그 자리를 감춥니다 — 형상은 그대로입니다'
+          : zoning ? (zoneTool === 'brush'
           ? '형상 위를 눌러 공정 구역을 칠합니다'
           : '형상 위에서 끌어 공정 구역을 잡습니다')
           : noting ? '형상 위를 눌러 메모를 답니다'

@@ -3885,7 +3885,7 @@ async def sheet_excel(request: Request) -> Response:
             image_labels if isinstance(image_labels, list) else None,
         )
         name = str(body.get("filename") or "보정시트") + ".xlsx"
-        quoted = urllib.parse.quote(name)
+        quoted = quote(name)
         return Response(
             payload,
             media_type=("application/vnd.openxmlformats-officedocument"

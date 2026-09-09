@@ -1861,3 +1861,51 @@ class 소수점되살리기Test(unittest.TestCase):
     def test_이상한_입력에_터지지_않는다(self):
         self.assertIsNone(backend_server._mend_decimal(float("nan"), self.한계))
         self.assertIsNone(backend_server._mend_decimal(5.0, 0.0))
+
+
+class 보정시트엑셀라우트Test(unittest.TestCase):
+    """엑셀 내려받기 라우트를 끝까지 태운다.
+
+    병합 뒤 실제로 이 자리에서 깨졌다 — 핸들러가 urllib.parse.quote 를
+    부르는데 그 모듈이 임포트돼 있지 않아 422 와 함께
+    "name 'urllib' is not defined" 가 떴다. 함수(sheet_excel_for)만
+    시험하면 이 자리를 못 잡는다. 응답을 만드는 데까지 가야 한다.
+    """
+
+    def _응답(self, body: dict):
+        import asyncio
+
+        class 가짜요청:
+            async def json(self):
+                return body
+
+        return asyncio.run(backend_server.sheet_excel(가짜요청()))
+
+    def test_엑셀_파일로_내려온다(self):
+        analysis_id = backend_server._cache_analysis({
+            "overlay_base": np.full((120, 200, 3), 200, np.uint8),
+            "deviation_points": [
+                {"id": "P-01", "xPx": 40, "yPx": 30, "value": 0.4},
+            ],
+            "part_no": "64XX2-DR000",
+        })
+        response = self._응답({
+            "analysisId": analysis_id,
+            "corrections": {"P-01": -0.4},
+            # 한글 파일명이라 헤더에 인코딩해서 넣어야 한다 — 여기서 터졌었다.
+            "filename": "64XX2_보정시트",
+            "meta": {"partNo": "64XX2-DR000"},
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("spreadsheetml", response.media_type)
+        self.assertGreater(len(response.body), 5000)
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+
+    def test_보정량이_비면_400_을_준다(self):
+        response = self._응답({"analysisId": "없음", "corrections": {}})
+        self.assertEqual(response.status_code, 400)
+
+    def test_분석이_만료되면_404_를_준다(self):
+        response = self._응답({"analysisId": "없는아이디",
+                             "corrections": {"P-01": 0.4}})
+        self.assertEqual(response.status_code, 404)
