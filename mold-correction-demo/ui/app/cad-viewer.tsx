@@ -430,17 +430,35 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   /* 편차를 표면에 입힐지. 부품이 회색 덩어리로만 보이면 편차 프로젝트에서
      3D 가 할 일이 없다. */
   const [showHeat] = useState(false);   // 편차 색은 화면에서 뺐다
-  /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다. */
   /* 단면 — 판금은 겹쳐진 면이 많아 겉에서만 보면 안쪽을 못 본다.
-     자르는 위치는 **부품의 실제 Z 범위** 안에서 고른다. 100% 면 끔. */
-  const [depth, setDepth] = useState<{ min: number; max: number } | null>(null);
+   *
+   * [축을 왜 고르게 했나]
+   * 예전에는 늘 높이(Z)로만 잘랐다. 64XX2·71XX2 는 그게 맞아서 깔끔하게
+   * 잘렸는데, 67XX6 은 부품이 놓인 방향이 달라 높이로 자르니 **한가운데
+   * 부터 사라졌다.** 왼쪽 끝이나 오른쪽 끝에서부터 밀어 들어가야 단면이
+   * 읽히므로, 어느 축으로 자를지와 어느 끝에서 시작할지를 고르게 한다.
+   *
+   * 자르는 위치는 **부품의 실제 좌표 범위** 안에서 고른다. 100% 면 끔. */
+  const [bounds, setBounds] = useState<
+    { min: [number, number, number]; max: [number, number, number] } | null>(null);
+  const [clipAxis, setClipAxis] = useState<0 | 1 | 2>(2);
+  const [clipFlip, setClipFlip] = useState(false);
   const [clipPct, setClipPct] = useState(100);
-  const clip = depth && clipPct < 100
-    ? depth.min + (depth.max - depth.min) * (clipPct / 100) : null;
+  const span = bounds
+    ? { min: bounds.min[clipAxis], max: bounds.max[clipAxis] } : null;
+  const clip = span && clipPct < 100
+    ? (clipFlip
+      ? span.max - (span.max - span.min) * (clipPct / 100)
+      : span.min + (span.max - span.min) * (clipPct / 100))
+    : null;
   /* 씬을 다시 만들 때 지금 값을 알아야 한다. 상태로 읽으면 그 시점의
      값이 아니라 이펙트가 묶인 시점의 값이 온다. */
   const clipRefValue = useRef<number | null>(clip);
   clipRefValue.current = clip;
+  const clipAxisRef = useRef<0 | 1 | 2>(2);
+  clipAxisRef.current = clipAxis;
+  const clipFlipRef = useRef(false);
+  clipFlipRef.current = clipFlip;
   /* 측정 — 두 점을 찍으면 거리를 잰다. 금형에서 자주 쓴다. */
   /* 화면 돌리기(roll). 길쭉한 부품이 세로로 서서 나오면 화면을 반도
      못 쓴다 — 실측 64XX1 은 220 x 1492 x 555mm 라 세로로 선다.
@@ -837,6 +855,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 단면 — 화면 기준이 아니라 부품 좌표 기준으로 자른다. 돌려봐도
     // 자른 자리가 그대로 있어야 단면을 읽을 수 있다.
     const clipPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+    clipPlane.normal.set(0, 0, 0).setComponent(
+      clipAxisRef.current, clipFlipRef.current ? 1 : -1);
     clipRef.current = clipPlane;
 
     // 보정 후 형상 — 원본 위에 겹치거나 원본을 대신한다.
@@ -924,7 +944,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       // 건드리기 전까지 그대로다 — "형상이 한번씩 짤린다" 가 이것이다.
       clippingPlanes: clipRefValue.current === null ? [] : [clipPlane],
     }));
-    clipPlane.constant = clipRefValue.current ?? 0;
+    clipPlane.constant = clipRefValue.current === null ? 0
+      : (clipFlipRef.current ? -clipRefValue.current : clipRefValue.current);
 
     if (bands) {
       // 구간마다 같은 설정에 색만 바꾼 재질을 붙인다.
@@ -1339,18 +1360,25 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         coords[viewAxis] = labelDepth;
         seat.set(coords[0], coords[1], coords[2]);
 
+        /* 점·지시선·숫자를 **한 덩이**로 묶는다.
+         * 숫자 상자는 부품 바깥 링에 앉아 있어 단면으로 베면 엉뚱하게
+         * 잘린다. 어디에 딸린 콜아웃인지 그 점의 자리를 적어 두면,
+         * 단면이 그 자리를 지나갈 때 셋을 함께 감출 수 있다. */
+        const callout = new THREE.Group();
+        callout.userData.anchor = [spot.origin.x, spot.origin.y, spot.origin.z];
+
         const dot = new THREE.Mesh(
           new THREE.SphereGeometry(radius * 0.006, 10, 8), markMaterial);
         dot.position.copy(spot.origin);
         dot.renderOrder = 8;
-        overlayRoot.add(dot);
+        callout.add(dot);
 
         const leader = new THREE.Line(
           new THREE.BufferGeometry().setFromPoints([spot.origin, seat]),
           leaderMaterial);
         leader.computeLineDistances();     // 점선은 이걸 해야 보인다
         leader.renderOrder = 9;
-        overlayRoot.add(leader);
+        callout.add(leader);
 
         const label = makeLabel(
           `${spot.correction > 0 ? '+' : ''}${spot.correction.toFixed(1)}`,
@@ -1360,7 +1388,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
         label.userData.pointId = spot.pointId;
         label.userData.correction = spot.correction;
         labelPicks.push(label);
-        overlayRoot.add(label);
+        callout.add(label);
+        overlayRoot.add(callout);
       });
     }
     scene.add(overlayRoot);
@@ -2066,7 +2095,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     viewApi.current = { frame, snapshot, refresh: applyCamera, zoomBox, fitAll,
                         centre: centre.clone(), radius,
                         zMin: box.min.z, zMax: box.max.z };
-    setDepth({ min: box.min.z, max: box.max.z });
+    setBounds({
+      min: [box.min.x, box.min.y, box.min.z],
+      max: [box.max.x, box.max.y, box.max.z],
+    });
 
     // ── 루프 ─────────────────────────────────────────────────
     let loop = 0;
@@ -2160,17 +2192,46 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
   useEffect(() => {
     const plane = clipRef.current;
     const surface = surfaceRef.current;
-    if (!plane || !surface) return;
-    // 부품이 여러 색이면 재질도 여러 개다. 하나로 가정하면 단면이
-    // 안 먹는다 — 배열에 clippingPlanes 를 꽂아도 아무 일도 안 일어난다.
-    const coats = (Array.isArray(surface.material)
-      ? surface.material : [surface.material]) as THREE.MeshStandardMaterial[];
-    for (const coat of coats) {
-      coat.clippingPlanes = clip === null ? [] : [plane];
-      coat.needsUpdate = true;
+    if (!plane) return;
+
+    /* 자를 면을 고른 축·끝에 맞춘다.
+     * three 의 Plane 은 normal·p + constant < 0 인 쪽을 지운다. 그래서
+     * 축을 마주 보게 세우면(-1) 값이 작은 쪽이 남고, 뒤집으면(+1) 큰
+     * 쪽이 남는다 — "왼쪽 끝부터" 와 "오른쪽 끝부터" 가 이것이다. */
+    plane.normal.set(0, 0, 0).setComponent(clipAxis, clipFlip ? 1 : -1);
+    plane.constant = clip === null ? 0 : (clipFlip ? -clip : clip);
+    const planes = clip === null ? [] : [plane];
+
+    /* 형상만 자르면 **잘려 나간 자리에 선과 숫자만 허공에 남는다.**
+     * 가리기와 같은 규칙으로 얹힌 것도 함께 자른다. 다만 방식이 둘로
+     * 갈린다 —
+     *   · 제로라인 관·홀 링처럼 이어진 형상은 재질에 자를 면을 꽂으면
+     *     GPU 가 정확히 그 자리에서 베어 준다(삼각형 단위로 걷어 내는
+     *     가리기보다 깔끔하다 — 튀어나오는 조각이 없다).
+     *   · 보정량 콜아웃은 점·지시선·숫자가 한 덩이고 숫자 상자는 부품
+     *     바깥 링에 앉아 있어 면으로 베면 엉뚱하게 잘린다. 그래서 **그
+     *     점의 자리**로 덩이째 감춘다. */
+    const cut = (node: any) => {
+      const coats = (Array.isArray(node.material)
+        ? node.material : [node.material]) as THREE.Material[];
+      for (const coat of coats) {
+        if (!coat) continue;
+        coat.clippingPlanes = planes;
+        coat.needsUpdate = true;
+      }
+    };
+    if (surface) cut(surface);
+    holeGroup.current?.traverse(cut);
+    for (const node of (overlayGroup.current?.children ?? []) as any[]) {
+      const anchor = node.userData?.anchor as number[] | undefined;
+      if (anchor) {
+        node.visible = clip === null ? true
+          : (clipFlip ? anchor[clipAxis] >= clip : anchor[clipAxis] <= clip);
+        continue;
+      }
+      node.traverse(cut);
     }
-    plane.constant = clip ?? 0;
-  }, [clip]);
+  }, [clip, clipAxis, clipFlip, mesh, overlay, sheetValues, threshold, ceiling]);
 
   /* 단면에서 보정 **전후 윤곽**을 견준다.
    *
@@ -2621,6 +2682,19 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     )}
     <div className="cad-viewer__section">
       <label htmlFor="cad-clip">단면</label>
+      {/* 어느 축으로 자를지 고른다. 늘 높이로만 자르면 부품이 놓인
+          방향에 따라 한가운데부터 사라져 단면이 안 읽힌다(실측 67XX6). */}
+      <span className="cad-viewer__zone-tools" role="group" aria-label="단면 방향">
+        {([[0, '전후'], [1, '좌우'], [2, '높이']] as const).map(([axis, name]) => (
+          <button key={axis} type="button"
+            className={clipAxis === axis ? 'is-on' : ''}
+            title={`${name} 방향으로 잘라 들어갑니다`}
+            onClick={() => setClipAxis(axis)}>{name}</button>
+        ))}
+        <button type="button" className={clipFlip ? 'is-on' : ''}
+          title="반대쪽 끝에서부터 잘라 들어갑니다"
+          onClick={() => setClipFlip((current) => !current)}>반대 끝</button>
+      </span>
       <input id="cad-clip" type="range" min={0} max={100} step={0.5}
         value={clipPct}
         onChange={(event) => setClipPct(Number(event.target.value))} />

@@ -12,7 +12,7 @@ import {
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
-import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
+import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -2768,10 +2768,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [overlayError, setOverlayError] = useState<string | null>(null);
   const [shapeMatchWarning, setShapeMatchWarning] = useState<string | null>(null);
   const overlayCache = useRef<Record<string, CadOverlay>>({});
-  const [morph, setMorph] = useState<CadMorph | null>(null);
-  const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
-  const [morphBusy, setMorphBusy] = useState(false);
-  const [morphError, setMorphError] = useState<string | null>(null);
   /* 시트에 담아둔 3D 화면들. 어느 시점에서 찍었는지 함께 들고 있는다 —
      엑셀 쪽마다 그 이름을 적어 두지 않으면 나중에 보는 사람이 방향을
      못 가린다. 고유 열쇠는 앞 장을 지울 때 뒤 장이 다시 그려지지 않게 한다. */
@@ -2967,73 +2963,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     void requestOverlay(overlayScanId, selected.mesh, moved);
   };
 
-  const overlayPayload = () => {
-    if (!selected?.mesh.cadId || !overlay || !sheetValues) return null;
-    return {
-      cadId: selected.mesh.cadId,
-      corrections: sheetValues,
-      positions: Object.fromEntries(overlay.points.map((point) => [point.id, point.position])),
-    };
-  };
-
-  const buildMorph = async () => {
-    const payload = overlayPayload();
-    if (!payload) return;
-    setMorphBusy(true); setMorphError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/cad-morph`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json() as CadMorph & { error?: string };
-      if (!response.ok) throw new Error(data.error || '보정 후 형상을 만들지 못했습니다.');
-      setMorph(data); setMorphMode('both');
-    } catch (err) {
-      setMorphError(String((err as Error).message || err));
-    } finally { setMorphBusy(false); }
-  };
-
-  const saveMorphStl = async (part: 'after' | 'weld' | 'cut' = 'after') => {
-    const payload = overlayPayload();
-    if (!payload) return;
-    setMorphError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/cad-morph-stl`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...payload, part }),
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(data.error || 'STL을 저장하지 못했습니다.');
-      }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${selected?.mesh.summary.name || 'part'}_${part}.stl`;
-      link.click();
-      URL.revokeObjectURL(url);
-    } catch (err) { setMorphError(String((err as Error).message || err)); }
-  };
-
-  const openMorphAsCad = async () => {
-    const payload = overlayPayload();
-    if (!payload) return;
-    setMorphBusy(true); setMorphError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/cad-morph-open`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json() as CadMesh & { error?: string };
-      if (!response.ok) throw new Error(data.error || '보정 후 형상을 새 탭으로 열지 못했습니다.');
-      const key = data.cadId || `${data.summary.name}-${Date.now()}`;
-      setOpened((current) => [...current, { key, mesh: data }]);
-      setActiveKey(key);
-    } catch (err) { setMorphError(String((err as Error).message || err)); }
-    finally { setMorphBusy(false); }
-  };
-
   const saveCadTable = () => {
     if (!overlay || !sheetValues) return;
     const rows = ['ID,X(mm),Y(mm),Z(mm),보정치(mm),공정'];
@@ -3087,7 +3016,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     if (!selected) return;
     setOverlay(null);
     setOverlayError(null);
-    setMorph(null); setMorphMode('off'); setMorphError(null);
     if (selected.mesh.summary.source_format === 'morph') {
       setOverlayScanId('');
       return;
@@ -3146,28 +3074,13 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
             : `형상 얹힘 ${Math.round((overlay.fit.hit_rate || 0) * 100)}%`}
         </span>}
         {overlay && <button type="button" className="tool-button" onClick={() => setShowAlign((current) => !current)}>정렬 맞추기</button>}
-        {overlay && <button type="button" className="tool-button" onClick={() => void buildMorph()} disabled={morphBusy}>
-          {morphBusy ? '형상 계산 중…' : '보정 후 형상'}
-        </button>}
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
         {shots.length > 0 && <button type="button" className="tool-button"
           onClick={() => setShots([])}>담은 화면 비우기</button>}
         {shots.length > 0 && <button type="button" className="tool-button" onClick={() => setShots([])}>담은 화면 비우기</button>}
-        {morph && <>
-          <select aria-label="형상 비교" value={morphMode} onChange={(event) => setMorphMode(event.target.value as 'off' | 'after' | 'both')}>
-            <option value="off">원본만</option>
-            <option value="both">겹쳐 보기</option>
-            <option value="after">보정 후만</option>
-          </select>
-          <button type="button" className="tool-button" onClick={() => void saveMorphStl('after')}>보정 후 STL</button>
-          <button type="button" className="tool-button" onClick={() => void openMorphAsCad()} disabled={morphBusy}>새 CAD 탭</button>
-          <button type="button" className="tool-button" onClick={saveCadTable}>CAD 보정표</button>
-          {(morph.work || []).map((work) => <button key={work.kind} type="button" className="tool-button" onClick={() => void saveMorphStl(work.kind)}>{work.kind === 'weld' ? '덧살만 STL' : '깎기만 STL'}</button>)}
-          <span className="cad-overlay-bar__note">최대 {morph.stats.max_shift.toFixed(2)}mm · 평균 {morph.stats.mean_shift.toFixed(2)}mm · 포인트 {morph.points}개</span>
-        </>}
+        {overlay && sheetValues && <button type="button" className="tool-button" onClick={saveCadTable}>CAD 보정표</button>}
         {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
         {shapeMatchWarning && <span className="cad-overlay-bar__err">{shapeMatchWarning}</span>}
-        {morphError && <span className="cad-overlay-bar__err">{morphError}</span>}
         {!analysed.length && <span className="cad-overlay-bar__err">먼저 엔진 결과에서 스캔 분석을 완료하세요.</span>}
       </div>
       {showAlign && overlay && <div className="cad-align-panel">
@@ -3206,8 +3119,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
           showHoles
           overlay={overlay}
           sheetValues={sheetValues}
-          morph={morph}
-          morphMode={morphMode}
           onCapture={(url, label) => setShots((current) => [...current,
             // 지울 때 뒤 장들의 열쇠가 바뀌지 않게 고유한 값을 준다.
             { id: `S-${Date.now().toString(36)}-${current.length}`, url, label }])}
@@ -3230,12 +3141,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
           <input value={zone.note || ''} placeholder="메모" onChange={(event) => setZonesByPart((current) => ({ ...current, [zoneKey]: (current[zoneKey] || []).map((item) => item.id === zone.id ? { ...item, note: event.target.value } : item) }))} />
           <button type="button" onClick={() => setZonesByPart((current) => ({ ...current, [zoneKey]: (current[zoneKey] || []).filter((item) => item.id !== zone.id) }))}><X size={13} /></button>
         </div>)}
-      </div>}
-      {morph && (morph.work || []).length > 0 && <div className="cad-overlay-bar">
-        <b>공정별 물량</b>
-        {(morph.work || []).map((work) => <span key={work.kind} className="cad-overlay-bar__note">
-          {work.kind === 'weld' ? '용접(덧살)' : 'CNC 가공(깎기)'} · 면적 {(work.area_mm2 / 100).toFixed(1)}cm² · 부피 {(work.volume_mm3 / 1000).toFixed(2)}cc · 최대 {work.max_mm.toFixed(2)}mm
-        </span>)}
       </div>}
     </>}
   </section>;
