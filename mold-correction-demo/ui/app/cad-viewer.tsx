@@ -1439,8 +1439,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     //   휠                       확대·축소
     //   왼쪽                     선택 (CATIA 와 같다. 회전 아님)
     const target = centre.clone();
-    const spherical = new THREE.Spherical().setFromVector3(
-      camera.position.clone().sub(target));
+    const spherical = new THREE.Spherical();
+    /* 자리에서 각도를 되짚는다 — **Z 가 위**인 기준으로.
+     *
+     * three 의 Spherical.setFromVector3 는 Y 가 위인 각도를 준다. 자리를
+     * 잡는 쪽(applyCamera)은 Z 가 위인데 여기서만 Y 기준으로 잡아 두면
+     * 시작 각도부터 어긋나, 처음 끌자마자 화면이 튀고 그 뒤로도 계속
+     * 엉뚱한 축으로 돈다. 두 곳이 같은 식을 써야 한다. */
+    const setAngles = (offset: THREE.Vector3) => {
+      const away = offset.length() || 1;
+      spherical.radius = away;
+      spherical.phi = Math.acos(Math.max(-1, Math.min(1, offset.z / away)));
+      spherical.theta = Math.atan2(offset.y, offset.x);
+    };
+    setAngles(camera.position.clone().sub(target));
     let mode: 'none' | 'pan' | 'rotate' | 'zoom' = 'none';
     let last = { x: 0, y: 0 };
     let qualityTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1559,6 +1571,9 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
          * 예전에는 픽셀당 0.005 라디안으로 못 박아 둬서, 창이 크면 한
          * 바퀴 돌리는 데 한참 끌어야 하고 작으면 홱 돌아갔다.
          * 부호는 CATIA 와 같다 — 오른쪽으로 끌면 모델이 오른쪽으로 돈다. */
+        /* 부호는 three 의 OrbitControls 와 같게 둔다 — 웹에서 3D 를
+         * 돌려 본 사람은 다 그 감각에 익어 있다. 오른쪽으로 끌면 부품이
+         * 왼쪽으로 돌아 오른쪽 옆면이 보이고, 아래로 끌면 위에서 내려다본다. */
         const perPixel = Math.PI / Math.max(mount.clientHeight || 1, 1);
         spherical.theta -= dx * perPixel;
         spherical.phi -= dy * perPixel;
@@ -1846,11 +1861,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     const frame = (direction: THREE.Vector3) => {
       target.copy(centre);
       const dir = direction.clone().normalize();
-      const away = fitDistance(dir);
-      // 자리를 잡는 식이 Z 위이므로 각도를 되짚는 것도 Z 위여야 한다.
-      spherical.radius = away;
-      spherical.phi = Math.acos(Math.max(-1, Math.min(1, dir.z)));
-      spherical.theta = Math.atan2(dir.y, dir.x);
+      setAngles(dir.clone().multiplyScalar(fitDistance(dir)));
       applyCamera();
     };
     /* 화면을 그림으로 굽는다.
