@@ -2068,9 +2068,80 @@ function FileOrganizerPage() {
     if (axis === 'category') return '02. 금형도면';
     return '01. 구조도';
   }).join(' / ');
+  const hasRebuiltFolder = rootEntries.some((entry) => entry.isDirectory);
   return <section className="page page--file-organizer">
-    <div className="page-heading"><div><h2>품번 파일 정리</h2></div><div className="file-heading-actions"><button type="button" className={`file-db-pill ${db?.connected ? 'connected' : db?.connected === false ? 'error' : ''}`} onClick={() => setShowDatabase((current) => !current)}><i /> {db?.label || 'MariaDB 확인 중'}</button></div></div>
+    <div className="page-heading page-heading--compact file-organizer-heading">
+      <div><h2>폴더 구조 변경</h2></div>
+      <div className="organizer-settings-actions"><button type="button" onClick={() => setShowFolderOrder((current) => !current)}><Layers3 size={14} /> 폴더 구조 변경</button><button type="button" className={db?.connected ? 'connected' : db?.connected === false ? 'error' : ''} onClick={() => setShowDatabase((current) => !current)}><Database size={14} /> {db?.label || 'DB 확인'}</button></div>
+    </div>
     {notice && <div className={`file-organizer-notice ${notice.tone}`}>{notice.tone === 'success' ? <CheckCircle2 size={16} /> : notice.tone === 'error' ? <AlertTriangle size={16} /> : <CircleHelp size={16} />}<span>{notice.text}</span><button onClick={() => setNotice(null)} aria-label="알림 닫기"><X size={14} /></button></div>}
+    <section className="organizer-flow-section" aria-label="폴더 구조 변경 작업">
+      {showDatabase && <div className="card file-database-settings"><div><Database size={20} /><span><b>MariaDB 연결</b><small>파일은 로컬/NAS에, 태그와 작업 이력은 MariaDB에 저장됩니다.</small></span></div><input value={databaseUrl} onChange={(event) => setDatabaseUrl(event.target.value)} placeholder="mysql://사용자:비밀번호@서버:3306/file_organizer" /><button type="button" onClick={() => setDatabaseUrl('mysql://file_demo:file_demo_password@127.0.0.1:3307/file_organizer?charset=utf8mb4&connect_timeout=5')}>데모 설정</button><button type="button" className="primary-button" onClick={connectDatabase} disabled={busy}>연결 테스트·저장</button></div>}
+      <div className="organizer-flow-lanes">
+        <article className="organizer-flow-lane organizer-flow-lane--existing">
+          <div className="organizer-flow-lane__label"><b>01</b><span><strong>폴더 재구성</strong></span></div>
+          <div className="organizer-flow-track">
+            <div className="organizer-flow-node organizer-flow-node--source">
+              <span className="organizer-flow-node__icon"><Server size={22} /></span>
+              <span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span>
+              <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => setShowPaths((current) => !current)} disabled={pathsInfo?.sourceLocked} title="정리할 기존 폴더 선택·변경"><FolderOpen size={15} /><span>폴더 선택</span></button>
+            </div>
+            <div className="organizer-flow-arrow organizer-flow-arrow--copy" aria-hidden="true"><i /></div>
+            <div className="organizer-flow-node organizer-flow-node--result">
+              <span className="organizer-flow-node__icon"><HardDrive size={22} /></span>
+              <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span>
+              <span className="organizer-flow-node__actions"><button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--settings" onClick={() => setShowPaths((current) => !current)} disabled={pathsInfo?.destinationLocked} title="재구성 폴더 경로 설정"><Settings2 size={14} /><span>경로 설정</span></button></span>
+            </div>
+          </div>
+          <div className="organizer-flow-lane-footer">
+            <div className="organizer-flow-status-stack">
+              <div className="organizer-flow-preserve-note"><ShieldCheck size={16} /><span>기존 폴더는 유지됩니다.</span></div>
+              <div className={`organizer-rebuilt-status ${hasRebuiltFolder ? 'is-ready' : 'is-empty'}`}>
+                {hasRebuiltFolder ? <ShieldCheck size={16} /> : <AlertTriangle size={16} />}
+                <span>{hasRebuiltFolder ? '재구성된 폴더가 이미 존재합니다.' : '재구성된 폴더가 없습니다.'}</span>
+                {hasRebuiltFolder && <button type="button" onClick={() => void openInExplorer('destination')}><FolderOpen size={14} /> 폴더 열기</button>}
+              </div>
+            </div>
+            <div className="organizer-flow-lane-actions"><button type="button" className="organizer-flow-action organizer-flow-action--existing" onClick={scanSource} disabled={busy}><RefreshCw size={16} /> {busy ? '분석 중…' : '기존 폴더 분석'}<ArrowRight size={16} /></button></div>
+          </div>
+        </article>
+
+        {showPaths && <div className="card file-path-settings">
+          <div className="file-path-settings__intro"><Settings2 size={20} /><span><b>원본·정리 대상 경로</b><small>{(pathsInfo?.sourceLocked || pathsInfo?.destinationLocked) ? 'ui/.env에 경로가 고정되어 있어 여기서는 바꿀 수 없습니다.' : '두 경로를 바꾸면 다음 스캔부터 적용됩니다.'}</small></span></div>
+          <label>원본 폴더<input value={sourceRootInput} onChange={(event) => setSourceRootInput(event.target.value)} disabled={pathsInfo?.sourceLocked} placeholder="C:\path\to\incoming-files" /></label>
+          <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
+          <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
+        </div>}
+
+        {showFolderOrder && <div className="card file-order-settings">
+          <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>차종·품번·자료 유형·세부 폴더의 구조 순서를 정합니다.</small></span></div>
+          <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
+          <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '저장'}</button>
+        </div>}
+
+        <article className={`organizer-flow-lane organizer-flow-lane--upload ${dragging ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); setDragging(false); if (!busy) void uploadFiles(event.dataTransfer.files); }}>
+          <div className="organizer-flow-lane__label"><b>02</b><span><strong>파일 추가</strong><small>새로운 파일을 추가하면 자동 분석되어 정리 대기 파일에 등록됩니다.</small></span></div>
+          <div className="organizer-upload-flow">
+            <label className="organizer-upload-source" aria-disabled={busy}>
+              <input type="file" multiple disabled={busy} onChange={(event) => { if (event.target.files) void uploadFiles(event.target.files); event.currentTarget.value = ''; }} />
+              <span className="organizer-flow-node__icon"><UploadCloud size={24} /></span>
+              <span><strong>{busy ? '자동 분류 중…' : '파일 업로드'}</strong><em>여러 파일을 한 번에 올릴 수 있어요</em></span>
+            </label>
+            <div className="organizer-split-arrow" aria-hidden="true"><i /><b /><em /></div>
+            <div className="organizer-flow-branches">
+              <div className="organizer-flow-node organizer-flow-node--source organizer-flow-node--branch"><span className="organizer-flow-node__icon"><Server size={20} /></span><span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span></div>
+              <div className="organizer-flow-node organizer-flow-node--result organizer-flow-node--branch"><span className="organizer-flow-node__icon"><HardDrive size={20} /></span><span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span></div>
+            </div>
+          </div>
+        </article>
+      </div>
+    </section>
+    {showFolderOrder && <div className="card file-order-settings">
+      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>품번·차종·카테고리·세부 하위폴더의 쌓는 순서를 자유롭게 바꿀 수 있습니다. 저장하면 기존 파일도 새 순서로 옮겨집니다.</small></span></div>
+      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
+      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
+      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
+    </div>}
     {showDatabase && <div className="card file-database-settings"><div><Database size={20} /><span><b>MariaDB 연결</b><small>파일은 로컬/NAS에, 태그와 작업 이력은 MariaDB에 저장됩니다.</small></span></div><input value={databaseUrl} onChange={(event) => setDatabaseUrl(event.target.value)} placeholder="mysql://사용자:비밀번호@서버:3306/file_organizer" /><button type="button" onClick={() => setDatabaseUrl('mysql://file_demo:file_demo_password@127.0.0.1:3307/file_organizer?charset=utf8mb4&connect_timeout=5')}>데모 설정</button><button type="button" className="primary-button" onClick={connectDatabase} disabled={busy}>연결 테스트·저장</button></div>}
     <div className="file-storage-strip">
       <div><Server size={18} /><span><small>원본 폴더</small><b title={status?.sourceRoot}>{status?.sourceRoot || '확인 중'}</b></span><em className={status?.sourceAvailable ? 'ok' : ''}>{status?.sourceAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('source')} title="탐색기에서 열기" aria-label="원본 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
@@ -2085,17 +2156,9 @@ function FileOrganizerPage() {
       <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
       <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
     </div>}
-    <div className="file-order-overview">
-      <div className="file-order-overview__value"><Layers3 size={22} /><span><b>폴더 정리 순서</b><strong>{folderOrder.map(axisLabel).join(' → ')}</strong></span></div>
-      <button type="button" className={showFolderOrder ? 'active' : ''} onClick={() => setShowFolderOrder((current) => !current)} aria-expanded={showFolderOrder}>{showFolderOrder ? '닫기' : '순서 변경'}<ChevronDown size={17} /></button>
-    </div>
-    {showFolderOrder && <div className="card file-order-settings">
-      <div className="file-order-settings__intro"><ListFilter size={20} /><span><b>폴더 구조 순서</b><small>저장 시 기존 파일도 새 폴더 구조로 이동</small></span></div>
-      <ol className="file-order-axis-list">{folderOrder.map((axis, index) => <li key={axis}><span className="file-order-axis-index">{index + 1}</span><span className="file-order-axis-label">{axisLabel(axis)}</span><span className="file-order-axis-buttons"><button type="button" onClick={() => moveAxis(index, -1)} disabled={index === 0} aria-label="위로"><ChevronDown size={14} style={{ transform: 'rotate(180deg)' }} /></button><button type="button" onClick={() => moveAxis(index, 1)} disabled={index === folderOrder.length - 1} aria-label="아래로"><ChevronDown size={14} /></button></span></li>)}</ol>
-      <div className="file-order-preview"><small>예시 경로</small><code>{examplePath}</code></div>
-      <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '이 순서로 저장'}</button>
-    </div>}
-    <div className="file-organizer-grid">
+    <details className="organizer-legacy-details">
+      <summary><ListFilter size={17} /><span><b>세부 검토 및 정리</b><small>자동 분류 결과를 확인하고 복사·이동 작업을 실행합니다.</small></span><ChevronDown size={17} /></summary>
+      <div className="file-organizer-grid">
       <div className="file-organizer-main">
       <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
         <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
@@ -2105,7 +2168,8 @@ function FileOrganizerPage() {
       <Explorer />
       </div>
       <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div></aside>
-    </div>
+      </div>
+    </details>
   </section>;
 }
 
