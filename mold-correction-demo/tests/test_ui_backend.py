@@ -1360,6 +1360,21 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         )
         library_patcher.start()
         self.addCleanup(library_patcher.stop)
+        # PNG 라이브러리가 비어도 analyze_image 는 mesh -> CATIA 캡처로 제품
+        # 이미지를 만들어 낸다. 그 두 곳(data/product_mesh 와 CAD 소스 폴더)은
+        # 실제 개발 PC 에 64XX2-DR000 이 들어 있어, 막지 않으면 "제품데이터가
+        # 없을 때" 를 보는 시험이 진짜 CATPart 를 열어 통과하지 못한다. 위
+        # ALIGNMENT_STORE/PRODUCT_LIBRARY 와 같은 이유의 격리다.
+        mesh_patcher = patch.object(
+            backend_server,
+            "MESH_LIBRARY",
+            backend_server.MeshLibrary(Path(temp_dir.name) / "mesh"),
+        )
+        mesh_patcher.start()
+        self.addCleanup(mesh_patcher.stop)
+        cad_root_patcher = patch.object(backend_server, "CAD_SOURCE_ROOT", None)
+        cad_root_patcher.start()
+        self.addCleanup(cad_root_patcher.stop)
 
     def tearDown(self) -> None:
         backend_server._reader = None
