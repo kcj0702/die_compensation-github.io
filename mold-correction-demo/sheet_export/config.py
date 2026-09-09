@@ -30,11 +30,22 @@ LABEL_LINE = "404040"
 LEADER_LINE = "C05000"
 LEADER_WIDTH = 9525
 
+# 화면의 measure-point__label--plus/--minus(globals.css)와 같은 배색.
+# 보정치 부호를 시트에서도 바로 읽을 수 있게 값 텍스트 색만 바꾼다.
+LABEL_TEXT_POSITIVE_COLOR = "C0272D"
+LABEL_TEXT_NEGATIVE_COLOR = "1A56C4"
+
 # 측정 포인트에 찍는 작은 원. 지금까지는 지시선 끝의 tailEnd 만 있어서 눈에 잘
 # 안 띄고, 라벨/지시선과 함께 잡아 옮길 대상도 없었다. 라벨과 같은 그룹에
 # 넣어 셋이 한 덩어리로 움직이도록 만든다.
-POINT_DOT_RADIUS = 4       # px
+POINT_DOT_RADIUS = 3       # px
 POINT_DOT_COLOR = "9B1C1C"
+
+# 제로라인. 두께는 뷰 박스 폭에 대한 비율로 둔다 -- 이미지 원본 해상도가
+# 아니라 시트에 실제로 그려지는 크기 기준이라야 Detail 뷰(원본보다 훨씬
+# 확대)에서도 두께가 어색하게 굵어지지 않는다.
+ZERO_LINE_COLOR = "DC1414"
+ZERO_LINE_WIDTH_RATIO = 0.0026
 
 # 뷰 배치: 정면도는 위쪽, Detail View 는 아래쪽에 가로로 늘어놓는다.
 VIEW_MARGIN = 12
@@ -96,6 +107,24 @@ TITLE_DEFAULT_SIZES = {
 
 PRINT_AREA = "A1:AD40"
 PRINT_PAGE_ROWS = 40
+# 회사 양식과 같은 13.5pt(=18px). openpyxl 이 명시적으로 안 남기면 Excel 이
+# 기본 15pt(20px) 로 렌더링해 stack_workbooks 의 픽셀 시프트(=행 * 18px)와
+# 실제 셀 위치가 페이지당 4행씩 어긋난다 -- _apply_print_layout 에서 매 행
+# 이 값을 직접 지정해 도면·셀이 같은 척도를 쓰게 한다.
+ROW_HEIGHT_PT = 13.5
+
+# 회사 양식의 열 너비 그대로. 양식 파일(DEFAULT_TEMPLATE)이 회사 자료라 저장소에
+# 없을 때 openpyxl 이 빈 통합문서로 폴백하면서 모든 열이 기본 8.43 문자
+# (~64px) 로 렌더돼 시트가 SHEET_WIDTH(983px) 의 두 배 가까이 넓어진다.
+# 그 상태에서 그림·라벨이 SHEET_WIDTH 기준의 절대 좌표로 배치되니 왼쪽
+# 구석에만 몰려 보였다. 양식이 없을 때도 실제 양식과 같은 너비가 나오도록
+# 코드에서 강제한다. min/max 는 1-based 열 번호(A=1, AD=30, AM=39).
+COLUMN_WIDTHS = (
+    (1, 22, 3.77734375),   # A~V: 3.78 문자 폭
+    (23, 23, 1.33203125),  # W:  좁은 구분 열
+    (24, 38, 5.109375),    # X~AL: 5.11 문자 폭
+    (39, 39, 4.0),         # AM: 인쇄영역 밖 여백
+)
 PAGE_BREAK_PREVIEW_ZOOM = 85
 
 # 표제란 왼쪽 여백에 들어가는 시트 제목. 양식에는 비어 있는 A1:I6 영역이라

@@ -1909,6 +1909,84 @@ def _sheet_annotations(raw: Any) -> list[SheetAnnotation]:
     return result
 
 
+def _parse_zero_lines(raw: Any) -> list[list[tuple[float, float]]]:
+    """Coerce the UI's zero-line polylines into 0..1 ratios of the picture.
+
+    Coordinates arrive as percentages of the product image, the same frame
+    ``points`` already use. Exported as its own vector shape (see
+    ``sheet_export.drawing.zero_line``) rather than baked into the picture,
+    so the sheet keeps the part image and the zero-line as two independently
+    selectable objects -- selecting or deleting one in Excel no longer takes
+    the other with it.
+    """
+    if not isinstance(raw, list):
+        return []
+    lines: list[list[tuple[float, float]]] = []
+    for line in raw:
+        if not isinstance(line, list):
+            continue
+        points = [
+            (float(x) / 100.0, float(y) / 100.0)
+            for x, y in line
+            if isinstance(x, (int, float)) and isinstance(y, (int, float))
+        ]
+        if len(points) >= 2:
+            lines.append(points)
+    return lines
+
+
+def _parse_label_positions(raw: Any) -> dict[str, tuple[float, float]]:
+    """Coerce the UI's ``{pointId: {x, y}}`` payload into a Python dict.
+
+    The UI sends label positions as percentages of the picture (same frame
+    as ``x``/``y`` for the point itself). Values outside 0..100 are kept as
+    is -- a label parked outside the picture, in the sheet margin, is a
+    legitimate placement and gets clamped later during rendering only if
+    it would exit the print area entirely.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, tuple[float, float]] = {}
+    for key, entry in raw.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            x = float(entry["x"]) / 100.0
+            y = float(entry["y"]) / 100.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        out[str(key)] = (x, y)
+    return out
+
+
+def _last_applied_date(previous_bytes: bytes) -> str | None:
+    """Read the '적용일자' cell of the most recently appended block, if any.
+
+    Every stacked block repeats the title block at the same cell within its
+    own block, so the last block's value is simply the last non-empty one in
+    that column top to bottom -- this holds regardless of exactly how many
+    rows stack_workbooks shifted each block by, so it doesn't need to know
+    that internal row-counting scheme.
+    """
+    import io
+
+    import openpyxl
+
+    from sheet_export import config as sheet_config
+
+    workbook = openpyxl.load_workbook(io.BytesIO(previous_bytes))
+    sheet = workbook.active
+    cell_ref = sheet_config.TITLE_CELLS["applied_date"]
+    column = "".join(ch for ch in cell_ref if ch.isalpha())
+    last_value: str | None = None
+    for row in range(1, sheet.max_row + 1):
+        value = sheet[f"{column}{row}"].value
+        text = str(value).strip() if value is not None else ""
+        if text:
+            last_value = text
+    return last_value
+
+
 def build_sheet_bytes(
     product_image: np.ndarray, payload: dict[str, Any],
     previous_bytes: bytes | None = None,
@@ -1920,6 +1998,7 @@ def build_sheet_bytes(
     ``previous_bytes`` is provided, the new block is appended to that
     workbook via ``sheet_export.stack_workbooks``.
     """
+    zero_lines = _parse_zero_lines(payload.get("zeroLines"))
     raw_points = payload.get("points") or []
     points = [
         SheetPoint(
@@ -1951,8 +2030,27 @@ def build_sheet_bytes(
         applied_date=str(title_values.get("appliedDate", "")),
     )
 
+    # 하루치 보정을 한 파일에 이어붙이는 용도다. 어제 이전 시트에 오늘
+    # 것을 실수로 얹으면 날짜가 다른 블록이 한 파일에 섞여 나중에 어느
+    # 시트가 언제 적용됐는지 헷갈린다 -- 그래서 불러온 파일의 마지막
+    # 블록 적용일자와 지금 적용일자가 다르면 이어붙이기 자체를 막는다.
+    if previous_bytes:
+        applied_date = title.applied_date.strip()
+        try:
+            last_date = _last_applied_date(previous_bytes)
+        except Exception:
+            last_date = None
+        if last_date and applied_date and last_date != applied_date:
+            raise ValueError(
+                f"불러온 엑셀의 마지막 시트는 {last_date}에 적용된 것입니다. "
+                f"오늘({applied_date}) 적용분과 날짜가 달라 이어붙이지 않았습니다. "
+                "새 엑셀로 저장하거나, 같은 날짜의 엑셀을 불러오세요."
+            )
+
     front_view = SheetView(
         image=product_image, points=points, annotations=annotations,
+        zero_lines=zero_lines,
+        label_positions=_parse_label_positions(payload.get("frontLabels")),
     )
     _apply_placement(front_view, payload.get("frontPlacement"))
     views = [front_view]
@@ -1970,11 +2068,13 @@ def build_sheet_bytes(
                     float(region["h"]) / 100.0,
                 ),
                 label,
+                zero_lines=zero_lines,
             )
         except (KeyError, TypeError, ValueError) as exc:
             skipped.append(f"{label}: {exc}")
             continue
         _apply_placement(detail_view, region.get("placement"))
+        detail_view.label_positions = _parse_label_positions(region.get("labels"))
         views.append(detail_view)
 
     with tempfile.TemporaryDirectory() as temp_dir:
