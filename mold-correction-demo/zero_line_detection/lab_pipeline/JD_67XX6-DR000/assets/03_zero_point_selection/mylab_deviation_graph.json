@@ -1,0 +1,2443 @@
+{
+  "source_contour": "C:\\ajin\\my_lab\\scan_point_contour\\output\\JD_67XX6-DR000 3D 스캔\\scan_point_loops.json",
+  "source_clean_image": "C:\\ajin\\my_lab\\label_removal\\output\\2_labels_inpainted\\JD_67XX6-DR000 3D 스캔_2_labels_inpainted.png",
+  "source_original_image": "C:\\ajin\\my_lab\\label_removal\\input\\JD_67XX6-DR000 3D 스캔.png",
+  "value_source": "printed_label_ocr",
+  "value_unit": "mm",
+  "pixels_per_mm": 7.408333333333334,
+  "matched_label_count": 127,
+  "zero_points_calculated": false,
+  "loops": [
+    {
+      "name": "nested_shell_1",
+      "closed": true,
+      "samples": [
+        {
+          "contour_point": [
+            264,
+            473
+          ],
+          "value_mm": 3.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            40,
+            446,
+            84,
+            479
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            236,
+            477
+          ]
+        },
+        {
+          "contour_point": [
+            245,
+            402
+          ],
+          "value_mm": 4.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            46,
+            337,
+            90,
+            370
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            216,
+            410
+          ]
+        },
+        {
+          "contour_point": [
+            231,
+            347
+          ],
+          "value_mm": 3.7,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            39,
+            273,
+            83,
+            306
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            204,
+            350
+          ]
+        },
+        {
+          "contour_point": [
+            231,
+            290
+          ],
+          "value_mm": 3.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            52,
+            195,
+            96,
+            228
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            204,
+            289
+          ]
+        },
+        {
+          "contour_point": [
+            234,
+            239
+          ],
+          "value_mm": 3.2,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            82,
+            134,
+            126,
+            167
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            211,
+            232
+          ]
+        },
+        {
+          "contour_point": [
+            259,
+            199
+          ],
+          "value_mm": 2.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            149,
+            72,
+            193,
+            105
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            248,
+            187
+          ]
+        },
+        {
+          "contour_point": [
+            311,
+            167
+          ],
+          "value_mm": 1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            227,
+            36,
+            271,
+            69
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            308,
+            159
+          ]
+        },
+        {
+          "contour_point": [
+            381,
+            159
+          ],
+          "value_mm": 0.4,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            366,
+            24,
+            410,
+            57
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            381,
+            156
+          ]
+        },
+        {
+          "contour_point": [
+            518,
+            152
+          ],
+          "value_mm": -1.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            504,
+            16,
+            555,
+            49
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            519,
+            163
+          ]
+        },
+        {
+          "contour_point": [
+            652,
+            146
+          ],
+          "value_mm": -2.7,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            636,
+            17,
+            687,
+            50
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            653,
+            166
+          ]
+        },
+        {
+          "contour_point": [
+            737,
+            142
+          ],
+          "value_mm": -3.4,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            723,
+            13,
+            774,
+            46
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            738,
+            167
+          ]
+        },
+        {
+          "contour_point": [
+            832,
+            138
+          ],
+          "value_mm": -3.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            821,
+            9,
+            872,
+            42
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            833,
+            160
+          ]
+        },
+        {
+          "contour_point": [
+            929,
+            134
+          ],
+          "value_mm": -3.2,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            921,
+            5,
+            972,
+            38
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            928,
+            158
+          ]
+        },
+        {
+          "contour_point": [
+            1002,
+            147
+          ],
+          "value_mm": -1.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            1029,
+            13,
+            1080,
+            46
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1001,
+            160
+          ]
+        },
+        {
+          "contour_point": [
+            1113,
+            141
+          ],
+          "value_mm": -1.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1145,
+            8,
+            1196,
+            41
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1113,
+            148
+          ]
+        },
+        {
+          "contour_point": [
+            1209,
+            133
+          ],
+          "value_mm": -0.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1275,
+            5,
+            1326,
+            38
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1209,
+            137
+          ]
+        },
+        {
+          "contour_point": [
+            1305,
+            126
+          ],
+          "value_mm": -1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            1384,
+            7,
+            1435,
+            40
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1306,
+            134
+          ]
+        },
+        {
+          "contour_point": [
+            1411,
+            116
+          ],
+          "value_mm": -1.7,
+          "ocr_confidence": 0.75785,
+          "label_box": [
+            1557,
+            61,
+            1608,
+            94
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1406,
+            128
+          ]
+        },
+        {
+          "contour_point": [
+            1442,
+            187
+          ],
+          "value_mm": -2.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            1560,
+            160,
+            1611,
+            193
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1425,
+            191
+          ]
+        },
+        {
+          "contour_point": [
+            1451,
+            300
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            1571,
+            279,
+            1622,
+            312
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1445,
+            300
+          ]
+        },
+        {
+          "contour_point": [
+            1455,
+            366
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            1575,
+            348,
+            1626,
+            381
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1449,
+            366
+          ]
+        },
+        {
+          "contour_point": [
+            1456,
+            470
+          ],
+          "value_mm": 1.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1576,
+            456,
+            1620,
+            489
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1463,
+            470
+          ]
+        },
+        {
+          "contour_point": [
+            1458,
+            562
+          ],
+          "value_mm": 1.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            1578,
+            549,
+            1622,
+            582
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1467,
+            562
+          ]
+        },
+        {
+          "contour_point": [
+            1455,
+            638
+          ],
+          "value_mm": 0.2,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1575,
+            627,
+            1619,
+            660
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1456,
+            638
+          ]
+        },
+        {
+          "contour_point": [
+            1451,
+            731
+          ],
+          "value_mm": 0.3,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1570,
+            723,
+            1614,
+            756
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1453,
+            731
+          ]
+        },
+        {
+          "contour_point": [
+            1442,
+            829
+          ],
+          "value_mm": -0.7,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1560,
+            827,
+            1611,
+            860
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1437,
+            828
+          ]
+        },
+        {
+          "contour_point": [
+            1415,
+            898
+          ],
+          "value_mm": -1.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1473,
+            969,
+            1524,
+            1002
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1411,
+            892
+          ]
+        },
+        {
+          "contour_point": [
+            1344,
+            893
+          ],
+          "value_mm": -1.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            1397,
+            973,
+            1448,
+            1006
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1345,
+            883
+          ]
+        },
+        {
+          "contour_point": [
+            1266,
+            884
+          ],
+          "value_mm": -1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            1310,
+            975,
+            1361,
+            1008
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1267,
+            876
+          ]
+        },
+        {
+          "contour_point": [
+            1207,
+            881
+          ],
+          "value_mm": -1.4,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            1242,
+            976,
+            1293,
+            1009
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1208,
+            871
+          ]
+        },
+        {
+          "contour_point": [
+            1105,
+            873
+          ],
+          "value_mm": -1.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            1107,
+            972,
+            1158,
+            1005
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1106,
+            859
+          ]
+        },
+        {
+          "contour_point": [
+            1016,
+            869
+          ],
+          "value_mm": -2.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            1011,
+            969,
+            1062,
+            1002
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1015,
+            851
+          ]
+        },
+        {
+          "contour_point": [
+            937,
+            882
+          ],
+          "value_mm": -3.1,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            927,
+            983,
+            978,
+            1016
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            936,
+            859
+          ]
+        },
+        {
+          "contour_point": [
+            833,
+            877
+          ],
+          "value_mm": -3.7,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            819,
+            978,
+            870,
+            1011
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            834,
+            850
+          ]
+        },
+        {
+          "contour_point": [
+            742,
+            873
+          ],
+          "value_mm": -4.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            725,
+            974,
+            776,
+            1007
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            743,
+            843
+          ]
+        },
+        {
+          "contour_point": [
+            662,
+            871
+          ],
+          "value_mm": -3.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            643,
+            972,
+            694,
+            1005
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            663,
+            844
+          ]
+        },
+        {
+          "contour_point": [
+            583,
+            867
+          ],
+          "value_mm": -2.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            562,
+            967,
+            613,
+            1000
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            584,
+            846
+          ]
+        },
+        {
+          "contour_point": [
+            520,
+            865
+          ],
+          "value_mm": -2.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            497,
+            965,
+            548,
+            998
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            521,
+            844
+          ]
+        },
+        {
+          "contour_point": [
+            427,
+            861
+          ],
+          "value_mm": -1.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            404,
+            961,
+            455,
+            994
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            428,
+            849
+          ]
+        },
+        {
+          "contour_point": [
+            320,
+            854
+          ],
+          "value_mm": -0.1,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            293,
+            953,
+            344,
+            986
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            320,
+            853
+          ]
+        },
+        {
+          "contour_point": [
+            287,
+            838
+          ],
+          "value_mm": 0.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            160,
+            925,
+            204,
+            958
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            284,
+            842
+          ]
+        },
+        {
+          "contour_point": [
+            256,
+            810
+          ],
+          "value_mm": 1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            88,
+            861,
+            132,
+            894
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            249,
+            815
+          ]
+        },
+        {
+          "contour_point": [
+            234,
+            764
+          ],
+          "value_mm": 1.7,
+          "ocr_confidence": 0.75785,
+          "label_box": [
+            59,
+            787,
+            103,
+            820
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            222,
+            767
+          ]
+        },
+        {
+          "contour_point": [
+            235,
+            718
+          ],
+          "value_mm": 2.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            53,
+            725,
+            97,
+            758
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            216,
+            718
+          ]
+        },
+        {
+          "contour_point": [
+            235,
+            672
+          ],
+          "value_mm": 2.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            51,
+            668,
+            95,
+            701
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            214,
+            672
+          ]
+        },
+        {
+          "contour_point": [
+            234,
+            630
+          ],
+          "value_mm": 2.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            49,
+            619,
+            93,
+            652
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            215,
+            626
+          ]
+        },
+        {
+          "contour_point": [
+            264,
+            539
+          ],
+          "value_mm": 3.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            40,
+            531,
+            84,
+            564
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            239,
+            534
+          ]
+        }
+      ]
+    },
+    {
+      "name": "nested_shell_2",
+      "closed": true,
+      "samples": [
+        {
+          "contour_point": [
+            300,
+            476
+          ],
+          "value_mm": 4.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            246,
+            427,
+            290,
+            460
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            266,
+            478
+          ]
+        },
+        {
+          "contour_point": [
+            291,
+            416
+          ],
+          "value_mm": 4.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            243,
+            366,
+            287,
+            399
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            256,
+            422
+          ]
+        },
+        {
+          "contour_point": [
+            281,
+            359
+          ],
+          "value_mm": 4.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            245,
+            308,
+            289,
+            341
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            249,
+            358
+          ]
+        },
+        {
+          "contour_point": [
+            296,
+            253
+          ],
+          "value_mm": 2.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            277,
+            193,
+            321,
+            226
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            278,
+            242
+          ]
+        },
+        {
+          "contour_point": [
+            377,
+            203
+          ],
+          "value_mm": 2.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            385,
+            168,
+            429,
+            201
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            373,
+            189
+          ]
+        },
+        {
+          "contour_point": [
+            518,
+            199
+          ],
+          "value_mm": -0.1,
+          "ocr_confidence": 0.27102,
+          "label_box": [
+            527,
+            167,
+            578,
+            200
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            518,
+            200
+          ]
+        },
+        {
+          "contour_point": [
+            654,
+            200
+          ],
+          "value_mm": -1.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            660,
+            158,
+            711,
+            200
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            654,
+            210
+          ]
+        },
+        {
+          "contour_point": [
+            737,
+            188
+          ],
+          "value_mm": -2.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            744,
+            156,
+            795,
+            189
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            738,
+            204
+          ]
+        },
+        {
+          "contour_point": [
+            831,
+            184
+          ],
+          "value_mm": -1.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            841,
+            154,
+            892,
+            187
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            831,
+            196
+          ]
+        },
+        {
+          "contour_point": [
+            932,
+            190
+          ],
+          "value_mm": -1.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            930,
+            145,
+            981,
+            178
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            931,
+            200
+          ]
+        },
+        {
+          "contour_point": [
+            999,
+            201
+          ],
+          "value_mm": -0.2,
+          "ocr_confidence": 0.26303,
+          "label_box": [
+            1011,
+            168,
+            1062,
+            201
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            999,
+            202
+          ]
+        },
+        {
+          "contour_point": [
+            1120,
+            196
+          ],
+          "value_mm": 0.3,
+          "ocr_confidence": 0.23482,
+          "label_box": [
+            1131,
+            166,
+            1175,
+            199
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1120,
+            194
+          ]
+        },
+        {
+          "contour_point": [
+            1211,
+            195
+          ],
+          "value_mm": 1.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1231,
+            175,
+            1275,
+            208
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1211,
+            183
+          ]
+        },
+        {
+          "contour_point": [
+            1312,
+            200
+          ],
+          "value_mm": -0.2,
+          "ocr_confidence": 0.23482,
+          "label_box": [
+            1327,
+            177,
+            1378,
+            210
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1312,
+            201
+          ]
+        },
+        {
+          "contour_point": [
+            1417,
+            212
+          ],
+          "value_mm": -1.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            1430,
+            133,
+            1481,
+            166
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1411,
+            219
+          ]
+        },
+        {
+          "contour_point": [
+            1424,
+            304
+          ],
+          "value_mm": -0.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            1470,
+            229,
+            1521,
+            262
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1417,
+            304
+          ]
+        },
+        {
+          "contour_point": [
+            1428,
+            367
+          ],
+          "value_mm": -1.4,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            1481,
+            315,
+            1532,
+            348
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1418,
+            367
+          ]
+        },
+        {
+          "contour_point": [
+            1432,
+            472
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            1485,
+            424,
+            1536,
+            457
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1426,
+            472
+          ]
+        },
+        {
+          "contour_point": [
+            1432,
+            560
+          ],
+          "value_mm": -0.3,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1484,
+            509,
+            1535,
+            542
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1430,
+            560
+          ]
+        },
+        {
+          "contour_point": [
+            1430,
+            637
+          ],
+          "value_mm": 0.7,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1482,
+            588,
+            1526,
+            621
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1435,
+            637
+          ]
+        },
+        {
+          "contour_point": [
+            1424,
+            726
+          ],
+          "value_mm": 1.4,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            1478,
+            689,
+            1522,
+            722
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1434,
+            727
+          ]
+        },
+        {
+          "contour_point": [
+            1418,
+            781
+          ],
+          "value_mm": 0.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            1472,
+            748,
+            1516,
+            781
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1424,
+            784
+          ]
+        },
+        {
+          "contour_point": [
+            1383,
+            808
+          ],
+          "value_mm": 1.7,
+          "ocr_confidence": 0.75785,
+          "label_box": [
+            1383,
+            825,
+            1428,
+            858
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1388,
+            819
+          ]
+        },
+        {
+          "contour_point": [
+            1352,
+            811
+          ],
+          "value_mm": 0.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            1330,
+            826,
+            1374,
+            859
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1353,
+            818
+          ]
+        },
+        {
+          "contour_point": [
+            1274,
+            817
+          ],
+          "value_mm": 0.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1277,
+            826,
+            1321,
+            859
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1274,
+            821
+          ]
+        },
+        {
+          "contour_point": [
+            1213,
+            813
+          ],
+          "value_mm": 1.4,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            1224,
+            825,
+            1268,
+            858
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1213,
+            823
+          ]
+        },
+        {
+          "contour_point": [
+            1110,
+            813
+          ],
+          "value_mm": -0.3,
+          "ocr_confidence": 0.23482,
+          "label_box": [
+            1120,
+            823,
+            1171,
+            856
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1110,
+            811
+          ]
+        },
+        {
+          "contour_point": [
+            1003,
+            816
+          ],
+          "value_mm": 0.4,
+          "ocr_confidence": 0.23482,
+          "label_box": [
+            1009,
+            823,
+            1053,
+            856
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1003,
+            819
+          ]
+        },
+        {
+          "contour_point": [
+            928,
+            825
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            919,
+            834,
+            970,
+            867
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            928,
+            819
+          ]
+        },
+        {
+          "contour_point": [
+            740,
+            822
+          ],
+          "value_mm": -2.4,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            735,
+            832,
+            786,
+            865
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            740,
+            804
+          ]
+        },
+        {
+          "contour_point": [
+            659,
+            818
+          ],
+          "value_mm": -1.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            647,
+            833,
+            698,
+            866
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            659,
+            809
+          ]
+        },
+        {
+          "contour_point": [
+            584,
+            819
+          ],
+          "value_mm": -1.7,
+          "ocr_confidence": 0.75785,
+          "label_box": [
+            574,
+            833,
+            625,
+            866
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            584,
+            806
+          ]
+        },
+        {
+          "contour_point": [
+            525,
+            816
+          ],
+          "value_mm": -1.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            488,
+            825,
+            539,
+            858
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            525,
+            806
+          ]
+        },
+        {
+          "contour_point": [
+            432,
+            817
+          ],
+          "value_mm": -0.3,
+          "ocr_confidence": 0.23482,
+          "label_box": [
+            425,
+            827,
+            476,
+            860
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            432,
+            815
+          ]
+        },
+        {
+          "contour_point": [
+            333,
+            797
+          ],
+          "value_mm": 0.1,
+          "ocr_confidence": 0.23174,
+          "label_box": [
+            323,
+            815,
+            367,
+            848
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            333,
+            798
+          ]
+        },
+        {
+          "contour_point": [
+            289,
+            763
+          ],
+          "value_mm": 1.2,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            262,
+            779,
+            306,
+            812
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            281,
+            767
+          ]
+        },
+        {
+          "contour_point": [
+            284,
+            712
+          ],
+          "value_mm": 2.1,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            238,
+            720,
+            282,
+            753
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            268,
+            713
+          ]
+        },
+        {
+          "contour_point": [
+            282,
+            680
+          ],
+          "value_mm": 2.7,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            238,
+            633,
+            282,
+            666
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            262,
+            678
+          ]
+        },
+        {
+          "contour_point": [
+            294,
+            608
+          ],
+          "value_mm": 4.1,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            244,
+            570,
+            288,
+            603
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            264,
+            604
+          ]
+        },
+        {
+          "contour_point": [
+            300,
+            540
+          ],
+          "value_mm": 4.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            243,
+            493,
+            287,
+            526
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            266,
+            538
+          ]
+        }
+      ]
+    },
+    {
+      "name": "nested_shell_3",
+      "closed": true,
+      "samples": [
+        {
+          "contour_point": [
+            341,
+            477
+          ],
+          "value_mm": 2.7,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            353,
+            464,
+            397,
+            497
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            321,
+            477
+          ]
+        },
+        {
+          "contour_point": [
+            339,
+            414
+          ],
+          "value_mm": 3.2,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            354,
+            399,
+            398,
+            432
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            315,
+            414
+          ]
+        },
+        {
+          "contour_point": [
+            341,
+            362
+          ],
+          "value_mm": 2.7,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            354,
+            368,
+            398,
+            401
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            321,
+            361
+          ]
+        },
+        {
+          "contour_point": [
+            342,
+            305
+          ],
+          "value_mm": 2.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            353,
+            313,
+            397,
+            346
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            321,
+            303
+          ]
+        },
+        {
+          "contour_point": [
+            349,
+            261
+          ],
+          "value_mm": 2.1,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            369,
+            279,
+            413,
+            312
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            335,
+            254
+          ]
+        },
+        {
+          "contour_point": [
+            380,
+            231
+          ],
+          "value_mm": 1.9,
+          "ocr_confidence": 0.32609,
+          "label_box": [
+            401,
+            247,
+            445,
+            280
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            378,
+            217
+          ]
+        },
+        {
+          "contour_point": [
+            524,
+            231
+          ],
+          "value_mm": -0.5,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            458,
+            249,
+            509,
+            282
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            524,
+            235
+          ]
+        },
+        {
+          "contour_point": [
+            660,
+            229
+          ],
+          "value_mm": -1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            601,
+            247,
+            652,
+            280
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            660,
+            237
+          ]
+        },
+        {
+          "contour_point": [
+            740,
+            229
+          ],
+          "value_mm": -1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            712,
+            246,
+            763,
+            279
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            740,
+            237
+          ]
+        },
+        {
+          "contour_point": [
+            837,
+            234
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            814,
+            251,
+            865,
+            284
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            837,
+            240
+          ]
+        },
+        {
+          "contour_point": [
+            934,
+            232
+          ],
+          "value_mm": -0.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            908,
+            250,
+            959,
+            283
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            934,
+            238
+          ]
+        },
+        {
+          "contour_point": [
+            1001,
+            233
+          ],
+          "value_mm": -0.4,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            972,
+            249,
+            1023,
+            282
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1001,
+            236
+          ]
+        },
+        {
+          "contour_point": [
+            1129,
+            232
+          ],
+          "value_mm": 0.5,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1109,
+            250,
+            1153,
+            283
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1129,
+            228
+          ]
+        },
+        {
+          "contour_point": [
+            1219,
+            234
+          ],
+          "value_mm": 0.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1198,
+            249,
+            1242,
+            282
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1219,
+            230
+          ]
+        },
+        {
+          "contour_point": [
+            1320,
+            231
+          ],
+          "value_mm": -0.1,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1268,
+            248,
+            1319,
+            281
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1320,
+            232
+          ]
+        },
+        {
+          "contour_point": [
+            1383,
+            258
+          ],
+          "value_mm": -0.7,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1326,
+            266,
+            1377,
+            299
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1380,
+            262
+          ]
+        },
+        {
+          "contour_point": [
+            1397,
+            301
+          ],
+          "value_mm": -0.2,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1330,
+            309,
+            1381,
+            342
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1396,
+            301
+          ]
+        },
+        {
+          "contour_point": [
+            1401,
+            366
+          ],
+          "value_mm": -0.2,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1337,
+            375,
+            1388,
+            408
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1400,
+            366
+          ]
+        },
+        {
+          "contour_point": [
+            1404,
+            470
+          ],
+          "value_mm": 0.1,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1347,
+            453,
+            1391,
+            486
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1405,
+            470
+          ]
+        },
+        {
+          "contour_point": [
+            1404,
+            558
+          ],
+          "value_mm": 0.4,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1347,
+            543,
+            1391,
+            576
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1407,
+            558
+          ]
+        },
+        {
+          "contour_point": [
+            1403,
+            633
+          ],
+          "value_mm": 0.7,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            1345,
+            621,
+            1389,
+            654
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1408,
+            633
+          ]
+        },
+        {
+          "contour_point": [
+            1393,
+            729
+          ],
+          "value_mm": 1.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            1343,
+            665,
+            1387,
+            698
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1403,
+            731
+          ]
+        },
+        {
+          "contour_point": [
+            1383,
+            756
+          ],
+          "value_mm": 1.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1330,
+            710,
+            1374,
+            743
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1393,
+            762
+          ]
+        },
+        {
+          "contour_point": [
+            1363,
+            782
+          ],
+          "value_mm": 1.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            1295,
+            734,
+            1339,
+            767
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1366,
+            793
+          ]
+        },
+        {
+          "contour_point": [
+            1286,
+            783
+          ],
+          "value_mm": 1.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            1226,
+            736,
+            1270,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1286,
+            794
+          ]
+        },
+        {
+          "contour_point": [
+            1221,
+            780
+          ],
+          "value_mm": 1.1,
+          "ocr_confidence": 0.79093,
+          "label_box": [
+            1165,
+            736,
+            1209,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1221,
+            788
+          ]
+        },
+        {
+          "contour_point": [
+            1131,
+            783
+          ],
+          "value_mm": 0.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            1081,
+            736,
+            1125,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1131,
+            787
+          ]
+        },
+        {
+          "contour_point": [
+            1001,
+            781
+          ],
+          "value_mm": 0.1,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            1020,
+            735,
+            1064,
+            768
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            1001,
+            782
+          ]
+        },
+        {
+          "contour_point": [
+            931,
+            783
+          ],
+          "value_mm": -0.7,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            950,
+            731,
+            1001,
+            764
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            931,
+            778
+          ]
+        },
+        {
+          "contour_point": [
+            833,
+            780
+          ],
+          "value_mm": -1.4,
+          "ocr_confidence": 0.75485,
+          "label_box": [
+            847,
+            736,
+            898,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            833,
+            770
+          ]
+        },
+        {
+          "contour_point": [
+            729,
+            781
+          ],
+          "value_mm": -1.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            743,
+            736,
+            794,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            729,
+            769
+          ]
+        },
+        {
+          "contour_point": [
+            659,
+            782
+          ],
+          "value_mm": -2.1,
+          "ocr_confidence": 0.66388,
+          "label_box": [
+            667,
+            736,
+            718,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            659,
+            766
+          ]
+        },
+        {
+          "contour_point": [
+            589,
+            781
+          ],
+          "value_mm": -2.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            583,
+            736,
+            634,
+            769
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            589,
+            766
+          ]
+        },
+        {
+          "contour_point": [
+            520,
+            782
+          ],
+          "value_mm": -1.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            516,
+            738,
+            567,
+            771
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            520,
+            775
+          ]
+        },
+        {
+          "contour_point": [
+            430,
+            779
+          ],
+          "value_mm": -0.3,
+          "ocr_confidence": 0.22717,
+          "label_box": [
+            447,
+            735,
+            498,
+            768
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            430,
+            777
+          ]
+        },
+        {
+          "contour_point": [
+            353,
+            759
+          ],
+          "value_mm": 1.0,
+          "ocr_confidence": 0.34919,
+          "label_box": [
+            373,
+            729,
+            417,
+            762
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            348,
+            765
+          ]
+        },
+        {
+          "contour_point": [
+            340,
+            709
+          ],
+          "value_mm": 1.5,
+          "ocr_confidence": 0.36103,
+          "label_box": [
+            359,
+            691,
+            403,
+            724
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            329,
+            711
+          ]
+        },
+        {
+          "contour_point": [
+            341,
+            673
+          ],
+          "value_mm": 1.8,
+          "ocr_confidence": 0.18631,
+          "label_box": [
+            356,
+            634,
+            400,
+            667
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            328,
+            673
+          ]
+        },
+        {
+          "contour_point": [
+            341,
+            612
+          ],
+          "value_mm": 2.3,
+          "ocr_confidence": 0.5393,
+          "label_box": [
+            356,
+            596,
+            400,
+            629
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            324,
+            612
+          ]
+        },
+        {
+          "contour_point": [
+            342,
+            538
+          ],
+          "value_mm": 2.6,
+          "ocr_confidence": 0.20911,
+          "label_box": [
+            355,
+            518,
+            399,
+            551
+          ],
+          "leader_traced": true,
+          "graph_point": [
+            323,
+            538
+          ]
+        }
+      ]
+    }
+  ]
+}

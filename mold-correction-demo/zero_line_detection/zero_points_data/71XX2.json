@@ -1,0 +1,136 @@
+{
+  "source_deviation_graph": "C:\\ajin\\my_lab\\contour_graph\\output\\JD_71XX2-DR000 3D 스캔\\deviation_graph.json",
+  "source_graph_image": "C:\\ajin\\my_lab\\contour_graph\\output\\JD_71XX2-DR000 3D 스캔\\01_deviation_graph.png",
+  "value_source": "printed_label_ocr",
+  "value_unit": "mm",
+  "selection_rule": {
+    "exact_zero": "printed label value equals 0",
+    "interpolated_zero": "adjacent values have opposite signs",
+    "unrelated_geometric_crossings_excluded": true,
+    "closed_last_to_first_interval_included": true
+  },
+  "zero_point_count": 8,
+  "loops": [
+    {
+      "name": "product_outer",
+      "closed": true,
+      "zero_point_count": 8,
+      "zero_points": [
+        {
+          "type": "exact_label_zero",
+          "point": [
+            663.0,
+            523.0
+          ],
+          "sample_index": 13,
+          "value_mm": 0.0
+        },
+        {
+          "type": "exact_label_zero",
+          "point": [
+            590.0,
+            321.0
+          ],
+          "sample_index": 32,
+          "value_mm": 0.0
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            129.90909,
+            412.18182
+          ],
+          "between_sample_indices": [
+            2,
+            3
+          ],
+          "between_values_mm": [
+            -0.1,
+            1.0
+          ],
+          "interpolation_ratio": 0.09090909
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            342.75,
+            508.75
+          ],
+          "between_sample_indices": [
+            8,
+            9
+          ],
+          "between_values_mm": [
+            0.3,
+            -0.1
+          ],
+          "interpolation_ratio": 0.75
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            956.75,
+            539.25
+          ],
+          "between_sample_indices": [
+            15,
+            16
+          ],
+          "between_values_mm": [
+            -0.3,
+            0.1
+          ],
+          "interpolation_ratio": 0.75
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            1096.14286,
+            420.71429
+          ],
+          "between_sample_indices": [
+            23,
+            24
+          ],
+          "between_values_mm": [
+            0.4,
+            -0.3
+          ],
+          "interpolation_ratio": 0.57142857
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            997.4,
+            399.6
+          ],
+          "between_sample_indices": [
+            27,
+            28
+          ],
+          "between_values_mm": [
+            -0.3,
+            0.2
+          ],
+          "interpolation_ratio": 0.6
+        },
+        {
+          "type": "sign_change_interpolation",
+          "point": [
+            853.33333,
+            370.33333
+          ],
+          "between_sample_indices": [
+            29,
+            30
+          ],
+          "between_values_mm": [
+            0.1,
+            -0.2
+          ],
+          "interpolation_ratio": 0.33333333
+        }
+      ]
+    }
+  ]
+}

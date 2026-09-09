@@ -259,7 +259,12 @@ button { cursor: pointer; }
 .cad-viewer__seg button+button{border-left:0}
 .cad-viewer__stat{padding:5px 10px;border-radius:6px;background:rgba(14,22,30,.6);color:#8fa3b4;font-size:9px;letter-spacing:.02em;backdrop-filter:blur(6px)}
 .cad-viewer__hint{color:#6f8395}
-.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;gap:0;z-index:2}
+.cad-viewer__views{position:absolute;right:12px;top:12px;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:0;z-index:2;max-width:60%}
+/* 좌표축 표시 — 지금 어느 쪽에서 보는지 */
+.cad-viewer__axis{position:absolute;left:12px;bottom:96px;z-index:3;display:flex;flex-direction:column;align-items:center;gap:2px;padding:6px 7px 5px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:rgba(14,22,30,.76);backdrop-filter:blur(6px);pointer-events:none}
+.cad-viewer__axis svg{width:58px;height:58px;overflow:visible}
+.cad-viewer__axis-ring{fill:none;stroke:rgba(255,255,255,.14)}
+.cad-viewer__axis small{color:#8fa3b4;font-size:7.5px;letter-spacing:.02em;white-space:nowrap}
 .cad-viewer__views button{padding:5px 11px;border:1px solid rgba(255,255,255,.22);background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
 .cad-viewer__views button:first-child{border-radius:6px 0 0 6px}
 .cad-viewer__views button:last-child{border-radius:0 6px 6px 0}
@@ -308,6 +313,15 @@ button { cursor: pointer; }
 .cad-zone-row input{min-width:180px;flex:1;height:30px;padding:0 8px;border:1px solid #d4dae0;border-radius:6px}
 .cad-zone-row select{height:30px;border:1px solid #d4dae0;border-radius:6px;background:#fff}
 .cad-error p{margin:5px 0 0;color:#95626a;font-size:9px;line-height:1.5}
+/* 시트에 담은 3D 화면들 */
+.shot-strip{padding:11px 16px;border-top:1px solid #e6ebf0;background:#fafbfc}
+.shot-strip__head{display:block;margin-bottom:9px;color:#8b95a2;font-size:8.5px;letter-spacing:.02em}
+.shot-strip__row{display:flex;flex-wrap:wrap;gap:9px}
+.shot-card{position:relative;width:132px;margin:0;border:1px solid #d3dae1;border-radius:7px;background:#fff;overflow:hidden}
+.shot-card img{display:block;width:100%;height:74px;object-fit:cover;background:#16202a}
+.shot-card figcaption{padding:5px 7px;color:#5d6c80;font-size:8.5px;font-weight:600;letter-spacing:.02em}
+.shot-card button{position:absolute;right:4px;top:4px;width:19px;height:19px;display:grid;place-items:center;padding:0;border:1px solid rgba(255,255,255,.45);border-radius:5px;color:#fff;background:rgba(20,31,44,.78);cursor:pointer}
+.shot-card button:hover{background:rgba(189,70,80,.92)}
 @media(max-width:900px){.cad-layout{grid-template-columns:1fr}}
 .anchor-layer{z-index:8}
 .anchor-point{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;padding:0;border:0;background:none;cursor:pointer}
@@ -1845,3 +1859,86 @@ button { cursor: pointer; }
 .frame-toggles {
   display: none !important;
 }
+
+/* ── 3D 시각화 (우리 작업) ─────────────────────────────
+   main 의 UI 개편과 같은 자리에서 부딪혀, 저쪽 구조(미디어쿼리 안)를
+   건드리지 않도록 이리로 모았다. 선택자가 서로 겹치지 않는다. */
+.cad-viewer__pick-level{display:flex;align-items:center;gap:7px;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
+.cad-viewer__pick-level label{color:#8fa3b4;font-size:9px;font-weight:600}
+.cad-viewer__pick-level input{width:82px;accent-color:#ffef3a}
+/* 숫자 입력칸 — 슬라이더로는 0.35 같은 값을 정확히 못 맞춘다. */
+.cad-viewer__pick-level input.cad-viewer__num{width:46px;padding:2px 4px;border:1px solid rgba(255,255,255,.2);border-radius:4px;background:rgba(8,14,20,.8);color:#e6eef6;font-size:9.5px;font-variant-numeric:tabular-nums}
+.cad-viewer__zone-tools{display:inline-flex;gap:3px}
+.cad-viewer__zone-tools button{padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;cursor:pointer}
+.cad-viewer__zone-tools button.is-on{border-color:#ff5fa8;background:rgba(255,95,168,.18);color:#ffd6e8}
+.cad-viewer__zone-auto{display:flex;margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.1)}
+.cad-viewer__zone-auto button:disabled{color:#5d6c7a;cursor:not-allowed}
+.cad-viewer__zones-size em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
+.cad-viewer__pick-level b{color:#c6d4e0;font-size:9px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.cad-viewer__pick-level em{color:#7d90a2;font-size:8.5px;font-style:normal;white-space:nowrap}
+/* 표준 공정 구역 — 부품 좌표로 한 번 등록하면 매번 저절로 뜬다 */
+.zone-book{margin:0 0 8px;padding:10px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb}
+.zone-book__head{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;margin-bottom:7px}
+.zone-book__head>b{font-size:12px;color:#1d2b3a}
+.zone-book__head span{flex:1;min-width:20ch;font-size:10.5px;color:#6b7c8c;line-height:1.6}
+.zone-book__head button{padding:4px 12px;border:1px solid #2f8f5b;border-radius:5px;background:#2f8f5b;color:#fff;font-size:11px;font-weight:600;cursor:pointer}
+.zone-book__empty{margin:0;font-size:10.5px;color:#8494a3;line-height:1.7}
+.zone-book__table{width:100%;border-collapse:collapse;font-size:10.5px}
+.zone-book__table th{padding:3px 5px;color:#6b7c8c;font-weight:600;text-align:left;border-bottom:1px solid #e3e9ef;white-space:nowrap}
+.zone-book__table td{padding:3px 4px;border-bottom:1px solid #eef2f6}
+.zone-book__table input[type=number]{width:62px;padding:3px 4px;border:1px solid #d3dbe3;border-radius:4px;font-size:10.5px;font-variant-numeric:tabular-nums}
+.zone-book__table input[type=text]{width:100%;min-width:16ch;padding:3px 5px;border:1px solid #d3dbe3;border-radius:4px;font-size:10.5px}
+.zone-book__table select{padding:3px 4px;border:1px solid #d3dbe3;border-radius:4px;font-size:10.5px}
+.zone-book__table button{padding:2px 8px;border:1px solid #d9b4b4;border-radius:4px;background:#fff;color:#a3323f;font-size:10px;cursor:pointer}
+/* 검사 원본에서 그대로 가져왔을 때는 경고가 아니라 알림이다 */
+.cad-viewer__warn--ok{border-color:rgba(90,200,140,.45);background:rgba(12,44,30,.86);color:#a9e6c4}
+/* 흰 바탕 3D. 시트에 실을 그림이라 이쪽이 기본이다.
+   위에 얹는 조작부는 어두운 반투명이라 흰 바탕에서도 그대로 읽힌다. */
+.cad-viewer:has(.cad-viewer__stage.is-light){background:#fff}
+.cad-viewer__stage.is-light{background:#fff}
+/* 부품 색 고르개 */
+.cad-viewer__tint{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid rgba(255,255,255,.22);border-radius:6px;background:rgba(14,22,30,.72);color:#c6d4e0;font-size:9px;font-weight:600;cursor:pointer;backdrop-filter:blur(6px)}
+.cad-viewer__tint input{width:20px;height:18px;padding:0;border:0;border-radius:3px;background:none;cursor:pointer}
+.cad-viewer__swatches{display:inline-flex;align-items:center;gap:2px;padding:4px 6px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px)}
+.cad-viewer__swatches i{width:11px;height:11px;border-radius:2px;border:1px solid rgba(255,255,255,.3)}
+
+
+/* ── 3D 뷰어 조작부 (병합 때 사라진 것을 되살림) ──────────
+   main 이 globals.css 를 다시 쓰면서 이 규칙들이 빠졌다. 화면에는
+   여전히 그 요소들이 있어서, 스타일만 없는 채로 떠 있었다. */
+.cad-viewer__bar{position:absolute;right:12px;top:52px;display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 8px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(14,22,30,.76);z-index:2;backdrop-filter:blur(6px)}
+.cad-viewer__bar-low{order:3}
+.cad-viewer__edit{position:absolute;transform:translate(-50%,-140%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #ffef3a;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__edit-reset{color:#8fa3b4}
+.cad-viewer__note{position:absolute;transform:translate(-50%,-130%);display:flex;align-items:center;gap:6px;padding:6px 9px;border:1px solid #6fb4e8;border-radius:7px;background:rgba(14,22,30,.95);z-index:5;backdrop-filter:blur(6px)}
+.cad-viewer__notes{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:4px;max-width:260px;padding:9px 11px;border:1px solid rgba(111,180,232,.4);border-radius:7px;background:rgba(14,22,30,.84);z-index:3;backdrop-filter:blur(6px)}
+.cad-viewer__zones{position:absolute;left:12px;bottom:96px;display:flex;flex-direction:column;gap:5px;max-width:270px;max-height:calc(100% - 110px);overflow-y:auto;padding:9px 11px;border:1px solid rgba(255,95,168,.45);border-radius:7px;background:rgba(14,22,30,.92);z-index:3;backdrop-filter:blur(6px);font-size:9px;line-height:1.45;color:#cfdae4}
+.cad-viewer__zone{display:flex;align-items:center;gap:5px}
+.topbar__session{display:flex;align-items:center;gap:6px}
+.topbar__session-note{margin-right:4px;color:#5c8f6b;font-size:8.5px;white-space:nowrap}
+.cad-viewer__zone-pick { padding: 0 5px !important; border: 0 !important; background: transparent !important; color: #ff8fc4 !important; font-size: 11px; font-weight: 700; cursor: pointer; }
+.cad-viewer__zone-new{width:100%;margin-top:4px;padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;cursor:pointer}
+.cad-viewer__zone-new:hover:not(:disabled){border-color:#ff5fa8;color:#ffd6e8}
+.cad-viewer__zone-new:disabled{color:#5d6c7a;cursor:not-allowed}
+.cad-viewer__puff { border-color: rgba(255,95,168,.45); }
+.cad-align{margin:0 0 8px;padding:9px 12px;border:1px solid #d6dde5;border-radius:8px;background:#f7f9fb;display:flex;flex-direction:column;gap:7px}
+.sheet-title-block__input{width:100%;border:0;background:transparent;padding:0;font:inherit;color:inherit;text-align:inherit}
+.cad-viewer__morph-key{display:flex;align-items:center;gap:11px;flex-wrap:wrap;padding:5px 11px;border:1px solid rgba(255,255,255,.16);border-radius:6px;background:rgba(14,22,30,.72);backdrop-filter:blur(6px);font-size:9.5px;color:#b6c6d4}
+.cad-viewer__zone-name{color:#9db0c0;font-size:9px;font-style:normal;flex:1;white-space:nowrap}
+.cad-viewer__zone-pick:disabled{opacity:.7;cursor:default}
+.cad-viewer__zones p{margin:0;color:#8fa3b4;font-size:9px}
+.cad-viewer__zones-size{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.cad-viewer__zones-size label{color:#8fa3b4;font-size:9px;font-weight:600;white-space:nowrap}
+.cad-viewer__zones-size input{width:104px;accent-color:#ff5fa8}
+.cad-viewer__zone b{color:#ff8fc4;font-size:11px;min-width:15px}
+.cad-viewer__zone select{padding:2px 5px;border:1px solid rgba(255,255,255,.22);border-radius:5px;background:#0d151d;color:#eaf2f8;font-size:9px;font-family:inherit}
+.cad-viewer__zone select:focus-visible{outline:2px solid #ff5fa8;outline-offset:1px}
+.cad-viewer__zone button{padding:0 5px;border:0;background:transparent;color:#7d90a2;font-size:12px;line-height:1;cursor:pointer}
+.cad-viewer__zone button:hover{color:#ff8b8b}
+.cad-viewer__zone.is-active{border-color:#ff5fa8;background:rgba(120,30,70,.6)}
+.cad-viewer__zone.is-active .cad-viewer__zone-pick{color:#ffbfe0 !important}
+/* 줄 안에 든 작은 버튼(다시 보기·가리기)은 위 `.cad-viewer__zone button`
+   과 특정도가 같아 뒤에 오는 쪽이 이긴다. 한 칸 더 얹어 되돌린다. */
+.cad-viewer__zone .cad-viewer__zone-tools button{padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;line-height:normal}
+.cad-viewer__zone .cad-viewer__zone-tools button:hover{border-color:#ff5fa8;color:#ffd6e8}
+.cad-viewer__zone .cad-viewer__zone-tools button.is-on{border-color:#ff5fa8;background:rgba(255,95,168,.18);color:#ffd6e8}

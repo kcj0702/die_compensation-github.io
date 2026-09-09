@@ -99,8 +99,201 @@ def load_step(path: str | Path):
     return shape
 
 
-def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
-    """B-Rep 을 삼각망으로 바꾼다. (vertices Nx3, faces Mx3) 을 준다."""
+def _to_hex(tone) -> str:
+    """OCCT 색을 화면에 쓸 sRGB hex 로 바꾼다.
+
+    [왜 그냥 못 쓰나 — 색이 어둡게 나왔다]
+    OCCT 의 Quantity_Color 는 **선형 RGB** 를 들고 있고 STEP 파일은 sRGB 로
+    적혀 있다. 읽을 때 OCCT 가 sRGB -> 선형으로 바꿔 두므로, Red() 를 그대로
+    255 배 하면 파일에 적힌 색보다 어두운 값이 나온다. 실측 67XX6 에서 —
+
+        파일에 적힌 색      그냥 쓴 값     되돌린 값
+        #FF8000 (주황)      #FF3700        #FF8000
+        #E800E8 (자홍)      #CE00CE        #E800E8
+        #C1C4C0 (회색)      #888D86        #C1C4C0
+        #969B95 (회색)      #4E544D        #969B95
+
+    선형 -> sRGB 로 되돌려야 CATIA 에서 보던 색과 같아진다.
+    """
+    def back(v: float) -> float:
+        v = max(0.0, min(1.0, float(v)))
+        return v * 12.92 if v <= 0.0031308 else 1.055 * (v ** (1 / 2.4)) - 0.055
+
+    return "#{:02X}{:02X}{:02X}".format(
+        int(round(back(tone.Red()) * 255)),
+        int(round(back(tone.Green()) * 255)),
+        int(round(back(tone.Blue()) * 255)))
+
+
+def load_step_coloured(path: str | Path):
+    """STEP 을 한 번만 읽어 형상과 CATIA 면 색을 함께 준다.
+
+    [왜 한 번인가 — 두 번 읽으면 두 배 걸린다]
+    색은 XCAF 문서에 딸려 오므로 STEPControl_Reader 로는 못 읽는다. 그렇다고
+    형상은 STEPControl 로, 색은 STEPCAFControl 로 따로 읽으면 큰 파일을 두
+    번 파싱한다 — 실측 64XX1(206MB)이 243초, 71XX1(57MB)이 77초였다.
+    CAF 리더가 형상도 주므로 그것 하나만 쓴다.
+
+    Returns:
+        (shape, {"dominant": "#RRGGBB" | None, "palette": {색: 넓이}})
+    """
+    from OCP.STEPCAFControl import STEPCAFControl_Reader
+    from OCP.TDocStd import TDocStd_Document
+    from OCP.XCAFDoc import XCAFDoc_DocumentTool, XCAFDoc_ColorType
+    from OCP.TCollection import TCollection_ExtendedString
+    from OCP.TDF import TDF_LabelSequence
+    from OCP.Quantity import Quantity_Color
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopAbs import TopAbs_ShapeEnum
+    from OCP.TopoDS import TopoDS, TopoDS_Compound
+    from OCP.BRep import BRep_Builder
+
+    path = Path(path)
+    doc = TDocStd_Document(TCollection_ExtendedString("step"))
+    reader = STEPCAFControl_Reader()
+    reader.SetColorMode(True)
+    reader.ReadFile(str(path))
+    reader.Transfer(doc)
+
+    colours = XCAFDoc_DocumentTool.ColorTool_s(doc.Main())
+    shapes = XCAFDoc_DocumentTool.ShapeTool_s(doc.Main())
+    roots = TDF_LabelSequence()
+    shapes.GetFreeShapes(roots)
+    if roots.Length() == 0:
+        raise ValueError(f"STEP 에 형상이 없습니다: {path.name}")
+
+    # 최상위가 여럿이면 하나로 묶는다. 아래 단계(테셀레이션·원통 찾기)가
+    # shape 하나를 받는다.
+    builder = BRep_Builder()
+    bundle = TopoDS_Compound()
+    builder.MakeCompound(bundle)
+    for i in range(1, roots.Length() + 1):
+        builder.Add(bundle, shapes.GetShape_s(roots.Value(i)))
+
+    """색을 어느 단계에서 찾나 — 면이 아니라 **껍질(shell)** 이다.
+
+    처음에는 면에만 물었는데 71XX1 이 죄다 흰색으로 나왔다. CATIA 화면은
+    회색과 분홍 두 가지인데 말이다. 단계별로 세어 보니 —
+
+        SOLID    1개   #C1C4C0
+        SHELL   11개   #D9D9D9 6 · #FF00FF 2 · #FF99CC 1 · #857489 1 · 없음 1
+        FACE  3,682개  #FFFFFF 2,359 · 없음 1,323
+
+    세 파일을 다 세어 보니 색이 어느 단계에 있는지가 파일마다 다르다 —
+
+        64XX1  SOLID #C1C4C0 · SHELL #C1C4C0 48 · FACE #00FF00 6,126
+        67XX6  SOLID #83AAD6 3 · #0080FF 2 · SHELL #0080FF 25 · FACE 없음 6,899
+        71XX1  SOLID #C1C4C0 · SHELL #FF99CC 1 · #D9D9D9 6 · FACE #FFFFFF 2,359
+
+    CATIA 화면과 맞는 것은 **껍질** 이다. 71XX1 은 회색 몸통에 아랫부분만
+    분홍인데 그 분홍이 껍질에 있고, 67XX6 의 파랑도 껍질·솔리드에만 있다.
+    면의 흰색(71XX1)은 물어보면 나오지만 화면에 그 색으로 보이지 않는다 —
+    OCCT 가 물려받은 기본값을 돌려주는 것이라 믿을 값이 아니다.
+
+    그래서 껍질 -> 솔리드 -> 면 순으로 본다. 어느 단계에도 없으면 None 을
+    주고, 화면이 기본 회색으로 칠한다.
+    """
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import (TopTools_IndexedDataMapOfShapeListOfShape,
+                              TopTools_IndexedMapOfShape)
+
+    def tone_of(shape_item):
+        tone = Quantity_Color()
+        for kind in (XCAFDoc_ColorType.XCAFDoc_ColorSurf,
+                     XCAFDoc_ColorType.XCAFDoc_ColorGen):
+            if colours.GetColor(shape_item, kind, tone):
+                return _to_hex(tone)
+        return None
+
+    # 면이 어느 껍질에 속하는지 미리 훑어 둔다.
+    parents = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(bundle, TopAbs_ShapeEnum.TopAbs_FACE,
+                                   TopAbs_ShapeEnum.TopAbs_SHELL, parents)
+    solid_tone = None
+    solids = TopTools_IndexedMapOfShape()
+    TopExp.MapShapes_s(bundle, TopAbs_ShapeEnum.TopAbs_SOLID, solids)
+    if solids.Extent():
+        solid_tone = tone_of(solids.FindKey(1))
+
+    shell_tone: dict = {}
+
+    def colour_of(face):
+        """(색, 껍질에 **직접** 칠해진 것인가) 를 준다.
+
+        솔리드 색은 "칠하지 않은 자리" 를 메우는 값일 뿐이다. 그런데 실측
+        71XX1 을 재 보니 그 회색 껍질이 부품 전체를 덮고 있고, 색이 칠해진
+        껍질(분홍 등)이 **그 위에 0.1mm 안으로 겹쳐** 있다 — 분홍 삼각형
+        중심 3,861개 중 98%가 회색 표면에서 0.1mm 안이었다. 그대로 그리면
+        깊이 싸움이 나고 회색이 이겨 색이 하나도 안 보인다. 어느 쪽이
+        진짜 칠해진 색인지 알려 줘야 화면이 그것을 앞으로 당길 수 있다.
+        """
+        # 껍질 색이 있으면 그것이 CATIA 가 보여 주는 색이다.
+        try:
+            index = parents.FindIndex(face)
+        except Exception:
+            index = 0
+        if index:
+            shells = parents.FindFromIndex(index)
+            if shells.Extent():
+                shell = shells.First()
+                # OCP 판에 따라 HashCode 가 없다. 파이썬 해시로 갈음한다 —
+                # 같은 껍질이면 같은 값이 나오면 그만이다.
+                key = hash(shell)
+                if key not in shell_tone:
+                    shell_tone[key] = tone_of(shell)
+                if shell_tone[key]:
+                    return shell_tone[key], True
+        return (solid_tone or tone_of(face)), False
+
+    spread: dict = {}
+    walker = TopExp_Explorer(bundle, TopAbs_ShapeEnum.TopAbs_FACE)
+    while walker.More():
+        face = TopoDS.Face_s(walker.Current())
+        got, _painted = colour_of(face)
+        if got:
+            spread[got] = spread.get(got, 0.0) + _face_area(face)
+        walker.Next()
+
+    top = max(spread, key=spread.get) if spread else None
+    return bundle, {"dominant": top,
+                    "palette": {k: round(v, 1) for k, v in sorted(
+                        spread.items(), key=lambda kv: -kv[1])},
+                    "of_face": colour_of}
+
+
+def face_colours(path: str | Path) -> dict:
+    """STEP 에 CATIA 가 넣어 둔 면 색만 읽는다(형상은 버린다).
+
+    [실측 — 카티아 파일 세 개, sRGB 로 되돌린 값]
+        64XX1-DR000_HDCT1860   #00FF00
+        67XX6-DR050_HDCT1750   #969B95 · #E800E8 · #555A55 · #C1C4C0 · #FF8000
+        71XX1-DR000_HDCT0458   #FFFFFF
+
+    67XX6 은 팔레트에 파랑 #0080FF 이 등록돼 있지만 **어느 면에도 칠해져
+    있지 않다**(면 6,899개는 아예 색이 없다). CATIA 에서 파랗게 보인다면
+    그 색은 CATPart 쪽에 있고 STEP 으로 나오지 않은 것이라, 화면에서
+    손으로 정하는 수밖에 없다.
+
+    64XX1 의 #00FF00 은 COLOUR_RGB 가 아니라 DRAUGHTING_PRE_DEFINED_COLOUR
+    ('green') 에서 온다. 파일을 글자로 훑어 COLOUR_RGB 만 찾으면 엉뚱하게
+    #C1C4C0 이 나온다 — 그래서 OCCT 로 실제 적용된 색을 물어야 한다.
+
+    한 부품이 여러 색을 쓰기도 한다. 화면에는 **넓이가 가장 넓은 색**을
+    대표로 쓴다 — 면 개수로 세면 작은 모따기 수백 개가 큰 판 하나를 이긴다.
+    """
+    return load_step_coloured(path)[1]
+
+
+def tessellate(shape, deflection: float = DEFAULT_DEFLECTION,
+               colour_of=None):
+    """B-Rep 을 삼각망으로 바꾼다. (vertices Nx3, faces Mx3) 을 준다.
+
+    colour_of 를 주면 색깔이 같은 삼각형끼리 이어 붙이고 구간 목록을
+    함께 돌려준다 — (vertices, faces, [(색, 시작삼각형, 개수), ...]).
+    CATIA 는 한 부품을 여러 색으로 칠한다(실측 71XX1 은 회색 몸통에
+    아랫부분만 분홍이다). 정점마다 색을 실어 보내면 30만 개가 넘어 무거우니
+    구간으로 준다 — three.js 의 geometry group 과 그대로 맞는다.
+    """
     from OCP.BRep import BRep_Tool
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
@@ -110,12 +303,17 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
 
     BRepMesh_IncrementalMesh(shape, deflection, False, 0.5, True)
 
-    all_v: list = []
-    all_f: list = []
-    offset = 0
+    # 색깔별 주머니. 색을 안 쓰면 주머니 하나에 다 담긴다.
+    buckets: dict = {}
+    order: list = []
     explorer = TopExp_Explorer(shape, TopAbs_ShapeEnum.TopAbs_FACE)
     while explorer.More():
         face = TopoDS.Face_s(explorer.Current())
+        tone = colour_of(face) if colour_of is not None else None
+        if tone not in buckets:
+            buckets[tone] = {"v": [], "f": [], "n": 0}
+            order.append(tone)
+        bucket = buckets[tone]
         location = TopLoc_Location()
         triangulation = BRep_Tool.Triangulation_s(face, location)
         if triangulation is not None:
@@ -134,14 +332,97 @@ def tessellate(shape, deflection: float = DEFAULT_DEFLECTION):
                 # 뒤집힌 면은 정점 순서를 바꿔야 법선이 바깥을 향한다
                 tris[i - 1] = (a - 1, c - 1, b - 1) if reversed_face else (a - 1, b - 1, c - 1)
 
-            all_v.append(verts)
-            all_f.append(tris + offset)
-            offset += n_nodes
+            bucket["v"].append(verts)
+            bucket["f"].append(tris + bucket["n"])
+            bucket["n"] += n_nodes
         explorer.Next()
 
-    if not all_v:
+    if not any(b["v"] for b in buckets.values()):
         raise ValueError("테셀레이션 결과가 비었습니다.")
-    return np.vstack(all_v), np.vstack(all_f)
+
+    all_v: list = []
+    all_f: list = []
+    groups: list = []
+    start = 0
+    shift = 0
+    # 직접 칠한 껍질을 **나중에** 쌓는다. 겹쳐 있을 때 화면이 앞으로
+    # 당기기 쉽게 순서를 맞춰 둔다.
+    for tone in sorted(order, key=lambda t: bool(t[1]) if isinstance(t, tuple) else False):
+        bucket = buckets[tone]
+        if not bucket["v"]:
+            continue
+        faces_here = np.vstack(bucket["f"]) + shift
+        all_v.append(np.vstack(bucket["v"]))
+        all_f.append(faces_here)
+        hex_tone, direct = tone if isinstance(tone, tuple) else (tone, False)
+        groups.append((hex_tone, start, len(faces_here), direct))
+        start += len(faces_here)
+        shift += bucket["n"]
+
+    vertices, faces = np.vstack(all_v), np.vstack(all_f)
+    if colour_of is None:
+        return vertices, faces
+    return vertices, faces, groups
+
+
+def spread_through_thickness(vertices, faces, groups, reach: float = 3.0):
+    """색을 판 두께 건너까지 옮긴다.
+
+    [왜 필요한가 — 한쪽 면만 칠해져 있다]
+    CATIA 가 칠한 껍질은 판의 **한쪽 면**에만 얹혀 있다. 실측 71XX1 은
+    분홍 껍질이 회색 솔리드 표면과 0.1mm 안으로 겹치는데, 그 회색 솔리드는
+    닫힌 껍데기라 반대쪽 면이 따로 있다. 그래서 한쪽에서 보면 분홍인데
+    돌리면 회색이 나온다 — 사람이 보기에는 "색이 반대쪽에 칠해졌다".
+
+    부품 하나는 한 가지 색이라고 보는 게 사람의 눈이다. 그래서 칠하지
+    않은(솔리드 색을 물려받은) 삼각형이 칠해진 삼각형 **바로 뒤**에 있으면
+    그 색을 따라가게 한다. 판재 두께 안쪽만 본다 — 실측 패널이 1.2~2.3mm
+    라 3mm 면 앞뒤를 잇고 옆 리브까지 번지지는 않는다.
+
+    Args:
+        groups: [(색, 시작삼각형, 개수, 직접칠함), ...]
+
+    Returns:
+        (faces, groups) — 색이 같은 삼각형끼리 다시 묶은 것.
+    """
+    from scipy.spatial import cKDTree
+
+    painted = [g for g in groups if g[3]]
+    plain = [g for g in groups if not g[3]]
+    if not painted or not plain:
+        return faces, groups
+
+    tone_of = np.empty(len(faces), dtype=object)
+    for tone, start, count, _direct in groups:
+        tone_of[start:start + count] = tone
+
+    middle = vertices[faces].mean(axis=1)
+    lit = np.concatenate([np.arange(s, s + c) for _t, s, c, _d in painted])
+    dim = np.concatenate([np.arange(s, s + c) for _t, s, c, _d in plain])
+
+    tree = cKDTree(middle[lit])
+    gap, who = tree.query(middle[dim], distance_upper_bound=reach)
+    near = np.isfinite(gap)
+    tone_of[dim[near]] = tone_of[lit[who[near]]]
+
+    # 색이 같은 삼각형끼리 다시 모은다.
+    order: list = []
+    seen: dict = {}
+    for tone, _s, _c, direct in groups:
+        if tone not in seen:
+            seen[tone] = direct
+            order.append(tone)
+    keep: list = []
+    made: list = []
+    start = 0
+    for tone in order:
+        picked = np.flatnonzero(tone_of == tone)
+        if not len(picked):
+            continue
+        keep.append(faces[picked])
+        made.append((tone, start, len(picked), seen[tone]))
+        start += len(picked)
+    return np.vstack(keep), made
 
 
 def _face_props(face) -> tuple:
@@ -525,7 +806,12 @@ def _dedupe(features: list, *keys) -> list:
 
 
 CACHE_DIR = Path(__file__).resolve().parent / "_parsed"
-CACHE_VERSION = 3      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+CACHE_VERSION = 8      # 판정 규칙이 바뀌면 올린다 (예전 캐시를 버리려고)
+                       # 4: CATIA 면 색(colour)을 함께 담는다
+                       # 5: 그 색을 선형에서 sRGB 로 되돌린다
+                       # 6: 껍질 단위 색과 삼각형 구간을 담는다
+                       # 7: 구간마다 직접 칠한 색인지 표시한다
+                       # 8: 색을 판 두께 건너까지 옮긴다
 
 
 def _cache_key(path: Path, deflection: float) -> str:
@@ -580,12 +866,23 @@ def read_step_full(
                     "holes": meta["holes"],
                     "planes": meta["planes"],
                     "counts": meta["counts"],
+                    "colour": meta.get("colour"),
+                    "colour_groups": meta.get("colour_groups") or [],
                 }
         except Exception:
             cached = None      # 캐시가 깨져도 그냥 다시 읽으면 된다
 
-    shape = load_step(path)
-    vertices, faces = tessellate(shape, deflection)
+    # 형상과 색을 한 번에 읽는다. 색을 못 읽는 파일이면 형상만 다시 읽는다.
+    groups: list = []
+    try:
+        shape, colour = load_step_coloured(path)
+        vertices, faces, groups = tessellate(
+            shape, deflection, colour_of=colour.pop("of_face"))
+        # 칠한 색을 판 두께 건너까지 옮긴다 — 안 그러면 한쪽에서만 색이 보인다.
+        faces, groups = spread_through_thickness(vertices, faces, groups)
+    except Exception:
+        shape, colour = load_step(path), None
+        vertices, faces = tessellate(shape, deflection)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
 
     # 원통은 find_cylinders 안에서 이미 면을 합쳐 놓았다(_merge_cylinder_faces).
@@ -603,6 +900,10 @@ def read_step_full(
             "holes": len(holes),
             "planes": len(planes),
         },
+        "colour": colour,
+        # 색이 같은 삼각형 구간. three.js 의 geometry group 과 그대로 맞는다.
+        "colour_groups": [[t, int(a), int(n), bool(d)]
+                          for t, a, n, d in groups if t],
     }
     if cached is not None:
         try:
@@ -618,6 +919,7 @@ def read_step_full(
 __all__ = [
     "STEP_SUFFIXES", "DEFAULT_DEFLECTION",
     "Cylinder", "PlaneFace",
-    "is_step_file", "load_step", "tessellate",
+    "is_step_file", "load_step", "load_step_coloured", "tessellate",
+    "face_colours", "spread_through_thickness",
     "find_cylinders", "find_planes", "read_step_full",
 ]

@@ -1360,6 +1360,21 @@ class UiBackendProductAlignmentTest(unittest.TestCase):
         )
         library_patcher.start()
         self.addCleanup(library_patcher.stop)
+        # PNG 라이브러리가 비어도 analyze_image 는 mesh -> CATIA 캡처로 제품
+        # 이미지를 만들어 낸다. 그 두 곳(data/product_mesh 와 CAD 소스 폴더)은
+        # 실제 개발 PC 에 64XX2-DR000 이 들어 있어, 막지 않으면 "제품데이터가
+        # 없을 때" 를 보는 시험이 진짜 CATPart 를 열어 통과하지 못한다. 위
+        # ALIGNMENT_STORE/PRODUCT_LIBRARY 와 같은 이유의 격리다.
+        mesh_patcher = patch.object(
+            backend_server,
+            "MESH_LIBRARY",
+            backend_server.MeshLibrary(Path(temp_dir.name) / "mesh"),
+        )
+        mesh_patcher.start()
+        self.addCleanup(mesh_patcher.stop)
+        cad_root_patcher = patch.object(backend_server, "CAD_SOURCE_ROOT", None)
+        cad_root_patcher.start()
+        self.addCleanup(cad_root_patcher.stop)
 
     def tearDown(self) -> None:
         backend_server._reader = None
@@ -1818,3 +1833,94 @@ class LabelStoreTest(unittest.TestCase):
                          backend_server._crop_key(right))
         self.assertNotEqual(backend_server._crop_key(left),
                             backend_server._crop_key(other))
+
+
+class 소수점되살리기Test(unittest.TestCase):
+    """판독에서 날아간 소수점 되살리기.
+
+    64XX2 워크스페이스(검사 포인트 79개, 값 확정)와 우리 판독을 견줘
+    찾은 실제 사례들이다. 컬러바 밖으로 나온 값 15개가 전부 소수점만
+    빠진 것이었다.
+    """
+
+    한계 = 2.1          # 이 부품 컬러바 +-2.0 에 5% 여유
+
+    def test_소수점_빠진_판독을_되살린다(self):
+        # 왼쪽이 우리 판독, 오른쪽이 워크스페이스의 확정값
+        for 읽은, 참 in ((6.0, 0.6), (8.0, 0.8), (9.0, 0.9),
+                        (60.0, 0.6), (80.0, 0.8), (-10.0, -1.0)):
+            with self.subTest(읽은=읽은):
+                self.assertAlmostEqual(
+                    backend_server._mend_decimal(읽은, self.한계), 참, places=6)
+
+    def test_진짜로_컬러바를_넘는_값은_건드리지_않는다(self):
+        """공차를 벗어난 자리는 컬러바 밖으로도 찍힌다.
+
+        이 부품의 확정 최솟값이 -2.79mm 다. 컬러바가 +-2.0 이라고 이걸
+        -0.279 로 고치면 진짜 값을 망친다.
+        """
+        for 참값 in (-2.79, -2.8, 2.5, -3.0, 4.0):
+            with self.subTest(값=참값):
+                self.assertIsNone(
+                    backend_server._mend_decimal(참값, self.한계))
+
+    def test_범위_안이면_손대지_않는다(self):
+        for 값 in (0.0, 0.4, -1.83, 2.0):
+            with self.subTest(값=값):
+                self.assertIsNone(backend_server._mend_decimal(값, self.한계))
+
+    def test_되살려도_범위에_못_들어오면_포기한다(self):
+        # 10 으로 세 번 나눠도 못 들어오는 값은 소수점 문제가 아니다.
+        self.assertIsNone(backend_server._mend_decimal(1e9, self.한계))
+
+    def test_이상한_입력에_터지지_않는다(self):
+        self.assertIsNone(backend_server._mend_decimal(float("nan"), self.한계))
+        self.assertIsNone(backend_server._mend_decimal(5.0, 0.0))
+
+
+class 보정시트엑셀라우트Test(unittest.TestCase):
+    """엑셀 내려받기 라우트를 끝까지 태운다.
+
+    병합 뒤 실제로 이 자리에서 깨졌다 — 핸들러가 urllib.parse.quote 를
+    부르는데 그 모듈이 임포트돼 있지 않아 422 와 함께
+    "name 'urllib' is not defined" 가 떴다. 함수(sheet_excel_for)만
+    시험하면 이 자리를 못 잡는다. 응답을 만드는 데까지 가야 한다.
+    """
+
+    def _응답(self, body: dict):
+        import asyncio
+
+        class 가짜요청:
+            async def json(self):
+                return body
+
+        return asyncio.run(backend_server.sheet_excel(가짜요청()))
+
+    def test_엑셀_파일로_내려온다(self):
+        analysis_id = backend_server._cache_analysis({
+            "overlay_base": np.full((120, 200, 3), 200, np.uint8),
+            "deviation_points": [
+                {"id": "P-01", "xPx": 40, "yPx": 30, "value": 0.4},
+            ],
+            "part_no": "64XX2-DR000",
+        })
+        response = self._응답({
+            "analysisId": analysis_id,
+            "corrections": {"P-01": -0.4},
+            # 한글 파일명이라 헤더에 인코딩해서 넣어야 한다 — 여기서 터졌었다.
+            "filename": "64XX2_보정시트",
+            "meta": {"partNo": "64XX2-DR000"},
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("spreadsheetml", response.media_type)
+        self.assertGreater(len(response.body), 5000)
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+
+    def test_보정량이_비면_400_을_준다(self):
+        response = self._응답({"analysisId": "없음", "corrections": {}})
+        self.assertEqual(response.status_code, 400)
+
+    def test_분석이_만료되면_404_를_준다(self):
+        response = self._응답({"analysisId": "없는아이디",
+                             "corrections": {"P-01": 0.4}})
+        self.assertEqual(response.status_code, 404)

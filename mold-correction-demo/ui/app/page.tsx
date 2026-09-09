@@ -12,7 +12,7 @@ import {
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { clearSession, downloadSession, emptySession, loadSession, readSessionFile, saveSession, type SessionSnapshot } from './session-store';
-import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion, type CadSection } from './cad-viewer';
+import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadMorph, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 
 const API_BASE = 'http://127.0.0.1:8000';
 
@@ -2757,12 +2757,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const [morphMode, setMorphMode] = useState<'off' | 'after' | 'both'>('off');
   const [morphBusy, setMorphBusy] = useState(false);
   const [morphError, setMorphError] = useState<string | null>(null);
-  const [sections, setSections] = useState<CadSection[] | null>(null);
-  const [sectionNotes, setSectionNotes] = useState('');
-  const [sectionSide, setSectionSide] = useState('both');
-  const [sectionBusy, setSectionBusy] = useState(false);
-  const [sectionError, setSectionError] = useState<string | null>(null);
-  const [shots, setShots] = useState<string[]>([]);
+  /* 시트에 담아둔 3D 화면들. 어느 시점에서 찍었는지 함께 들고 있는다 —
+     엑셀 쪽마다 그 이름을 적어 두지 않으면 나중에 보는 사람이 방향을
+     못 가린다. 고유 열쇠는 앞 장을 지울 때 뒤 장이 다시 그려지지 않게 한다. */
+  const [shots, setShots] = useState<
+    { id: string; url: string; label: string }[]>([]);
   const [sheetBusy, setSheetBusy] = useState(false);
   const [adjustByCad, setAdjustByCad] = useState<Record<string, FitAdjust>>({});
   const [showAlign, setShowAlign] = useState(false);
@@ -2820,8 +2819,10 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
           const identity = `registered-step-v3:${scan.id}:${analysisId || 'pending'}:${file.name}:${file.size}:${file.lastModified}`;
           if (importedReferenceFiles.current.has(identity)) continue;
           importedReferenceFiles.current.add(identity);
-          const registeredPartNumber = partNoFromName(scan.partNo) || partNoFromName(file.name) || undefined;
-          await uploadCad(file, scan.id, registeredPartNumber, analysisId);
+          const registeredPartNumber = partNoFromName(scan.partNo ?? '')
+            || partNoFromName(file.name) || undefined;
+          await uploadCad(file, scan.id, registeredPartNumber,
+                          analysisId ?? undefined);
         }
       }
     };
@@ -2867,9 +2868,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     const linkedScanId = opened.find((item) => item.mesh.summary.name === name)?.scanId;
     const linkedScan = scans.find((item) => item.id === linkedScanId);
     const registeredPartNumber = linkedScan
-      ? partNoFromName(linkedScan.partNo) || partNoFromName(file.name) || undefined
+      ? partNoFromName(linkedScan.partNo ?? '')
+        || partNoFromName(file.name) || undefined
       : undefined;
-    const response = await requestCadMesh(file, registeredPartNumber, linkedScan?.result?.analysisId);
+    const response = await requestCadMesh(
+      file, registeredPartNumber, linkedScan?.result?.analysisId ?? undefined);
     const data = await response.json() as CadMesh & { error?: string };
     if (!response.ok) return null;
     const key = data.cadId || name;
@@ -3042,7 +3045,8 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         body: JSON.stringify({
           analysisId: overlayScan.result.analysisId,
           corrections: sheetValues,
-          images: shots,
+          images: shots.map((shot) => shot.url),
+          imageLabels: shots.map((shot) => shot.label),
           filename: `${overlayScan.partNo || 'ADC'}_보정시트_3D`,
           meta: {
             partNo: naming?.part_no || overlayScan.partNo,
@@ -3064,28 +3068,11 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
     finally { setSheetBusy(false); }
   };
 
-  const requestSections = async () => {
-    const cadId = selected?.mesh.cadId;
-    if (!cadId) return;
-    setSectionBusy(true); setSectionError(null);
-    try {
-      const response = await fetch(`${API_BASE}/api/cad-sections`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cadId, notes: sectionNotes, side: sectionSide }),
-      });
-      const data = await response.json() as { sections?: CadSection[]; error?: string };
-      if (!response.ok) throw new Error(data.error || '단면 제로라인을 계산하지 못했습니다.');
-      setSections(data.sections || []);
-    } catch (err) { setSectionError(String((err as Error).message || err)); }
-    finally { setSectionBusy(false); }
-  };
-
   useEffect(() => {
     if (!selected) return;
     setOverlay(null);
     setOverlayError(null);
     setMorph(null); setMorphMode('off'); setMorphError(null);
-    setSections(null); setSectionError(null);
     if (selected.mesh.summary.source_format === 'morph') {
       setOverlayScanId('');
       return;
@@ -3134,13 +3121,22 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         </select>
         {overlayBusy && <span className="cad-overlay-bar__note">제로라인·보정치를 3D 표면에 올리는 중…</span>}
         {overlay && <span className="cad-overlay-bar__note">
-          제로라인 {overlay.zeroLines.length + (overlay.zeroAreas?.length || 0)}개 · 보정 포인트 {Object.keys(sheetValues || {}).length}개 · 형상 얹힘 {Math.round((overlay.fit.hit_rate || 0) * 100)}%
+          제로라인 {overlay.zeroLines.length + (overlay.zeroAreas?.length || 0)}개 · 보정 포인트 {Object.keys(sheetValues || {}).length}개 ·{' '}
+          {/* 검사 원본에서 온 포인트는 맞춘 것이 아니다 — 얹힘 대신
+              표면까지 실제 거리를 적는다. 지어낸 지표를 보이지 않는다. */}
+          {overlay.source === 'workspace'
+            ? (overlay.surfaceGap
+                ? `표면까지 ${overlay.surfaceGap.median.toFixed(2)}mm · 정합 없음`
+                : '검사 원본 좌표 · 정합 없음')
+            : `형상 얹힘 ${Math.round((overlay.fit.hit_rate || 0) * 100)}%`}
         </span>}
         {overlay && <button type="button" className="tool-button" onClick={() => setShowAlign((current) => !current)}>정렬 맞추기</button>}
         {overlay && <button type="button" className="tool-button" onClick={() => void buildMorph()} disabled={morphBusy}>
           {morphBusy ? '형상 계산 중…' : '보정 후 형상'}
         </button>}
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
+        {shots.length > 0 && <button type="button" className="tool-button"
+          onClick={() => setShots([])}>담은 화면 비우기</button>}
         {shots.length > 0 && <button type="button" className="tool-button" onClick={() => setShots([])}>담은 화면 비우기</button>}
         {morph && <>
           <select aria-label="형상 비교" value={morphMode} onChange={(event) => setMorphMode(event.target.value as 'off' | 'after' | 'both')}>
@@ -3167,27 +3163,39 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         <label>배율 <input type="number" min="0.5" max="1.5" step="0.005" value={adjust.scale} onChange={(event) => nudge({ scale: Number(event.target.value) })} /></label>
         <button type="button" className="tool-button" onClick={() => nudge(NO_ADJUST)}>자동값 복원</button>
       </div>}
-      <div className="cad-overlay-bar">
-        <label htmlFor="cad-section-notes">시트 단면 제로라인</label>
-        <input id="cad-section-notes" type="text" value={sectionNotes} onChange={(event) => setSectionNotes(event.target.value)} placeholder="예: H : 300, T : 1700" />
-        <select aria-label="단면 방향" value={sectionSide} onChange={(event) => setSectionSide(event.target.value)}>
-          <option value="both">양쪽</option><option value="positive">+ 방향</option><option value="negative">- 방향</option>
-        </select>
-        <button type="button" className="tool-button" onClick={() => void requestSections()} disabled={sectionBusy || !sectionNotes.trim()}>{sectionBusy ? '계산 중…' : '단면 계산'}</button>
-        {sections && <span className="cad-overlay-bar__note">단면 제로라인 {sections.length}개</span>}
-        {sectionError && <span className="cad-overlay-bar__err">{sectionError}</span>}
-      </div>
+      {/* 담은 화면을 눈으로 확인하고 한 장씩 뺀다. 숫자만 보이면 잘못
+          담았을 때 전부 비우고 처음부터 다시 찍는 수밖에 없다.
+          순서가 곧 엑셀의 쪽 순서다(1쪽은 늘 스캔 전체도). */}
+      {shots.length > 0 && <div className="shot-strip">
+        <span className="shot-strip__head">
+          시트에 담은 화면 {shots.length}장 · 1쪽은 스캔 전체도이고 아래
+          순서대로 2쪽부터 붙습니다
+        </span>
+        <div className="shot-strip__row">
+          {shots.map((shot, order) => (
+            <figure key={shot.id} className="shot-card">
+              <img src={shot.url} alt={`${shot.label} 화면`} />
+              <figcaption>{order + 2}쪽 · {shot.label}</figcaption>
+              <button type="button" aria-label={`${shot.label} 화면 빼기`}
+                title="이 화면만 뺍니다"
+                onClick={() => setShots((current) =>
+                  current.filter((_, index) => index !== order))}>×</button>
+            </figure>
+          ))}
+        </div>
+      </div>}
       <div className="card cad-viewer" style={{ height: 760 }}>
         <CadViewer
           active={active}
           mesh={selected.mesh}
           showHoles
-          sections={sections}
           overlay={overlay}
           sheetValues={sheetValues}
           morph={morph}
           morphMode={morphMode}
-          onCapture={(image) => setShots((current) => [...current, image])}
+          onCapture={(url, label) => setShots((current) => [...current,
+            // 지울 때 뒤 장들의 열쇠가 바뀌지 않게 고유한 값을 준다.
+            { id: `S-${Date.now().toString(36)}-${current.length}`, url, label }])}
           onCorrectionChange={overlayScanId ? (pointId, value) => onOverrideChange(overlayScanId, pointId, value) : undefined}
           notes={notesByCad[cadStateKey] || []}
           onNotesChange={(notes) => cadStateKey && setNotesByCad((current) => ({ ...current, [cadStateKey]: notes }))}

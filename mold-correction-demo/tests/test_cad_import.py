@@ -191,3 +191,154 @@ def test_떨어져_있는_같은_축_홀은_따로_센다() -> None:
     assert len(holes) == 2, f"떨어진 두 홀을 하나로 봤다: {len(holes)}개"
     for hole in holes:
         assert hole.height < 10.0, f"빈 구간까지 높이에 넣었다: {hole.height}"
+
+
+def test_색을_판_두께_건너까지_옮긴다():
+    """CATIA 가 칠한 껍질은 판의 한쪽 면에만 얹혀 있다.
+
+    실측 71XX1 은 분홍 껍질이 회색 솔리드 표면과 0.1mm 안으로 겹치는데,
+    그 솔리드는 닫힌 껍데기라 반대쪽 면이 따로 있다. 그대로 두면 한쪽에서만
+    분홍이고 돌리면 회색이 나온다.
+    """
+    import numpy as np
+    from cad_import.step_reader import spread_through_thickness
+
+    # 두께 2mm 판 흉내 — 앞면 두 장(칠함) 과 뒷면 두 장(안 칠함).
+    vertices = np.array([
+        [0, 0, 0], [10, 0, 0], [0, 10, 0], [10, 10, 0],       # 앞면
+        [0, 0, 2], [10, 0, 2], [0, 10, 2], [10, 10, 2],       # 뒷면
+        [0, 0, 90], [10, 0, 90], [0, 10, 90],                 # 멀리 떨어진 것
+    ], dtype=float)
+    faces = np.array([
+        [4, 5, 6], [5, 7, 6],      # 뒷면 — 기본색
+        [8, 9, 10],                # 멀리 — 기본색, 그대로 남아야 한다
+        [0, 1, 2], [1, 3, 2],      # 앞면 — 분홍
+    ])
+    groups = [("#C1C4C0", 0, 3, False), ("#FF99CC", 3, 2, True)]
+
+    out_faces, out_groups = spread_through_thickness(vertices, faces, groups)
+    assert len(out_faces) == len(faces)
+    got = {tone: count for tone, _start, count, _direct in out_groups}
+    # 뒷면 두 장이 분홍을 따라온다. 멀리 있는 한 장은 그대로다.
+    assert got["#FF99CC"] == 4
+    assert got["#C1C4C0"] == 1
+
+
+def test_칠한_색이_없으면_그대로_둔다():
+    import numpy as np
+    from cad_import.step_reader import spread_through_thickness
+
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+    faces = np.array([[0, 1, 2]])
+    groups = [("#C1C4C0", 0, 1, False)]
+    out_faces, out_groups = spread_through_thickness(vertices, faces, groups)
+    assert out_groups == groups
+    assert np.array_equal(out_faces, faces)
+
+
+def test_시트_그림의_빈_바탕을_잘라낸다():
+    """3D 화면은 가로로 넓고 부품은 가운데만 차지한다.
+
+    그대로 시트에 실으면 부품이 작게 떠 있고 둘레가 허옇게 남는다.
+    """
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    canvas = np.full((940, 2000, 3), 255, np.uint8)
+    canvas[300:640, 700:1300] = (120, 130, 140)      # 부품 340 x 600
+    cut = trim_border(canvas, slack=12)
+    assert cut.shape[0] == 340 + 24
+    assert cut.shape[1] == 600 + 24
+
+
+def test_어두운_바탕도_같은_방법으로_잘린다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    canvas = np.full((400, 800, 3), 22, np.uint8)
+    canvas[100:300, 200:600] = (200, 200, 200)
+    cut = trim_border(canvas, slack=0)
+    assert cut.shape[:2] == (200, 400)
+
+
+def test_잘라낼_것이_없으면_그대로_둔다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import trim_border
+
+    plain = np.full((50, 60, 3), 255, np.uint8)
+    assert trim_border(plain).shape == plain.shape
+
+
+def test_쪽마다_그림_자리가_같다():
+    """시트는 40행 묶음이 되풀이되는 물건이라 쪽마다 그림이 같은 자리여야 한다.
+
+    예전에는 비율을 지키느라 폭이나 높이 하나만 맞춰서, 납작한 부품은
+    가로로 늘어지고 길쭉한 부품은 구석에 작게 박혔다.
+    """
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    납작 = np.full((180, 1900, 3), 200, np.uint8)
+    길쭉 = np.full((880, 260, 3), 200, np.uint8)
+    for 원본 in (납작, 길쭉):
+        page = fit_on_page(원본)
+        assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+
+
+def test_부품을_비율_그대로_키운다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import fit_on_page
+
+    원본 = np.full((100, 200, 3), 0, np.uint8)     # 2:1
+    page = fit_on_page(원본, width=800, height=400, pad=0)
+    # 검은 부분의 가로세로 비가 그대로여야 한다.
+    dark = np.argwhere((page < 50).all(axis=2))
+    high = dark[:, 0].max() - dark[:, 0].min() + 1
+    wide = dark[:, 1].max() - dark[:, 1].min() + 1
+    assert abs(wide / high - 2.0) < 0.05
+
+
+def test_빈_그림도_한_장으로_돌려준다():
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    page = fit_on_page(np.zeros((0, 0, 3), np.uint8))
+    assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+
+
+def test_뷰_이름표와_회사_표기가_그림_안에_들어간다():
+    """OpenCV 는 한글을 못 그려 PIL 로 얹는다. 글꼴이 없는 PC 도 있으므로
+    글자를 못 넣더라도 그림 자체는 나와야 한다."""
+    import numpy as np
+    from zero_line_detection.sheet_excel import (
+        BAR_HEIGHT, IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX, fit_on_page,
+    )
+
+    page = fit_on_page(np.full((300, 600, 3), 180, np.uint8),
+                       caption="3D 형상 · 정면")
+    assert page.shape[:2] == (IMAGE_HEIGHT_PX, IMAGE_WIDTH_PX)
+    # 이름표 띠는 밝은 회색으로 깔린다(글자가 없는 오른쪽에서 본다).
+    assert page[BAR_HEIGHT // 2, IMAGE_WIDTH_PX - 40].min() > 200
+    # 부품(회색 180)은 띠 아래에만 놓인다 — 띠 오른쪽은 바탕뿐이다.
+    오른쪽띠 = page[1:BAR_HEIGHT - 2, IMAGE_WIDTH_PX // 2:-2]
+    assert 오른쪽띠.min() > 200
+    # 글자는 띠 왼쪽에 들어간다.
+    왼쪽띠 = page[1:BAR_HEIGHT - 2, 1:IMAGE_WIDTH_PX // 3]
+    assert 왼쪽띠.min() < 150
+
+
+def test_글꼴이_없어도_그림은_나온다(monkeypatch):
+    import numpy as np
+    from pathlib import Path
+    from zero_line_detection import sheet_excel
+
+    monkeypatch.setattr(sheet_excel, "FONT_BOLD", Path("없는글꼴.ttf"))
+    monkeypatch.setattr(sheet_excel, "FONT_BOOK", Path("없는글꼴.ttf"))
+    page = sheet_excel.fit_on_page(np.full((100, 200, 3), 120, np.uint8),
+                                   caption="정면")
+    assert page.shape[:2] == (sheet_excel.IMAGE_HEIGHT_PX,
+                              sheet_excel.IMAGE_WIDTH_PX)
