@@ -23,8 +23,11 @@ class HybridUiEditPointTests(unittest.TestCase):
     def test_case2_failure_is_not_returned_or_cached_as_case1(self) -> None:
         image = np.zeros((8, 12, 3), dtype=np.uint8)
         base = SimpleNamespace(
+            values=np.zeros((8, 12), dtype=np.float32),
+            part_mask=np.ones((8, 12), dtype=bool),
             colorbar=SimpleNamespace(
-                info=SimpleNamespace(y0=0, y1=8, x0=0, x1=2)
+                info=SimpleNamespace(y0=0, y1=8, x0=0, x1=2),
+                colors_rgb=np.zeros((8, 3), dtype=np.uint8),
             ),
             warnings=[],
         )
@@ -41,7 +44,7 @@ class HybridUiEditPointTests(unittest.TestCase):
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
 
         with mock.patch.object(
-            hybrid, "build_common_from_review_mapping", return_value=common
+            hybrid, "build_common_from_color_ramp", return_value=common
         ), mock.patch.object(
             case2, "run_original_case2_pipeline", side_effect=ValueError("route unavailable")
         ):
@@ -171,11 +174,30 @@ class HybridUiEditPointTests(unittest.TestCase):
             centerline=None,
             zero_crossing=mask,
             values=np.zeros(image.shape[:2], dtype=np.float32),
+            colorbar=SimpleNamespace(colors_rgb=np.zeros((8, 3), dtype=np.uint8)),
             result=SimpleNamespace(regions=[]),
             warnings=[],
         )
-        with mock.patch.object(hybrid_ui, "_detect_from_review_inputs", return_value=None), mock.patch.object(
+        common = {
+            "image": cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
+            "part": np.ones(image.shape[:2], dtype=bool),
+            "part_px": image.shape[0] * image.shape[1],
+            "positive": np.zeros(image.shape[:2], dtype=bool),
+            "negative": np.zeros(image.shape[:2], dtype=bool),
+            "zero": np.ones(image.shape[:2], dtype=bool),
+            "zero_ratio": 0.2,
+            "zero_count": 2,
+        }
+        from zero_line_detection import generate_final_hybrid_zero_line as hybrid
+        with mock.patch.object(
             hybrid_ui, "detect_zero_line", side_effect=AssertionError("duplicate detection")
+        ), mock.patch.object(
+            hybrid, "build_common_from_color_ramp", return_value=common
+        ), mock.patch.object(
+            hybrid, "run_case1", return_value=(mask.astype(bool), {})
+        ), mock.patch(
+            "zero_line_detection.adaptive_bundle.generate_adaptive_zero_line_preview.build_board",
+            return_value=(image, image),
         ):
             result = hybrid_ui._detect_hybrid_zero_line_uncached(
                 image,

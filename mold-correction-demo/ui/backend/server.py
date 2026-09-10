@@ -129,7 +129,7 @@ from zero_line_detection.zero_boundary import (  # noqa: E402
     draw_zero_boundary, find_boundary_anchors, grow_patches,
 )
 from core import (  # noqa: E402
-    AXES, AXIS_LABELS, FilenameClassifier, classify_batch, execute_batch,
+    AXES, AXIS_LABELS, FilenameClassifier, ItemHint, classify_batch, execute_batch,
     is_valid_folder_order, load_folder_order, load_rules, migrate_folder_structure,
     save_folder_order, write_history,
 )
@@ -1419,6 +1419,7 @@ def analyze_image(
     zero_lines: list = []
     zero_anchors: list = []
     zero_patches: list = []
+    registered_range: tuple[float, float] | None = None
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         # The physical scale comes only from the numbers printed at the
@@ -1707,6 +1708,10 @@ def analyze_image(
             "zeroRegions": zero_regions,
             "zeroRatio": round(zero_ratio, 4),
             "zeroTolerance": 0.6,
+            "colorbarRange": (
+                [round(registered_range[0], 4), round(registered_range[1], 4)]
+                if registered_range is not None else None
+            ),
             "qwenReads": qwen_reads,
             "qwenUnread": unread_labels,
             "pointsTransferred": transferred,
@@ -2748,10 +2753,49 @@ def _organizer_item(path: Path, classification: Any, *, source_kind: str) -> dic
         "confidence": classification.confidence,
         "reasons": classification.reasons,
         "targetDir": target_relative,
+        "autoTargetDir": target_relative,
         "targetPath": (Path(target_relative) / path.name).as_posix(),
         "matchedProductFolder": classification.matched_product_folder,
         "detailPath": classification.detail_path,
     }
+
+
+def _historical_item_hints(classifier: FilenameClassifier) -> list[ItemHint]:
+    """MariaDB와 기존 정리 폴더에서 과거 품명→품번 근거를 모은다."""
+    hints: list[ItemHint] = []
+    database_url = _active_file_database_url()
+    if database_url:
+        try:
+            hints.extend(MariaDBRepository(database_url).get_item_hints())
+        except FileDatabaseError:
+            pass
+
+    if FOLDER_ROOT.is_dir():
+        ignored = {name.casefold() for name in FILE_ORGANIZER_RULES.get("ignored_names", [])}
+        paths = [
+            path for path in FOLDER_ROOT.rglob("*")
+            if path.is_file() and not path.name.startswith("~$")
+            and path.name.casefold() not in ignored
+        ]
+        for path in paths:
+            result = classifier.classify(path)
+            if result.item_no and result.product_name:
+                hints.append(ItemHint(
+                    item_no=result.item_no,
+                    family=result.family,
+                    customer=result.customer,
+                    source_name=path.name,
+                    product_name=result.product_name,
+                ))
+    return hints
+
+
+def _classify_organizer_paths(
+    classifier: FilenameClassifier, paths: list[Path]
+) -> list[Any]:
+    return classify_batch(
+        classifier, paths, historical_hints=_historical_item_hints(classifier)
+    )
 
 
 def _scan_organizer_source() -> list[dict[str, Any]]:
@@ -2768,7 +2812,7 @@ def _scan_organizer_source() -> list[dict[str, Any]]:
         key=lambda path: path.name.casefold(),
     )
     classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
-    classifications = classify_batch(classifier, paths)
+    classifications = _classify_organizer_paths(classifier, paths)
     return [
         _organizer_item(path, classification, source_kind="source")
         for path, classification in zip(paths, classifications)
@@ -2853,7 +2897,14 @@ async def file_organizer_upload(request: Request) -> JSONResponse:
         finally:
             await upload.close()
     classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
-    classifications = classify_batch(classifier, destinations)
+    # 여러 번 나누어 업로드해도 아직 대기 중인 파일 전체를 한 배치처럼 비교한다.
+    staged_paths = sorted(
+        (path for path in FILE_STAGING_ROOT.rglob("*") if path.is_file()),
+        key=lambda path: path.name.casefold(),
+    )
+    staged_classifications = _classify_organizer_paths(classifier, staged_paths)
+    by_path = dict(zip(staged_paths, staged_classifications))
+    classifications = [by_path[destination] for destination in destinations]
     items = [
         _organizer_item(destination, classification, source_kind="upload")
         for destination, classification in zip(destinations, classifications)
@@ -2915,7 +2966,20 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
 
     classifier = FilenameClassifier(FILE_ORGANIZER_RULES, FOLDER_ROOT, _active_folder_order())
     sources = [source for source, _ in parsed_items]
-    batch_classifications = classify_batch(classifier, sources)
+    # 선택하지 않은 업로드 파일도 품번 근거로는 쓸 수 있게 대기열 전체를 함께 본다.
+    context_sources = list(sources)
+    known_paths = {path.resolve() for path in context_sources}
+    if FILE_STAGING_ROOT.is_dir():
+        for staged_path in FILE_STAGING_ROOT.rglob("*"):
+            if staged_path.is_file() and staged_path.resolve() not in known_paths:
+                context_sources.append(staged_path)
+                known_paths.add(staged_path.resolve())
+    context_classifications = _classify_organizer_paths(classifier, context_sources)
+    by_source = {
+        path.resolve(): classification
+        for path, classification in zip(context_sources, context_classifications)
+    }
+    batch_classifications = [by_source[source.resolve()] for source in sources]
 
     pairs: list[tuple[Path, Path]] = []
     classifications: dict[str, Any] = {}

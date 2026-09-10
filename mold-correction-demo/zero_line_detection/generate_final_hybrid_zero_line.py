@@ -292,8 +292,20 @@ def build_common_from_review_mapping(
     vmax: float,
 ) -> dict[str, Any]:
     """Run the exact experiments color mapping and correction preparation."""
-    values, valid = kdt.map_deviation(
+    return build_common_from_color_ramp(
         image_rgb, kdt.extract_color_ramp(legend_rgb), vmin, vmax
+    )
+
+
+def build_common_from_color_ramp(
+    image_rgb: np.ndarray,
+    ramp_top_to_bottom: np.ndarray,
+    vmin: float,
+    vmax: float,
+) -> dict[str, Any]:
+    """Run the reviewed preparation using a ramp detected from this upload."""
+    values, valid = kdt.map_deviation(
+        image_rgb, ramp_top_to_bottom, vmin, vmax
     )
     values = cv2.medianBlur(values, 5)
     part = kdt.detect_part_mask(image_rgb)
@@ -690,6 +702,27 @@ def draw_team_route_view(
     return construction, final
 
 
+def draw_final_selected_overlay(
+    image: np.ndarray, final_mask: np.ndarray
+) -> np.ndarray:
+    """Render the operator-facing coral selection directly from a fresh mask."""
+    overlay = image.copy()
+    mask = final_mask.astype(bool)
+    kdt.blend_mask(
+        overlay,
+        mask,
+        ZERO_CANDIDATE_HIGHLIGHT_RGB,
+        ZERO_CANDIDATE_HIGHLIGHT_ALPHA,
+    )
+    kdt.draw_line(
+        overlay,
+        kdt.mask_boundary(mask, 1),
+        ZERO_CANDIDATE_HIGHLIGHT_RGB,
+        2,
+    )
+    return overlay
+
+
 def build_case2_board(
     common: dict[str, Any],
     case2: dict[str, Any],
@@ -827,18 +860,8 @@ def process_one(spec, correction_dir: Path, output_dir: Path) -> dict[str, Any]:
         common["zero_rows"],
         "C",
     )
-    final_selected_overlay = common["image"].copy()
-    kdt.blend_mask(
-        final_selected_overlay,
-        final_mask.astype(bool),
-        ZERO_CANDIDATE_HIGHLIGHT_RGB,
-        ZERO_CANDIDATE_HIGHLIGHT_ALPHA,
-    )
-    kdt.draw_line(
-        final_selected_overlay,
-        kdt.mask_boundary(final_mask.astype(bool), 1),
-        ZERO_CANDIDATE_HIGHLIGHT_RGB,
-        2,
+    final_selected_overlay = draw_final_selected_overlay(
+        common["image"], final_mask
     )
 
     item_dir = output_dir / spec.key

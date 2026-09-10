@@ -606,6 +606,45 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             # 파일명에 품번이 적힌 쪽은 그대로다.
             self.assertEqual(found[donor].item_no, "67312-DZ000")
 
+    def test_hyphenated_vehicle_prefix_donor_supplies_item_no_in_same_batch(self) -> None:
+        """JM-품번 형식도 공백형 품명 파일의 기준 파일로 사용할 수 있어야 한다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            donor = "JM-71612_DZ000_DASH LWR_OP20_260825.zip"
+            receiver = "JM DASH LWR 성형해석 리포트 260825.ppt"
+            found = self._classify_names(root, [donor, receiver])
+
+            self.assertEqual(found[donor].item_no, "71612-DZ000")
+            self.assertEqual(found[receiver].item_no, "71612-DZ000")
+            self.assertEqual(found[receiver].family, "71612")
+
+    def test_missing_item_no_is_borrowed_from_previous_catalog_hint(self) -> None:
+        """현재 배치에 기준 파일이 없어도 과거 품명 기록이 하나면 품번을 복원한다."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "organized"
+            root.mkdir(parents=True)
+            classifier = backend_server.FilenameClassifier(
+                backend_server.FILE_ORGANIZER_RULES,
+                root,
+                ["vehicle", "category", "item", "detail"],
+            )
+            receiver = Path("JM DASH LWR 성형해석 리포트 260825.ppt")
+            hints = [backend_server.ItemHint(
+                item_no="71612-DZ000",
+                family="71612",
+                customer="JM",
+                source_name="과거 정리 파일.zip",
+                product_name="DASH LWR",
+            )]
+
+            result = backend_server.classify_batch(
+                classifier, [receiver], historical_hints=hints,
+            )[0]
+
+            self.assertEqual(result.item_no, "71612-DZ000")
+            self.assertTrue(any("과거 정리 파일.zip" in reason for reason in result.reasons))
+
     def test_borrowed_item_no_scores_lower_than_one_read_from_the_filename(self) -> None:
         """빌린 품번은 파일명에 적힌 품번보다 약한 근거이므로 신뢰도가 낮다."""
         with tempfile.TemporaryDirectory() as temp:

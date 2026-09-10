@@ -288,6 +288,7 @@ class ItemHint:
     family: str
     customer: str
     source_name: str
+    product_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -727,7 +728,8 @@ class FilenameClassifier:
 
 
 def _collect_item_hints(
-    paths: list[Path], classifications: list[Classification]
+    paths: list[Path], classifications: list[Classification],
+    historical_hints: list[ItemHint] | None = None,
 ) -> dict[int, ItemHint]:
     """품번이 적힌 파일에서 "(차종, 품명) -> 품번" 표를 만들어, 품번만 빠진
     같은 제품 파일에 물려줄 근거를 고른다.
@@ -737,8 +739,18 @@ def _collect_item_hints(
     차종을 못 읽은 파일은 품명만으로 한 번 더 찾아본다. 차종을 읽은 파일은
     그러지 않는다 — 다른 차종의 품번을 가져오게 되기 때문이다.
     """
-    by_vehicle_and_product: dict[tuple[str, str], dict[str, ItemHint]] = {}
-    by_product: dict[str, dict[str, ItemHint]] = {}
+    current_by_vehicle: dict[tuple[str, str], dict[str, ItemHint]] = {}
+    current_by_product: dict[str, dict[str, ItemHint]] = {}
+    history_by_vehicle: dict[tuple[str, str], dict[str, ItemHint]] = {}
+    history_by_product: dict[str, dict[str, ItemHint]] = {}
+    for hint in historical_hints or []:
+        if not hint.item_no or not hint.product_name:
+            continue
+        product_key = _normalize(hint.product_name)
+        history_by_vehicle.setdefault(
+            (hint.customer.casefold(), product_key), {}
+        ).setdefault(hint.item_no, hint)
+        history_by_product.setdefault(product_key, {}).setdefault(hint.item_no, hint)
     for path, result in zip(paths, classifications):
         if not result.item_no or not result.product_name:
             continue
@@ -748,11 +760,12 @@ def _collect_item_hints(
             family=result.family,
             customer=result.customer,
             source_name=path.name,
+            product_name=result.product_name,
         )
-        by_vehicle_and_product.setdefault(
+        current_by_vehicle.setdefault(
             (result.customer.casefold(), product_key), {}
         ).setdefault(result.item_no, hint)
-        by_product.setdefault(product_key, {}).setdefault(result.item_no, hint)
+        current_by_product.setdefault(product_key, {}).setdefault(result.item_no, hint)
 
     hints: dict[int, ItemHint] = {}
     for index, result in enumerate(classifications):
@@ -760,17 +773,25 @@ def _collect_item_hints(
             continue
         product_key = _normalize(result.product_name)
         if result.customer:
-            candidates = by_vehicle_and_product.get(
-                (result.customer.casefold(), product_key), {}
-            )
+            key = (result.customer.casefold(), product_key)
+            candidates = current_by_vehicle.get(key, {})
+            if not candidates:
+                candidates = history_by_vehicle.get(key, {})
         else:
-            candidates = by_product.get(product_key, {})
+            candidates = current_by_product.get(product_key, {})
+            if not candidates:
+                candidates = history_by_product.get(product_key, {})
         if len(candidates) == 1:
             hints[index] = next(iter(candidates.values()))
     return hints
 
 
-def classify_batch(classifier: FilenameClassifier, paths: list[Path]) -> list[Classification]:
+def classify_batch(
+    classifier: FilenameClassifier,
+    paths: list[Path],
+    *,
+    historical_hints: list[ItemHint] | None = None,
+) -> list[Classification]:
     """같은 classifier 하나로 여러 파일을 분류한다.
 
     한 번 훑어 파일명만으로 분류한 뒤, 품번이 빠진 파일에는 같은 제품의 다른
@@ -779,7 +800,7 @@ def classify_batch(classifier: FilenameClassifier, paths: list[Path]) -> list[Cl
     같이 있으면 뒤엣것도 67312 품번 폴더로 들어간다.
     """
     first_pass = [classifier.classify(path) for path in paths]
-    hints = _collect_item_hints(paths, first_pass)
+    hints = _collect_item_hints(paths, first_pass, historical_hints)
     if not hints:
         return first_pass
     return [

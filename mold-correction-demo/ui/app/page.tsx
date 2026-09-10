@@ -193,7 +193,7 @@ type FolderResponse = { available?: boolean; rootName?: string; path?: string; e
 type HealthResponse = { ok?: boolean };
 type FileDatabaseStatus = { configured: boolean; label: string; connected: boolean | null; catalogCount: number; operationCount: number; version?: string; error?: string };
 type FileOrganizerStatus = { sourceRoot: string; destinationRoot: string; sourceAvailable: boolean; destinationAvailable: boolean; database: FileDatabaseStatus };
-type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
+type FileOrganizerItem = { id: string; name: string; sourcePath: string; sourceKind: 'source' | 'upload'; size: number; modified: string; customer: string; itemNo: string; family: string; productName: string; process: string; categoryKey: string; categoryLabel: string; confidence: number; reasons: string[]; targetDir: string; autoTargetDir: string; targetPath: string; matchedProductFolder: string; detailPath: string };
 type FolderAxis = 'item' | 'vehicle' | 'category' | 'detail';
 type FolderAxisOption = { id: FolderAxis; label: string };
 type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]; error?: string };
@@ -2049,7 +2049,10 @@ function FileOrganizerPage() {
     try {
       const response = await fetch(`${API_BASE}/api/file-organizer/execute`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ operation, conflict, items: activeItems.map((item) => ({ sourcePath: item.sourcePath, targetDir: item.targetDir })) }),
+        body: JSON.stringify({ operation, conflict, items: activeItems.map((item) => ({
+          sourcePath: item.sourcePath,
+          targetDir: item.targetDir !== item.autoTargetDir ? item.targetDir : null,
+        })) }),
       });
       const data = await response.json() as { results?: { source: string; status: string; message: string }[]; databaseNote?: string; error?: string };
       if (!response.ok) throw new Error(data.error || '파일 정리를 실행하지 못했습니다.');
