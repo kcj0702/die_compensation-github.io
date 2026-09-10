@@ -53,7 +53,8 @@ export function WorkspaceNavigation({ view, onSelect, hasResult, scans, activeId
   return <header className="studio-navigation" ref={navigationRef}>
     <div className="studio-navigation__main">
       <button type="button" className="studio-brand" aria-label="아진산업 작업 선택" onClick={() => onSelect('overview')}>
-        <img src="/ajin-industrial-logo.png" alt="아진산업" width={957} height={311} />
+        <span className="studio-brand__positive-symbol" aria-hidden="true" />
+        <img className="studio-brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" width={957} height={311} />
       </button>
       <nav className="studio-areas" aria-label="작업 영역">
         <button type="button" className={correctionActive ? 'is-active' : ''} aria-current={correctionActive ? 'page' : undefined} onClick={() => onSelect('workspace')}><span>01</span>보정시트 작성</button>
