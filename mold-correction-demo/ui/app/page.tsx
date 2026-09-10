@@ -15,7 +15,14 @@ import { clearSession, downloadSession, emptySession, loadSession, readSessionFi
 import { CIRCLED, DIE_CHOICES, WORK_CHOICES, CadViewer, type CadMesh, type CadNote, type CadOverlay, type CadRegion } from './cad-viewer';
 import { WorkspaceHub, WorkspaceNavigation, type WorkspaceView } from './immersive-workspace';
 
-const API_BASE = 'http://127.0.0.1:8000';
+/* 엔진 서버 주소.
+ *
+ * 127.0.0.1 로 못 박아 두면 다른 PC 에서 열었을 때 그 PC 자신을 찾아가
+ * 화면만 뜨고 아무것도 안 된다. 브라우저가 지금 접속한 주소를 그대로 쓰고
+ * 포트만 8000 으로 바꾼다. */
+const API_BASE = typeof window === 'undefined'
+  ? 'http://127.0.0.1:8000'
+  : `http://${window.location.hostname}:8000`;
 
 type View = WorkspaceView;
 type Engine = 'label' | 'deviation' | 'zero';

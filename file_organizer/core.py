@@ -770,6 +770,49 @@ def _collect_item_hints(
     return hints
 
 
+def _folder_item_hints(
+    classifier: FilenameClassifier,
+    paths: list[Path],
+    classifications: list[Classification],
+) -> dict[int, ItemHint]:
+    """파일이 들어 있던 **폴더 이름**에서 품번을 읽어 물려준다.
+
+    [왜 필요한가 — 실측 금형팀 폴더]
+    NC 데이터 파일에는 품번이 아예 안 적혀 있다 —
+        260825_JDZ_DASH LWR_OP10_형상_LWR PUNCH_NC DATA.ZIP
+    형제 파일에서 빌려오는 _collect_item_hints 도 여기서는 못 쓴다. 다섯
+    품번(64XX2·65XX2·66XX2·67XX2·71XX2)이 전부 품명이 "DASH LWR" 로 같아
+    후보가 다섯이 되기 때문이다.
+
+    그런데 파일이 놓인 자리가 답을 알고 있다 —
+        06. NC DATA / 64XX2 / OP10 / (파일)
+    사람이 그렇게 갈라 둔 것이므로 파일명보다 못 믿을 이유가 없다. 실측에서
+    이 규칙 하나로 미분류 45개 중 40개가 제자리를 찾는다.
+
+    파일명에 품번이 있으면 손대지 않는다 — 파일명이 늘 우선이다.
+    """
+    hints: dict[int, ItemHint] = {}
+    for index, (path, result) in enumerate(zip(paths, classifications)):
+        if result.item_no:
+            continue
+        # 가까운 폴더부터 본다. 品번 폴더는 보통 파일 바로 위나 그 위다.
+        for folder in path.parents:
+            name = folder.name
+            if not name or name == UNKNOWN_ITEM_FOLDER:
+                continue
+            item_no, family, _prefix, _tail = classifier._match_item_no(name)
+            if not item_no:
+                continue
+            hints[index] = ItemHint(
+                item_no=item_no,
+                family=family,
+                customer=result.customer,
+                source_name=f"{name} 폴더",
+            )
+            break
+    return hints
+
+
 def classify_batch(classifier: FilenameClassifier, paths: list[Path]) -> list[Classification]:
     """같은 classifier 하나로 여러 파일을 분류한다.
 
@@ -779,7 +822,11 @@ def classify_batch(classifier: FilenameClassifier, paths: list[Path]) -> list[Cl
     같이 있으면 뒤엣것도 67312 품번 폴더로 들어간다.
     """
     first_pass = [classifier.classify(path) for path in paths]
+    # 형제 파일에서 빌리는 것을 먼저 보고, 그래도 못 채운 것만 폴더 이름에서
+    # 읽는다. 파일명 > 형제 파일 > 놓인 폴더 순으로 믿는다.
     hints = _collect_item_hints(paths, first_pass)
+    for index, hint in _folder_item_hints(classifier, paths, first_pass).items():
+        hints.setdefault(index, hint)
     if not hints:
         return first_pass
     return [
