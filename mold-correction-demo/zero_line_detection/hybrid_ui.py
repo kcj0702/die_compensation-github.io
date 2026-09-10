@@ -353,8 +353,6 @@ def _detect_hybrid_zero_line_uncached(
         base = detect_zero_line(
             rgb, ZeroLineConfig(vmin=vmin, vmax=vmax), source_name=filename
         )
-    fallback_part_px = max(1, int(base.part_mask.sum()))
-    fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
         from zero_line_detection import case2_route_adapter as case2
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
@@ -435,19 +433,12 @@ def _detect_hybrid_zero_line_uncached(
             lines=lines, warnings=list(base.warnings),
         )
     except Exception as exc:
-        overlay = make_overlay(rgb, base.mask, base.centerline, zero_crossing=base.zero_crossing)
-        # 위 Case 1 분기와 같은 이유로, 여기서도 base.mask(영역) 를 폴리라인
-        # 윤곽선으로 뽑아 lines 를 채운다 — 컬러바 인식 실패 등으로 case2 가
-        # 죽어 이 최종 폴백까지 떨어져도 최소한 "면적 윤곽" 은 벡터로 보인다.
-        try:
-            fallback_lines = _mask_contours_as_lines(base.mask.astype(np.uint8))
-        except Exception:
-            fallback_lines = []
-        return HybridZeroLineOutput(
-            mask=base.mask.astype(bool), overlay_rgb=overlay, case=1,
-            regions=len(base.result.regions), ratio=fallback_ratio, lines=fallback_lines,
-            warnings=list(base.warnings) + [f"Case 2 경로 계산 실패로 Case 1 후보를 표시했습니다: {exc}"],
-        )
+        # The distribution decision already selected Case 2.  Returning the
+        # basic area mask as ``case=1`` hides the real failure, caches a false
+        # classification, and makes unrelated products appear to use Case 1.
+        # Propagate the failure so callers can report/retry it without
+        # changing the selected algorithm.
+        raise RuntimeError(f"Case 2 경로 계산 실패: {exc}") from exc
 
 
 def detect_hybrid_zero_line(
