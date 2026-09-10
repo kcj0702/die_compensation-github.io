@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from core import Classification, OperationResult
+from core import Classification, ItemHint, OperationResult
 
 _DB_URL_FILENAME = ".file_db_url"
 
@@ -154,6 +154,41 @@ class MariaDBRepository:
             raise
         except Exception as exc:
             raise DatabaseError(f"MariaDB 조회에 실패했습니다: {exc}") from exc
+        finally:
+            connection.close()
+
+    def get_item_hints(self) -> list[ItemHint]:
+        """이전에 정리한 파일 중 품명과 품번이 모두 확정된 기록을 돌려준다."""
+        connection = self._connect()
+        try:
+            self._ensure_schema(connection)
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT customer, item_no, family, product_name, file_name
+                FROM file_catalog
+                WHERE item_no IS NOT NULL AND item_no <> ''
+                  AND product_name IS NOT NULL AND product_name <> ''
+                ORDER BY updated_at DESC
+                """
+            )
+            hints = [
+                ItemHint(
+                    customer=str(customer or ""),
+                    item_no=str(item_no),
+                    family=str(family or str(item_no).split("-", 1)[0]),
+                    product_name=str(product_name),
+                    source_name=str(file_name),
+                )
+                for customer, item_no, family, product_name, file_name in cursor.fetchall()
+            ]
+            cursor.close()
+            connection.commit()
+            return hints
+        except DatabaseError:
+            raise
+        except Exception as exc:
+            raise DatabaseError(f"MariaDB 이전 분류 조회에 실패했습니다: {exc}") from exc
         finally:
             connection.close()
 

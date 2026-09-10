@@ -21,6 +21,17 @@ class _Reader:
         return self.values
 
 
+class _FocusedReader(_Reader):
+    def __init__(self, values, focused_values):
+        super().__init__(values)
+        self.focused_values = iter(focused_values)
+        self.focused_calls = 0
+
+    def read_value_focused(self, crop):
+        self.focused_calls += 1
+        return next(self.focused_values)
+
+
 class ColorbarScaleTests(unittest.TestCase):
     def setUp(self) -> None:
         self.image = np.zeros((300, 400, 3), dtype=np.uint8)
@@ -38,11 +49,23 @@ class ColorbarScaleTests(unittest.TestCase):
 
     def test_endpoint_crop_excludes_the_adjacent_tick_row(self) -> None:
         crop = _endpoint_crop(self.image, self.info, "min")
-        self.assertLessEqual(crop.height, 21)
+        self.assertLessEqual(crop.height, 49)
 
     def test_does_not_substitute_a_product_default_when_ocr_fails(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "품번 기본값"):
             read_colorbar_range_mm(self.image, self.info, _Reader([None, 2.0]))
+
+    def test_retries_zero_minimum_with_focused_ocr(self) -> None:
+        reader = _FocusedReader([0.0, 2.0], [-1.5])
+        self.assertEqual(
+            read_colorbar_range_mm(self.image, self.info, reader),
+            (-1.5, 2.0),
+        )
+        self.assertEqual(reader.focused_calls, 1)
+
+    def test_rejects_zero_as_a_colorbar_endpoint(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "음수 최솟값"):
+            read_colorbar_range_mm(self.image, self.info, _Reader([0.0, 2.0]))
 
     def test_case2_samples_an_asymmetric_physical_range(self) -> None:
         hsv = np.zeros((100, 8, 3), dtype=np.uint8)

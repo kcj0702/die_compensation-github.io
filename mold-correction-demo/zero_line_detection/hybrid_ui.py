@@ -25,7 +25,7 @@ from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-_CACHE_SCHEMA = "hybrid-zero-v6"
+_CACHE_SCHEMA = "hybrid-zero-v7-current-input-parity"
 _CACHE_LIMIT = 32
 
 
@@ -214,22 +214,6 @@ def _routes_to_review_mask(
     return routes_to_mask(selections, shape).astype(bool)
 
 
-def _matching_review_spec(filename: str):
-    """Return the bundled review specification for a known standard scan.
-
-    The correction-only review inputs include the inpainted scan, its colour
-    map and the gray-area sign assignment.  They are the authoritative input
-    for the supplied standard scans; re-estimating those from an uploaded PNG
-    changes the connected components and can select the wrong case.
-    """
-    from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
-
-    normalized = filename.upper()
-    return next(
-        (spec for spec in kdt.SPECS if spec.key.upper() in normalized), None
-    )
-
-
 def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
     """Expose each final zero region boundary in the response schema.
 
@@ -262,73 +246,6 @@ def _mask_contours_as_lines(mask: np.ndarray) -> list[dict]:
     return lines
 
 
-def _detect_from_review_inputs(
-    image_bgr: np.ndarray, filename: str
-) -> HybridZeroLineOutput | None:
-    """Run the exact review pipeline for a bundled standard scan.
-
-    ``None`` means arbitrary input, which continues through the generic
-    in-memory path.  A size mismatch also must not apply a mask at wrong
-    pixels.
-    """
-    from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
-    from zero_line_detection import generate_final_hybrid_zero_line as hybrid
-
-    spec = _matching_review_spec(filename)
-    if spec is None:
-        return None
-    common = hybrid.load_common_inputs(spec, hybrid.DEFAULT_CORRECTION_DIR)
-    if tuple(common["part"].shape) != tuple(image_bgr.shape[:2]):
-        return None
-
-    selected_case = hybrid.select_case(common["zero_ratio"], common["zero_count"])
-    if selected_case == 1:
-        final_mask, details = hybrid.run_case1(common)
-        lines = _mask_contours_as_lines(final_mask)
-        # Keep the review result untouched: it is drawn on the inpainted
-        # source, with the blue zero-area fill and its 4 px boundary.  The
-        # uploaded original has labels/noise that were explicitly removed
-        # before correction and zero-line detection.
-        _board, overlay = kdt.build_board(
-            common["image"],
-            common["positive"],
-            common["negative"],
-            common["zero"],
-            "case1_contour_polygon",
-            details,
-            None,
-            common["zero_ratio"],
-            common["zero_count"],
-        )
-    else:
-        final_mask, details = hybrid.run_case2(common)
-        lines = []
-        for index, selection in enumerate(details["selections"], start=1):
-            points = np.asarray(
-                selection["closure_validation"]["route"]["path_points"],
-                dtype=np.int32,
-            )
-            if len(points) >= 2:
-                lines.append({"id": index, "points": points.tolist()})
-        _construction, overlay = hybrid.draw_team_route_view(
-            common["image"].copy(), details, final_mask
-        )
-
-    return HybridZeroLineOutput(
-        mask=final_mask.astype(bool),
-        overlay_rgb=overlay,
-        case=selected_case,
-        regions=len(lines),
-        ratio=float(final_mask.sum()) / max(1, int(common["part_px"])),
-        lines=lines,
-        warnings=[
-            f"검토 입력 재사용: {spec.key} / {selected_case}번 방식 "
-            f"(제로 가능영역 {common['zero_ratio']:.2%}, "
-            f"{common['zero_count']}개)"
-        ],
-    )
-
-
 def _detect_hybrid_zero_line_uncached(
     image_bgr: np.ndarray,
     filename: str,
@@ -353,18 +270,19 @@ def _detect_hybrid_zero_line_uncached(
         base = detect_zero_line(
             rgb, ZeroLineConfig(vmin=vmin, vmax=vmax), source_name=filename
         )
+    selected_case: int | None = None
     try:
         from zero_line_detection import case2_route_adapter as case2
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
         from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview as kdt
 
-        # 판정 입력도 검토 엔진과 같은 보정영역 생성 단계를 거친다. 단순
-        # +/-0.6 threshold 는 67XX6의 영역을 합치기 전 상태로 세어 Case 2로
-        # 잘못 보낼 수 있었다.
-        info = base.colorbar.info
-        legend_rgb = rgb[info.y0:info.y1, info.x0:info.x1]
-        common = hybrid.build_common_from_review_mapping(
-            decision_rgb, legend_rgb, vmin, vmax
+        # Use the colour ramp detected from this exact upload, but map it with
+        # the same hue interpolation and correction preparation as the
+        # reviewed experiment. ``Colorbar.colors_rgb`` is stored vmin->vmax;
+        # the reviewed mapper accepts vmax->vmin (top->bottom), hence reverse.
+        # This needs neither a product-specific range nor a saved legend.
+        common = hybrid.build_common_from_color_ramp(
+            decision_rgb, base.colorbar.colors_rgb[::-1], vmin, vmax
         )
         part = common["part"]
         part_px = common["part_px"]
@@ -425,8 +343,7 @@ def _detect_hybrid_zero_line_uncached(
         # Use the review engine's exact 4 px / LINE_8 rasterisation.  Redrawing
         # here with 5 px antialiasing made identical routes look much thicker.
         mask = _routes_to_review_mask(routed["selections"], image_bgr.shape[:2])
-        overlay_base = cv2.cvtColor(routed["cleaned_bgr"], cv2.COLOR_BGR2RGB)
-        _construction, overlay = hybrid.draw_team_route_view(overlay_base, routed, mask)
+        overlay = hybrid.draw_final_selected_overlay(decision_rgb, mask)
         route_ratio = float(mask.sum()) / part_px
         return HybridZeroLineOutput(
             mask=mask, overlay_rgb=overlay, case=2, regions=len(lines), ratio=route_ratio,
@@ -438,7 +355,13 @@ def _detect_hybrid_zero_line_uncached(
         # classification, and makes unrelated products appear to use Case 1.
         # Propagate the failure so callers can report/retry it without
         # changing the selected algorithm.
-        raise RuntimeError(f"Case 2 경로 계산 실패: {exc}") from exc
+        if selected_case == 2:
+            message = f"Case 2 경로 계산 실패: {exc}"
+        elif selected_case == 1:
+            message = f"Case 1 영역 계산 실패: {exc}"
+        else:
+            message = f"하이브리드 제로라인 계산 실패: {exc}"
+        raise RuntimeError(message) from exc
 
 
 def detect_hybrid_zero_line(
