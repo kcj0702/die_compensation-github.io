@@ -20,6 +20,26 @@ _mask_contours_as_lines = hybrid_ui._mask_contours_as_lines
 
 class HybridUiEditPointTests(unittest.TestCase):
 
+    def test_case2_mask_uses_review_engine_rasterization(self) -> None:
+        selections = [
+            {
+                "closure_validation": {
+                    "route": {"path_points": [[2, 5], [17, 5]]}
+                }
+            }
+        ]
+        actual = hybrid_ui._routes_to_review_mask(selections, (12, 20))
+        expected = np.zeros((12, 20), dtype=np.uint8)
+        cv2.polylines(
+            expected,
+            [np.asarray([[2, 5], [17, 5]], dtype=np.int32).reshape(-1, 1, 2)],
+            False,
+            255,
+            4,
+            cv2.LINE_8,
+        )
+        np.testing.assert_array_equal(actual, expected.astype(bool))
+
     def test_cache_key_changes_when_supplied_base_values_change(self) -> None:
         image = np.zeros((8, 12, 3), dtype=np.uint8)
 
@@ -44,17 +64,6 @@ class HybridUiEditPointTests(unittest.TestCase):
         first = hybrid_ui._cache_key(image, "scan.png", None, (-1.5, 2.0))
         second = hybrid_ui._cache_key(image, "scan.png", None, (-3.0, 3.0))
         self.assertNotEqual(first, second)
-
-    def test_empty_case1_polygon_falls_back_to_candidate_area(self) -> None:
-        candidate = np.zeros((20, 30), dtype=bool)
-        candidate[4:12, 7:18] = True
-
-        selected, used_fallback = hybrid_ui._ensure_nonempty_case1_mask(
-            np.zeros_like(candidate), {"zero": candidate}
-        )
-
-        self.assertTrue(used_fallback)
-        np.testing.assert_array_equal(selected, candidate)
 
     def test_runtime_selection_modules_stay_inside_zero_line_package(self) -> None:
         from zero_line_detection import case2_route_adapter

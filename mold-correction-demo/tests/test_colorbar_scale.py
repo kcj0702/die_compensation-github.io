@@ -6,8 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import cv2
 
-from zero_line_detection.colorbar_scale import read_colorbar_range_mm
+from zero_line_detection.colorbar_scale import _endpoint_crop, read_colorbar_range_mm
 from zero_line_detection.case2_original_pipeline.out_of_tolerance import sample_bar_hue
+from zero_line_detection.case2_route_adapter import _reviewed_case2_range
 
 
 class _Reader:
@@ -35,6 +36,10 @@ class ColorbarScaleTests(unittest.TestCase):
         )
         self.assertEqual(reader.received[1], 2)
 
+    def test_endpoint_crop_excludes_the_adjacent_tick_row(self) -> None:
+        crop = _endpoint_crop(self.image, self.info, "min")
+        self.assertLessEqual(crop.height, 21)
+
     def test_does_not_substitute_a_product_default_when_ocr_fails(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "품번 기본값"):
             read_colorbar_range_mm(self.image, self.info, _Reader([None, 2.0]))
@@ -49,6 +54,10 @@ class ColorbarScaleTests(unittest.TestCase):
 
         # (2.0 - 0.6) / (2.0 - -1.5) = 0.4, hence row/hue 40.
         self.assertAlmostEqual(sampled, 40.0, delta=1.0)
+
+    def test_reviewed_case2_range_is_derived_without_product_defaults(self) -> None:
+        self.assertEqual(_reviewed_case2_range((-1.5, 2.0)), (-2.0, 2.0))
+        self.assertEqual(_reviewed_case2_range((-4.25, 3.0)), (-4.25, 4.25))
 
 
 if __name__ == "__main__":

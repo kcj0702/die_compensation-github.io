@@ -23,6 +23,17 @@ from zero_line_detection.case2_original_pipeline import zero_point_selection
 DEFAULT_MINIMUM_ROUTE_LENGTH_PX = 100.0
 
 
+def _reviewed_case2_range(
+    colorbar_range_mm: tuple[float, float],
+) -> tuple[float, float]:
+    """Derive the symmetric scale used by the reviewed original pipeline."""
+    vmin, vmax = colorbar_range_mm
+    scale_max_mm = max(abs(float(vmin)), abs(float(vmax)))
+    if not np.isfinite(scale_max_mm) or scale_max_mm <= 0.0:
+        raise ValueError(f"Invalid colorbar range: {vmin:g}~{vmax:g} mm")
+    return -scale_max_mm, scale_max_mm
+
+
 def _flatten_zero_points(contours: list[dict[str, Any]]) -> list[dict[str, Any]]:
     points: list[dict[str, Any]] = []
     sequence = 1
@@ -170,19 +181,24 @@ def run_original_case2_pipeline(
 
     source_bar = out_of_tolerance.locate_colorbar(original_bgr)
     vmin, vmax = colorbar_range_mm
+    # Preserve the reviewed case-2 condition: its original stages sample a
+    # symmetric colour scale.  The scale is derived from the detected legend
+    # endpoints, so no product number or product-specific value is embedded.
+    case2_vmin, case2_vmax = _reviewed_case2_range(colorbar_range_mm)
+    scale_max_mm = case2_vmax
     positive_hue = out_of_tolerance.sample_bar_hue(
         original_bgr,
         source_bar,
         out_of_tolerance.TOLERANCE_MM,
-        vmin,
-        vmax,
+        case2_vmin,
+        case2_vmax,
     )
     negative_hue = out_of_tolerance.sample_bar_hue(
         original_bgr,
         source_bar,
         -out_of_tolerance.TOLERANCE_MM,
-        vmin,
-        vmax,
+        case2_vmin,
+        case2_vmax,
     )
     positive, negative, gray = out_of_tolerance.build_correction_masks(
         cleaned,
@@ -214,6 +230,8 @@ def run_original_case2_pipeline(
         "merged_correction_mask": merged_correction,
         "merge_details": merge_details,
         "tolerance_mm": float(out_of_tolerance.TOLERANCE_MM),
+        "detected_colorbar_range_mm": (float(vmin), float(vmax)),
+        "case2_symmetric_scale_max_mm": scale_max_mm,
         "positive_hue_limit": float(positive_hue),
         "negative_hue_limit": float(negative_hue),
     }
