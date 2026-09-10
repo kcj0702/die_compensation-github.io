@@ -111,8 +111,12 @@ from cad_import.mesh_io import (  # noqa: E402
 from cad_import.overlay import fit_view as fit_mesh_view  # noqa: E402
 from cad_import.catia_capture import capture_product_image as capture_catia_product_image  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
+from zero_line_detection.colorbar import detect_colorbar  # noqa: E402
 from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line  # noqa: E402
-from zero_line_detection.hybrid_ui import detect_hybrid_zero_line  # noqa: E402
+from zero_line_detection.hybrid_ui import (  # noqa: E402
+    detect_hybrid_zero_line,
+)
+from zero_line_detection.colorbar_scale import read_colorbar_range_mm  # noqa: E402
 from zero_line_detection import zero_shapes  # noqa: E402
 from zero_line_detection.zero_criteria import (  # noqa: E402
     candidates_to_mask, find_zero_candidates,
@@ -1417,7 +1421,17 @@ def analyze_image(
     zero_patches: list = []
     try:
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        zero_output = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
+        # The physical scale comes only from the numbers printed at the
+        # detected colour-bar endpoints. Product names are never consulted.
+        detected_colorbar = detect_colorbar(rgb)
+        registered_range = read_colorbar_range_mm(
+            image, detected_colorbar.info, _get_qwen_reader()
+        )
+        zero_config = ZeroLineConfig(
+            vmin=registered_range[0],
+            vmax=registered_range[1],
+        )
+        zero_output = detect_zero_line(rgb, zero_config, source_name=filename)
         overlay_base = cv2.cvtColor(
             clean_image if clean_image is not None else image,
             cv2.COLOR_BGR2RGB,
@@ -1469,6 +1483,7 @@ def analyze_image(
             filename,
             base=zero_output,
             decision_bgr=clean_image,
+            colorbar_range_mm=registered_range,
         )
         zero_datum_mask = hybrid_zero.mask
         zero_overlay = hybrid_zero.overlay_rgb

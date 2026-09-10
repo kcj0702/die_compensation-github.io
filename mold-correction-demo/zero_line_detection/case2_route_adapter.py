@@ -144,7 +144,7 @@ def run_route_selector(
 def run_original_case2_pipeline(
     *,
     original_bgr: np.ndarray,
-    scale_max_mm: float,
+    colorbar_range_mm: tuple[float, float],
     minimum_route_length_px: float = DEFAULT_MINIMUM_ROUTE_LENGTH_PX,
 ) -> dict[str, Any]:
     """Run the preserved case-2 stages 01-06 in memory as one engine branch."""
@@ -169,17 +169,20 @@ def run_original_case2_pipeline(
     )
 
     source_bar = out_of_tolerance.locate_colorbar(original_bgr)
+    vmin, vmax = colorbar_range_mm
     positive_hue = out_of_tolerance.sample_bar_hue(
         original_bgr,
         source_bar,
         out_of_tolerance.TOLERANCE_MM,
-        scale_max_mm,
+        vmin,
+        vmax,
     )
     negative_hue = out_of_tolerance.sample_bar_hue(
         original_bgr,
         source_bar,
         -out_of_tolerance.TOLERANCE_MM,
-        scale_max_mm,
+        vmin,
+        vmax,
     )
     positive, negative, gray = out_of_tolerance.build_correction_masks(
         cleaned,

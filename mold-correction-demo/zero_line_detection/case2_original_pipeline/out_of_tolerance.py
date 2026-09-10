@@ -10,11 +10,6 @@ import cv2
 import numpy as np
 
 
-SCAN_SCALES = {
-    "JD_64XX2-DR000": 2.0,
-    "JD_67XX6-DR000": 3.0,
-    "JD_71XX2-DR000": 2.0,
-}
 TOLERANCE_MM = 0.7
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
@@ -50,13 +45,6 @@ def find_single_image(directory: Path, name_contains: str = "") -> Path:
     return matches[0]
 
 
-def product_prefix(product_root: Path) -> str:
-    for prefix in SCAN_SCALES:
-        if product_root.name.startswith(prefix):
-            return prefix
-    raise ValueError(f"No color-map scale is registered for {product_root.name}")
-
-
 def locate_colorbar(image: np.ndarray) -> tuple[int, int, int, int]:
     """Locate the tall saturated color bar near the right image edge."""
     height, width = image.shape[:2]
@@ -85,10 +73,16 @@ def sample_bar_hue(
     image: np.ndarray,
     bar: tuple[int, int, int, int],
     deviation_mm: float,
-    scale_max_mm: float,
+    vmin_mm: float,
+    vmax_mm: float,
 ) -> float:
     x0, y0, x1, y1 = bar
-    fraction = (scale_max_mm - deviation_mm) / (2.0 * scale_max_mm)
+    if not vmin_mm <= deviation_mm <= vmax_mm or vmin_mm >= vmax_mm:
+        raise ValueError(
+            f"Deviation {deviation_mm:g} mm is outside colorbar range "
+            f"{vmin_mm:g}~{vmax_mm:g} mm"
+        )
+    fraction = (vmax_mm - deviation_mm) / (vmax_mm - vmin_mm)
     center_y = y0 + fraction * (y1 - y0 - 1)
     sample_y0 = max(y0, int(round(center_y)) - 4)
     sample_y1 = min(y1, int(round(center_y)) + 5)
@@ -217,7 +211,8 @@ def process(
     original_path: Path,
     step03_path: Path,
     output_dir: Path,
-    scale_max_mm: float,
+    vmin_mm: float,
+    vmax_mm: float,
 ) -> tuple[Path, Path, Path]:
     cleaned = read_image(cleaned_path)
     original = read_image(original_path)
@@ -226,8 +221,12 @@ def process(
         raise ValueError("Clean, source, and step-03 images must have identical dimensions")
 
     colorbar = locate_colorbar(original)
-    positive_hue = sample_bar_hue(original, colorbar, TOLERANCE_MM, scale_max_mm)
-    negative_hue = sample_bar_hue(original, colorbar, -TOLERANCE_MM, scale_max_mm)
+    positive_hue = sample_bar_hue(
+        original, colorbar, TOLERANCE_MM, vmin_mm, vmax_mm
+    )
+    negative_hue = sample_bar_hue(
+        original, colorbar, -TOLERANCE_MM, vmin_mm, vmax_mm
+    )
     if positive_hue >= negative_hue:
         raise RuntimeError(
             f"Unexpected hue order: +{TOLERANCE_MM:.1f}={positive_hue}, "
@@ -256,7 +255,8 @@ def process(
             f"deviation >= +{TOLERANCE_MM:.1f} mm"
         ),
         "gray_clipped_included": True,
-        "scale_max_mm": scale_max_mm,
+        "colorbar_vmin_mm": vmin_mm,
+        "colorbar_vmax_mm": vmax_mm,
         "positive_hue_limit": positive_hue,
         "negative_hue_limit": negative_hue,
         "positive_pixel_count": int(cv2.countNonZero(positive)),
@@ -271,7 +271,6 @@ def process(
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
     product_root = script_dir.parent.parent
-    prefix = product_prefix(product_root)
     parser = argparse.ArgumentParser(
         description=f"Overlay +/-{TOLERANCE_MM:.1f} mm correction regions"
     )
@@ -279,12 +278,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--original-image", type=Path)
     parser.add_argument("--step03-image", type=Path, default=product_root / "output" / "03_zero_point_selection" / "03_zero_points.png")
     parser.add_argument("--output-dir", type=Path, default=script_dir)
+    parser.add_argument("--vmin-mm", type=float, required=True)
+    parser.add_argument("--vmax-mm", type=float, required=True)
     args = parser.parse_args()
     if args.clean_image is None:
         args.clean_image = find_single_image(product_root / "output" / "01_label_removal", "4_labels_points_inpainted")
     if args.original_image is None:
         args.original_image = find_single_image(product_root / "input")
-    args.scale_max_mm = SCAN_SCALES[prefix]
+    if args.vmin_mm >= args.vmax_mm:
+        parser.error("--vmin-mm must be smaller than --vmax-mm")
     return args
 
 
@@ -295,7 +297,8 @@ def main() -> None:
         args.original_image.resolve(),
         args.step03_image.resolve(),
         args.output_dir.resolve(),
-        args.scale_max_mm,
+        args.vmin_mm,
+        args.vmax_mm,
     )
     for path in paths:
         print(f"Created: {path}")

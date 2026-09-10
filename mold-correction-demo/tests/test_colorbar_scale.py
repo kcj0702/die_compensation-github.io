@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+
+import numpy as np
+import cv2
+
+from zero_line_detection.colorbar_scale import read_colorbar_range_mm
+from zero_line_detection.case2_original_pipeline.out_of_tolerance import sample_bar_hue
+
+
+class _Reader:
+    def __init__(self, values):
+        self.values = values
+        self.received = None
+
+    def read_values(self, crops, batch_size):
+        self.received = (crops, batch_size)
+        return self.values
+
+
+class ColorbarScaleTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.image = np.zeros((300, 400, 3), dtype=np.uint8)
+        self.info = SimpleNamespace(
+            x0=350, x1=365, y0=40, y1=260, vmin_at="bottom"
+        )
+
+    def test_reads_asymmetric_range_from_endpoint_labels(self) -> None:
+        reader = _Reader([-1.5, 2.0])
+        self.assertEqual(
+            read_colorbar_range_mm(self.image, self.info, reader),
+            (-1.5, 2.0),
+        )
+        self.assertEqual(reader.received[1], 2)
+
+    def test_does_not_substitute_a_product_default_when_ocr_fails(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "품번 기본값"):
+            read_colorbar_range_mm(self.image, self.info, _Reader([None, 2.0]))
+
+    def test_case2_samples_an_asymmetric_physical_range(self) -> None:
+        hsv = np.zeros((100, 8, 3), dtype=np.uint8)
+        hsv[:, :, 0] = np.arange(100, dtype=np.uint8)[:, None]
+        hsv[:, :, 1:] = 255
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        sampled = sample_bar_hue(bgr, (0, 0, 8, 100), 0.6, -1.5, 2.0)
+
+        # (2.0 - 0.6) / (2.0 - -1.5) = 0.4, hence row/hue 40.
+        self.assertAlmostEqual(sampled, 40.0, delta=1.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

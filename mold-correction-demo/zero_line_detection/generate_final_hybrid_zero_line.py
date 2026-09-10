@@ -44,6 +44,8 @@ FINAL_LINE_OUTLINE_RGB = (255, 255, 255)
 ZERO_POINT_RGB = (45, 240, 80)
 ROUTE_REGION_RGB = (255, 90, 210)
 CASE2_FINAL_LINE_RGB = (0, 255, 255)
+ZERO_CANDIDATE_HIGHLIGHT_RGB = (255, 82, 56)
+ZERO_CANDIDATE_HIGHLIGHT_ALPHA = 0.78
 
 
 class ZeroLineDetection(NamedTuple):
@@ -803,9 +805,53 @@ def process_one(spec, correction_dir: Path, output_dir: Path) -> dict[str, Any]:
         case2 = detection.method_data
         board, overlay = build_case2_board(common, case2, final_mask)
 
+    # Save the case-decision input as an operator-readable colour overlay as
+    # well as a binary mask.  This makes the retained zero-line candidate
+    # regions as easy to inspect as the positive/negative correction regions.
+    zero_candidate_overlay = common["image"].copy()
+    kdt.blend_mask(
+        zero_candidate_overlay,
+        common["zero"],
+        ZERO_CANDIDATE_HIGHLIGHT_RGB,
+        ZERO_CANDIDATE_HIGHLIGHT_ALPHA,
+    )
+    kdt.draw_line(
+        zero_candidate_overlay,
+        kdt.mask_boundary(common["zero"], 1),
+        FINAL_LINE_RGB,
+        2,
+    )
+    kdt.draw_region_numbers(
+        zero_candidate_overlay,
+        common["zero_labels"],
+        common["zero_rows"],
+        "C",
+    )
+    final_selected_overlay = common["image"].copy()
+    kdt.blend_mask(
+        final_selected_overlay,
+        final_mask.astype(bool),
+        ZERO_CANDIDATE_HIGHLIGHT_RGB,
+        ZERO_CANDIDATE_HIGHLIGHT_ALPHA,
+    )
+    kdt.draw_line(
+        final_selected_overlay,
+        kdt.mask_boundary(final_mask.astype(bool), 1),
+        ZERO_CANDIDATE_HIGHLIGHT_RGB,
+        2,
+    )
+
     item_dir = output_dir / spec.key
     kdt.imwrite_rgb(item_dir / "review_board.png", board)
     kdt.imwrite_rgb(item_dir / "final_zero_line_overlay.png", overlay)
+    kdt.imwrite_rgb(
+        item_dir / "zero_line_candidate_area_overlay.png",
+        zero_candidate_overlay,
+    )
+    kdt.imwrite_rgb(
+        item_dir / "final_selected_zero_line_coral_overlay.png",
+        final_selected_overlay,
+    )
     kdt.imwrite_gray(
         item_dir / "raw_zero_line_source_area_before_1pct_filter_mask.png",
         common["raw_zero"].astype(np.uint8) * 255,
@@ -845,6 +891,8 @@ def process_one(spec, correction_dir: Path, output_dir: Path) -> dict[str, Any]:
         "outputs": {
             "review_board": "review_board.png",
             "final_overlay": "final_zero_line_overlay.png",
+            "zero_candidate_overlay": "zero_line_candidate_area_overlay.png",
+            "final_selected_coral_overlay": "final_selected_zero_line_coral_overlay.png",
             "final_mask": "final_zero_line_mask.png",
         },
     }

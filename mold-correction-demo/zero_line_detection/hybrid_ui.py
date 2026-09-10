@@ -25,7 +25,7 @@ from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-_CACHE_SCHEMA = "hybrid-zero-v2"
+_CACHE_SCHEMA = "hybrid-zero-v4"
 _CACHE_LIMIT = 32
 
 
@@ -60,18 +60,59 @@ def _cache_dir() -> Path:
     return Path(configured).expanduser() if configured else Path(__file__).resolve().parent / ".lab_cache"
 
 
-def _cache_key(image_bgr: np.ndarray, filename: str) -> str:
+def _digest_array(digest, value: Any) -> None:
+    array = np.ascontiguousarray(np.asarray(value))
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(array.tobytes())
+
+
+def _digest_base(digest, base: Any) -> None:
+    """Include supplied basic-detection inputs that can alter the result."""
+    if base is None:
+        digest.update(b"base:none")
+        return
+    digest.update(b"base:supplied")
+    for name in ("values", "part_mask", "mask", "zero_crossing"):
+        value = getattr(base, name, None)
+        digest.update(name.encode("ascii"))
+        if value is None:
+            digest.update(b":none")
+        else:
+            _digest_array(digest, value)
+    colorbar = getattr(base, "colorbar", None)
+    result = getattr(base, "result", None)
+    metadata = {
+        "colorbar_vmin": getattr(colorbar, "vmin", None),
+        "colorbar_vmax": getattr(colorbar, "vmax", None),
+        "tolerance": getattr(result, "tolerance", None),
+        "tolerance_unit": getattr(result, "tolerance_unit", None),
+    }
+    digest.update(json.dumps(metadata, sort_keys=True, default=str).encode("utf-8"))
+
+
+def _cache_key(
+    image_bgr: np.ndarray,
+    filename: str,
+    base: Any = None,
+    colorbar_range_mm: tuple[float, float] | None = None,
+) -> str:
     digest = hashlib.sha256()
     digest.update(_ENGINE_FINGERPRINT.encode("ascii"))
     digest.update(filename.upper().encode("utf-8", errors="replace"))
-    digest.update(str(image_bgr.shape).encode("ascii"))
-    digest.update(str(image_bgr.dtype).encode("ascii"))
-    digest.update(np.ascontiguousarray(image_bgr).tobytes())
+    _digest_array(digest, image_bgr)
+    _digest_base(digest, base)
+    digest.update(json.dumps(colorbar_range_mm).encode("ascii"))
     return digest.hexdigest()
 
 
-def _cache_path(image_bgr: np.ndarray, filename: str) -> Path:
-    return _cache_dir() / f"{_cache_key(image_bgr, filename)}.npz"
+def _cache_path(
+    image_bgr: np.ndarray,
+    filename: str,
+    base: Any = None,
+    colorbar_range_mm: tuple[float, float] | None = None,
+) -> Path:
+    return _cache_dir() / f"{_cache_key(image_bgr, filename, base, colorbar_range_mm)}.npz"
 
 
 def _load_cached(path: Path, shape: tuple[int, int]) -> "HybridZeroLineOutput | None":
@@ -164,22 +205,15 @@ class HybridZeroLineOutput:
     warnings: list[str]
 
 
-def _scale_for(filename: str) -> float:
-    name = filename.upper()
-    if "67XX6" in name:
-        return 3.0
-    return 2.0
-
-
-def _range_for(filename: str, base) -> tuple[float, float]:
-    name = filename.upper()
-    if "64XX2" in name:
-        return -1.5, 2.0
-    if "67XX6" in name:
-        return -3.0, 3.0
-    if "71XX2" in name:
-        return -2.0, 2.0
-    return float(base.colorbar.vmin), float(base.colorbar.vmax)
+def _ensure_nonempty_case1_mask(
+    final_mask: np.ndarray, common: dict[str, Any]
+) -> tuple[np.ndarray, bool]:
+    """Never turn a valid Case-1 decision into an invisible zero-line result."""
+    selected = np.asarray(final_mask, dtype=bool)
+    if selected.any():
+        return selected, False
+    candidate = np.asarray(common["zero"], dtype=bool)
+    return candidate, bool(candidate.any())
 
 
 def _matching_review_spec(filename: str):
@@ -302,6 +336,7 @@ def _detect_hybrid_zero_line_uncached(
     filename: str,
     base=None,
     decision_bgr: np.ndarray | None = None,
+    colorbar_range_mm: tuple[float, float] | None = None,
 ) -> HybridZeroLineOutput:
     """Detect a UI-ready zero result, with a safe case-1 fallback.
 
@@ -313,8 +348,13 @@ def _detect_hybrid_zero_line_uncached(
     decision_rgb = cv2.cvtColor(
         image_bgr if decision_bgr is None else decision_bgr, cv2.COLOR_BGR2RGB
     )
+    if colorbar_range_mm is None:
+        raise ValueError("하이브리드 제로라인 검출에 컬러바 물리 범위가 필요합니다.")
+    vmin, vmax = colorbar_range_mm
     if base is None:
-        base = detect_zero_line(rgb, ZeroLineConfig(), source_name=filename)
+        base = detect_zero_line(
+            rgb, ZeroLineConfig(vmin=vmin, vmax=vmax), source_name=filename
+        )
     fallback_part_px = max(1, int(base.part_mask.sum()))
     fallback_ratio = float(base.mask.astype(bool).sum()) / fallback_part_px
     try:
@@ -327,7 +367,6 @@ def _detect_hybrid_zero_line_uncached(
         # 잘못 보낼 수 있었다.
         info = base.colorbar.info
         legend_rgb = rgb[info.y0:info.y1, info.x0:info.x1]
-        vmin, vmax = _range_for(filename, base)
         common = hybrid.build_common_from_review_mapping(
             decision_rgb, legend_rgb, vmin, vmax
         )
@@ -347,6 +386,14 @@ def _detect_hybrid_zero_line_uncached(
 
         if selected_case == 1:
             final_mask, _details = hybrid.run_case1(common)
+            final_mask, used_candidate_fallback = _ensure_nonempty_case1_mask(
+                final_mask, common
+            )
+            case1_warnings = list(base.warnings)
+            if used_candidate_fallback:
+                case1_warnings.append(
+                    "Case 1 폴리곤이 비어 있어 검증된 제로 가능영역 경계를 대신 표시했습니다."
+                )
             overlay = rgb.copy()
             tint = np.zeros_like(overlay)
             tint[final_mask] = (0, 235, 255)
@@ -364,11 +411,12 @@ def _detect_hybrid_zero_line_uncached(
                 regions=int(cv2.connectedComponents(final_mask.astype(np.uint8))[0] - 1),
                 ratio=float(final_mask.sum()) / part_px,
                 lines=_mask_contours_as_lines(final_mask.astype(np.uint8)),
-                warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
+                warnings=case1_warnings + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
             )
 
         routed = case2.run_original_case2_pipeline(
-            original_bgr=image_bgr, scale_max_mm=_scale_for(filename)
+            original_bgr=image_bgr,
+            colorbar_range_mm=colorbar_range_mm,
         )
         line_mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)
         lines: list[dict] = []
@@ -407,18 +455,23 @@ def detect_hybrid_zero_line(
     filename: str,
     base=None,
     decision_bgr: np.ndarray | None = None,
+    colorbar_range_mm: tuple[float, float] | None = None,
 ) -> HybridZeroLineOutput:
     """Return a content-cached result and optionally reuse basic detection."""
     cache_image = image_bgr if decision_bgr is None else np.concatenate(
         (image_bgr.reshape(-1, 3), decision_bgr.reshape(-1, 3)), axis=0
     )
-    path = _cache_path(cache_image, filename)
+    path = _cache_path(cache_image, filename, base, colorbar_range_mm)
     cached = _load_cached(path, image_bgr.shape[:2]) if path.is_file() else None
     if cached is not None:
         return cached
 
     output = _detect_hybrid_zero_line_uncached(
-        image_bgr, filename, base=base, decision_bgr=decision_bgr
+        image_bgr,
+        filename,
+        base=base,
+        decision_bgr=decision_bgr,
+        colorbar_range_mm=colorbar_range_mm,
     )
     _save_cached(path, output)
     return output

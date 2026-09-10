@@ -19,6 +19,43 @@ _mask_contours_as_lines = hybrid_ui._mask_contours_as_lines
 
 
 class HybridUiEditPointTests(unittest.TestCase):
+
+    def test_cache_key_changes_when_supplied_base_values_change(self) -> None:
+        image = np.zeros((8, 12, 3), dtype=np.uint8)
+
+        def base(value: float):
+            values = np.full(image.shape[:2], value, dtype=np.float32)
+            return SimpleNamespace(
+                values=values,
+                part_mask=np.ones(image.shape[:2], dtype=bool),
+                mask=np.zeros(image.shape[:2], dtype=np.uint8),
+                zero_crossing=np.zeros(image.shape[:2], dtype=np.uint8),
+                colorbar=SimpleNamespace(vmin=-3.0, vmax=3.0),
+                result=SimpleNamespace(tolerance=0.3, tolerance_unit="mm"),
+            )
+
+        first = hybrid_ui._cache_key(image, "JD_67XX6.png", base(0.0))
+        second = hybrid_ui._cache_key(image, "JD_67XX6.png", base(1.0))
+
+        self.assertNotEqual(first, second)
+
+    def test_cache_key_changes_when_ocr_colorbar_range_changes(self) -> None:
+        image = np.zeros((8, 12, 3), dtype=np.uint8)
+        first = hybrid_ui._cache_key(image, "scan.png", None, (-1.5, 2.0))
+        second = hybrid_ui._cache_key(image, "scan.png", None, (-3.0, 3.0))
+        self.assertNotEqual(first, second)
+
+    def test_empty_case1_polygon_falls_back_to_candidate_area(self) -> None:
+        candidate = np.zeros((20, 30), dtype=bool)
+        candidate[4:12, 7:18] = True
+
+        selected, used_fallback = hybrid_ui._ensure_nonempty_case1_mask(
+            np.zeros_like(candidate), {"zero": candidate}
+        )
+
+        self.assertTrue(used_fallback)
+        np.testing.assert_array_equal(selected, candidate)
+
     def test_runtime_selection_modules_stay_inside_zero_line_package(self) -> None:
         from zero_line_detection import case2_route_adapter
         from zero_line_detection.adaptive_bundle import generate_adaptive_zero_line_preview
@@ -99,7 +136,10 @@ class HybridUiEditPointTests(unittest.TestCase):
             hybrid_ui, "detect_zero_line", side_effect=AssertionError("duplicate detection")
         ):
             result = hybrid_ui._detect_hybrid_zero_line_uncached(
-                image, "unregistered-sample.png", base=base
+                image,
+                "unregistered-sample.png",
+                base=base,
+                colorbar_range_mm=(-2.0, 2.0),
             )
 
         self.assertEqual(result.mask.shape, image.shape[:2])
