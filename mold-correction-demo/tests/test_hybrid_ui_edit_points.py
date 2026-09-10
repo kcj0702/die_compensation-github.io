@@ -20,6 +20,39 @@ _mask_contours_as_lines = hybrid_ui._mask_contours_as_lines
 
 class HybridUiEditPointTests(unittest.TestCase):
 
+    def test_case2_failure_is_not_returned_or_cached_as_case1(self) -> None:
+        image = np.zeros((8, 12, 3), dtype=np.uint8)
+        base = SimpleNamespace(
+            colorbar=SimpleNamespace(
+                info=SimpleNamespace(y0=0, y1=8, x0=0, x1=2)
+            ),
+            warnings=[],
+        )
+        common = {
+            "part": np.ones((8, 12), dtype=bool),
+            "part_px": 96,
+            "positive": np.zeros((8, 12), dtype=bool),
+            "negative": np.zeros((8, 12), dtype=bool),
+            "zero": np.ones((8, 12), dtype=bool),
+            "zero_ratio": 0.8,
+            "zero_count": 1,
+        }
+        from zero_line_detection import case2_route_adapter as case2
+        from zero_line_detection import generate_final_hybrid_zero_line as hybrid
+
+        with mock.patch.object(
+            hybrid, "build_common_from_review_mapping", return_value=common
+        ), mock.patch.object(
+            case2, "run_original_case2_pipeline", side_effect=ValueError("route unavailable")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Case 2 경로 계산 실패"):
+                hybrid_ui._detect_hybrid_zero_line_uncached(
+                    image,
+                    "another-item.png",
+                    base=base,
+                    colorbar_range_mm=(-2.0, 2.0),
+                )
+
     def test_case2_mask_uses_review_engine_rasterization(self) -> None:
         selections = [
             {
