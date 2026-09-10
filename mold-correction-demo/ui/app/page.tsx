@@ -200,6 +200,8 @@ type FolderOrderResponse = { folderOrder: FolderAxis[]; axes: FolderAxisOption[]
 const FOLDER_AXES: FolderAxis[] = ['item', 'vehicle', 'category', 'detail'];
 const FOLDER_AXIS_LABELS: Record<FolderAxis, string> = { item: '품번', vehicle: '차종', category: '카테고리', detail: '세부 하위폴더' };
 type OrganizerPathsResponse = { sourceRoot: string; destinationRoot: string; sourceLocked: boolean; destinationLocked: boolean };
+type UploadStorageTarget = { path: string; status: 'success' | 'skipped' | 'error'; message?: string | null };
+type UploadStorageResult = { name: string; sourcePath: string; existing: UploadStorageTarget; reconstructed: UploadStorageTarget };
 type SheetTitleField = 'heading' | 'managementLabel' | 'managementNo' | 'partNameLabel' | 'partName' | 'processLabel' | 'process' | 'partNoLabel' | 'partNo' | 'materialLabel' | 'material' | 'appliedDateLabel' | 'appliedDate';
 type SheetTitleValues = Record<SheetTitleField, string>;
 type SheetTitleFonts = Record<SheetTitleField, string>;
@@ -1873,10 +1875,20 @@ function FileOrganizerPage() {
   const [rootEntries, setRootEntries] = useState<FolderEntry[]>([]);
   const [rootName, setRootName] = useState('품번별 폴더');
   const [dragging, setDragging] = useState(false);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[]>([]);
+  const [classifiedUploadNames, setClassifiedUploadNames] = useState<string[]>([]);
+  const [classifyingFiles, setClassifyingFiles] = useState(false);
   const [busy, setBusy] = useState(false);
   const [operation, setOperation] = useState<'copy' | 'move'>('copy');
   const [conflict, setConflict] = useState<'rename' | 'skip' | 'overwrite'>('rename');
   const [notice, setNotice] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [reconstructionReport, setReconstructionReport] = useState<{
+    tone: 'success' | 'error' | 'info'; text: string;
+    issues: { name: string; sourcePath: string; message: string }[];
+  } | null>(null);
+  const [uploadStorageReport, setUploadStorageReport] = useState<{
+    tone: 'success' | 'error' | 'info'; text: string; files: UploadStorageResult[];
+  } | null>(null);
   const [showDatabase, setShowDatabase] = useState(false);
   const [databaseUrl, setDatabaseUrl] = useState('');
   const [showFolderOrder, setShowFolderOrder] = useState(false);
@@ -1910,11 +1922,8 @@ function FileOrganizerPage() {
     } catch { /* 상태 카드/기본 순서로 충분히 안내되므로 조용히 넘어간다. */ }
   }, []);
 
-  const [showPaths, setShowPaths] = useState(false);
   const [pathsInfo, setPathsInfo] = useState<OrganizerPathsResponse | null>(null);
-  const [sourceRootInput, setSourceRootInput] = useState('');
-  const [destinationRootInput, setDestinationRootInput] = useState('');
-  const [savingPaths, setSavingPaths] = useState(false);
+  const [selectingRoot, setSelectingRoot] = useState<'source' | 'destination' | null>(null);
 
   const loadOrganizerPaths = useCallback(async () => {
     try {
@@ -1922,27 +1931,35 @@ function FileOrganizerPage() {
       const data = await response.json() as OrganizerPathsResponse & { error?: string };
       if (!response.ok) throw new Error(data.error || '경로 설정을 불러오지 못했습니다.');
       setPathsInfo(data);
-      setSourceRootInput(data.sourceRoot);
-      setDestinationRootInput(data.destinationRoot);
     } catch { /* 저장소 상태 카드에 이미 현재 경로가 표시되므로 조용히 넘어간다. */ }
   }, []);
 
-  const saveOrganizerPaths = async () => {
-    setSavingPaths(true);
+  const chooseOrganizerFolder = async (which: 'source' | 'destination', purpose: 'configure' | 'existing' = 'configure') => {
+    setSelectingRoot(which);
+    setNotice(null);
+    setUploadStorageReport(null);
     try {
-      const response = await fetch(`${API_BASE}/api/file-organizer/paths`, {
+      const response = await fetch(`${API_BASE}/api/file-organizer/select-folder`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceRoot: sourceRootInput, destinationRoot: destinationRootInput }),
+        body: JSON.stringify({ which, purpose }),
       });
-      const data = await response.json() as OrganizerPathsResponse & { error?: string };
-      if (!response.ok) throw new Error(data.error || '경로를 저장하지 못했습니다.');
-      setNotice({ tone: 'success', text: '경로를 저장했습니다. 다음 스캔부터 적용됩니다.' });
-      setShowPaths(false);
+      const data = await response.json() as OrganizerPathsResponse & { cancelled?: boolean; error?: string };
+      if (!response.ok) throw new Error(data.error || '폴더를 선택하지 못했습니다.');
+      if (data.cancelled) return;
+      setReconstructionReport(null);
       setPathsInfo(data);
+      setNotice({
+        tone: 'success',
+        text: which === 'source'
+          ? '기존 폴더를 선택했습니다.'
+          : purpose === 'existing'
+            ? '재구성한 폴더를 선택했습니다.'
+            : '재구성 폴더를 생성할 위치를 선택했습니다.',
+      });
       await loadStatus(true); await loadFolders();
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '경로 저장 중 오류가 발생했습니다.' });
-    } finally { setSavingPaths(false); }
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '폴더 선택 중 오류가 발생했습니다.' });
+    } finally { setSelectingRoot(null); }
   };
 
   const openInExplorer = async (which: 'source' | 'destination') => {
@@ -1990,33 +2007,126 @@ function FileOrganizerPage() {
     setSelected((current) => new Set([...current, ...incoming.map((item) => item.id)]));
   }, []);
 
-  const scanSource = async () => {
+  const scanSource = async (reconstruct = false) => {
+    if (busy || selectingRoot !== null) return;
     setBusy(true); setNotice(null);
+    let scannedItems: FileOrganizerItem[] = [];
+    if (reconstruct) setReconstructionReport({ tone: 'info', text: '기존 폴더를 분석하고 있습니다.', issues: [] });
     try {
       const response = await fetch(`${API_BASE}/api/file-organizer/scan`);
       const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
       if (!response.ok) throw new Error(data.error || '원본 폴더를 스캔하지 못했습니다.');
-      mergeItems(data.items || []);
-      setNotice({ tone: 'info', text: `원본 폴더에서 ${(data.items || []).length}개 파일을 분석했습니다.` });
+      scannedItems = data.items || [];
+      mergeItems(scannedItems);
+      if (!reconstruct) {
+        setNotice({ tone: 'info', text: `원본 폴더에서 ${scannedItems.length}개 파일을 분석했습니다.` });
+        return;
+      }
+      if (!scannedItems.length) {
+        setReconstructionReport({ tone: 'info', text: '기존 폴더에 재구성할 파일이 없습니다.', issues: [] });
+        return;
+      }
+      setReconstructionReport({ tone: 'info', text: `${scannedItems.length}개 파일 분석 완료 · 재구성 폴더를 생성하고 있습니다.`, issues: [] });
+      const executeResponse = await fetch(`${API_BASE}/api/file-organizer/execute`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operation: 'copy', conflict,
+          items: scannedItems.map((item) => ({ sourcePath: item.sourcePath, targetDir: item.targetDir })),
+        }),
+      });
+      const executed = await executeResponse.json() as { results?: { source: string; destination?: string; status: string; message: string }[]; error?: string };
+      if (!executeResponse.ok) throw new Error(executed.error || '재구성 폴더를 생성하지 못했습니다.');
+      const results = executed.results || [];
+      const successful = new Set(results.filter((result) => result.status === 'success').map((result) => result.source));
+      const bySource = new Map(results.map((result) => [result.source, result]));
+      const issues = scannedItems.flatMap((item) => {
+        const result = bySource.get(item.sourcePath);
+        const messages: string[] = [];
+        if (!result) messages.push('처리 결과를 확인하지 못했습니다.');
+        else if (result.status !== 'success') messages.push(
+          `${result.status === 'skipped' ? '건너뜀' : '처리 실패'}: ${result.message || '파일을 복사하지 못했습니다.'}`,
+        );
+        const missing = [!item.itemNo && '품번', !item.customer && '차종', !item.categoryKey && '자료 유형'].filter(Boolean);
+        if (!item.targetDir || missing.length) {
+          messages.push(`분류 위치 확인 필요${missing.length ? ` (${missing.join(', ')} 인식 불가)` : ' (저장 위치를 찾지 못함)'}.`);
+          if (result?.status === 'success') messages.push(`복사는 완료되었습니다. 저장 위치: ${result.destination || item.targetDir || '_미분류'}`);
+        }
+        return messages.length ? [{ name: item.name, sourcePath: item.sourcePath, message: messages.join(' ') }] : [];
+      });
+      const completedIds = new Set([...items, ...scannedItems].filter((item) => successful.has(item.sourcePath)).map((item) => item.id));
+      setItems((current) => current.filter((item) => !successful.has(item.sourcePath)));
+      setSelected((current) => new Set([...current].filter((id) => !completedIds.has(id))));
+      setReconstructionReport({
+        tone: issues.length ? 'error' : 'success',
+        text: issues.length ? `${successful.size}개 파일 복사 완료 · ${issues.length}개 파일은 처리 결과 또는 분류 위치를 확인해 주세요.` : '정상적으로 처리가 되었습니다',
+        issues,
+      });
+      await loadStatus(true); await loadFolders();
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '스캔 중 오류가 발생했습니다.' });
+      const text = error instanceof Error ? error.message : '폴더 분석·재구성 중 오류가 발생했습니다.';
+      if (reconstruct) setReconstructionReport({
+        tone: 'error', text,
+        issues: scannedItems.map((item) => ({ name: item.name, sourcePath: item.sourcePath, message: '처리 완료 여부를 확인하지 못했습니다.' })),
+      });
+      else setNotice({ tone: 'error', text });
     } finally { setBusy(false); }
   };
 
   const uploadFiles = async (files: FileList | File[]) => {
     if (!files.length) return;
+    const selectedFiles = Array.from(files);
+    setClassifyingFiles(true);
     setBusy(true); setNotice(null);
+    setUploadStorageReport({ tone: 'info', text: '파일을 분류하고 두 폴더에 저장하고 있습니다.', files: [] });
     try {
       const form = new FormData();
-      Array.from(files).forEach((file) => form.append('files', file, file.name));
+      selectedFiles.forEach((file) => form.append('files', file, file.name));
+      form.append('organize', 'both');
+      form.append('conflict', conflict);
       const response = await fetch(`${API_BASE}/api/file-organizer/upload`, { method: 'POST', body: form });
-      const data = await response.json() as { items?: FileOrganizerItem[]; error?: string };
+      const data = await response.json() as { items?: FileOrganizerItem[]; storageResults?: UploadStorageResult[]; error?: string };
       if (!response.ok) throw new Error(data.error || '파일을 등록하지 못했습니다.');
-      mergeItems(data.items || []);
-      setNotice({ tone: 'info', text: `${(data.items || []).length}개 파일의 자동 분류가 끝났습니다.` });
+      const classifiedItems = data.items || [];
+      const storageResults = data.storageResults || [];
+      if (!storageResults.length) throw new Error('저장 결과를 받지 못했습니다. 백엔드를 다시 실행한 뒤 시도해 주세요.');
+      const failedNames = new Set(storageResults
+        .filter((result) => result.existing.status === 'error' || result.reconstructed.status === 'error')
+        .map((result) => result.name));
+      const completedNames = storageResults.filter((result) => !failedNames.has(result.name)).map((result) => result.name);
+      const failedCount = failedNames.size;
+      if (failedCount) mergeItems(classifiedItems.filter((item) => failedNames.has(item.name)));
+      setClassifiedUploadNames(completedNames);
+      setPendingUploadFiles(selectedFiles.filter((file) => failedNames.has(file.name)));
+      setUploadStorageReport({
+        tone: failedCount ? 'error' : 'success',
+        text: failedCount
+          ? `${storageResults.length - failedCount}개 파일 저장 완료 · ${failedCount}개 파일은 아래 결과를 확인해 주세요.`
+          : `${storageResults.length}개 파일이 정상적으로 분류·저장되었습니다.`,
+        files: storageResults,
+      });
+      setNotice({
+        tone: failedCount ? 'error' : 'success',
+        text: failedCount ? '일부 파일을 저장하지 못했습니다.' : `${storageResults.length}개 파일의 분류와 저장이 끝났습니다.`,
+      });
+      await loadStatus(true); await loadFolders();
     } catch (error) {
-      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '파일 등록 중 오류가 발생했습니다.' });
-    } finally { setBusy(false); }
+      const text = error instanceof Error ? error.message : '파일 등록 중 오류가 발생했습니다.';
+      setUploadStorageReport({ tone: 'error', text, files: [] });
+      setNotice({ tone: 'error', text });
+    } finally { setClassifyingFiles(false); setBusy(false); }
+  };
+
+  const queueUploadFiles = (files: FileList | File[]) => {
+    const incoming = Array.from(files);
+    if (!incoming.length) return;
+    setClassifiedUploadNames([]);
+    setUploadStorageReport(null);
+    setPendingUploadFiles((current) => {
+      const queued = new Map(current.map((file) => [`${file.name}\0${file.size}\0${file.lastModified}`, file]));
+      incoming.forEach((file) => queued.set(`${file.name}\0${file.size}\0${file.lastModified}`, file));
+      return [...queued.values()];
+    });
+    setNotice(null);
   };
 
   const assignTarget = (ids: string[], targetDir: string) => {
@@ -2141,13 +2251,13 @@ function FileOrganizerPage() {
             <div className="organizer-flow-node organizer-flow-node--source">
               <span className="organizer-flow-node__icon"><Server size={22} /></span>
               <span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span>
-              <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => setShowPaths((current) => !current)} disabled={pathsInfo?.sourceLocked} title="정리할 기존 폴더 선택·변경"><FolderOpen size={15} /><span>폴더 선택</span></button>
+              <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('source')} disabled={busy || pathsInfo?.sourceLocked || selectingRoot !== null} title="정리할 기존 폴더 선택·변경"><FolderOpen size={15} /><span>{selectingRoot === 'source' ? '선택 중…' : '폴더 선택'}</span></button>
             </div>
             <div className="organizer-flow-arrow organizer-flow-arrow--copy" aria-hidden="true"><i /></div>
             <div className="organizer-flow-node organizer-flow-node--result">
               <span className="organizer-flow-node__icon"><HardDrive size={22} /></span>
               <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span>
-              <span className="organizer-flow-node__actions"><button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--settings" onClick={() => setShowPaths((current) => !current)} disabled={pathsInfo?.destinationLocked} title="재구성 폴더 경로 설정"><Settings2 size={14} /><span>경로 설정</span></button></span>
+              <span className="organizer-flow-node__actions"><button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--settings" onClick={() => void chooseOrganizerFolder('destination')} disabled={busy || pathsInfo?.destinationLocked || selectingRoot !== null} title="재구성 폴더 경로 설정"><Settings2 size={14} /><span>{selectingRoot === 'destination' ? '선택 중…' : '경로 설정'}</span></button></span>
             </div>
           </div>
           <div className="organizer-flow-lane-footer">
@@ -2155,19 +2265,21 @@ function FileOrganizerPage() {
               <div className="organizer-flow-preserve-note"><ShieldCheck size={16} /><span>기존 폴더는 유지됩니다.</span></div>
               <div className={`organizer-rebuilt-status ${hasRebuiltFolder ? 'is-ready' : 'is-empty'}`}>
                 {hasRebuiltFolder ? <ShieldCheck size={16} /> : <AlertTriangle size={16} />}
-                <span>{hasRebuiltFolder ? '재구성된 폴더가 이미 존재합니다.' : '재구성된 폴더가 없습니다.'}</span>
-                {hasRebuiltFolder && <button type="button" onClick={() => void openInExplorer('destination')}><FolderOpen size={14} /> 폴더 열기</button>}
+                <span>{hasRebuiltFolder ? '재구성한 폴더가 이미 존재한다면 진행하지 않아도 됩니다.' : '재구성된 폴더가 없습니다.'}</span>
               </div>
             </div>
-            <div className="organizer-flow-lane-actions"><button type="button" className="organizer-flow-action organizer-flow-action--existing" onClick={scanSource} disabled={busy}><RefreshCw size={16} /> {busy ? '분석 중…' : '기존 폴더 분석'}<ArrowRight size={16} /></button></div>
+            <div className="organizer-flow-lane-actions"><button type="button" className="organizer-flow-action organizer-flow-action--existing" onClick={() => void scanSource(true)} disabled={busy || selectingRoot !== null} title="기존 폴더를 분석한 뒤 재구성 폴더에 자동으로 복사합니다"><RefreshCw size={16} /> {busy ? '처리 중…' : '폴더 재구성'}<ArrowRight size={16} /></button></div>
           </div>
         </article>
 
-        {showPaths && <div className="card file-path-settings">
-          <div className="file-path-settings__intro"><Settings2 size={20} /><span><b>원본·정리 대상 경로</b><small>{(pathsInfo?.sourceLocked || pathsInfo?.destinationLocked) ? 'ui/.env에 경로가 고정되어 있어 여기서는 바꿀 수 없습니다.' : '두 경로를 바꾸면 다음 스캔부터 적용됩니다.'}</small></span></div>
-          <label>원본 폴더<input value={sourceRootInput} onChange={(event) => setSourceRootInput(event.target.value)} disabled={pathsInfo?.sourceLocked} placeholder="C:\path\to\incoming-files" /></label>
-          <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
-          <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
+        {reconstructionReport && <div className={`organizer-reconstruction-report ${reconstructionReport.tone}`} role="status" aria-live="polite">
+          <div className="organizer-reconstruction-report__heading">
+            {reconstructionReport.tone === 'success' ? <CheckCircle2 size={20} /> : reconstructionReport.tone === 'error' ? <AlertTriangle size={20} /> : <CircleHelp size={20} />}
+            <strong>{reconstructionReport.text}</strong>
+          </div>
+          {reconstructionReport.issues.length > 0 && <ul>{reconstructionReport.issues.map((issue) => <li key={issue.sourcePath}>
+            <b>{issue.name}</b><span>{issue.message}</span><small>{issue.sourcePath}</small>
+          </li>)}</ul>}
         </div>}
 
         {showFolderOrder && <div className="card file-order-settings">
@@ -2176,21 +2288,49 @@ function FileOrganizerPage() {
           <button type="button" className="primary-button" onClick={saveFolderOrder} disabled={savingOrder}>{savingOrder ? '저장 중…' : '저장'}</button>
         </div>}
 
-        <article className={`organizer-flow-lane organizer-flow-lane--upload ${dragging ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); setDragging(false); if (!busy) void uploadFiles(event.dataTransfer.files); }}>
-          <div className="organizer-flow-lane__label"><b>02</b><span><strong>파일 추가</strong><small>새로운 파일을 추가하면 자동 분석되어 정리 대기 파일에 등록됩니다.</small></span></div>
+        <article className={`organizer-flow-lane organizer-flow-lane--upload ${dragging ? 'is-dragging' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLElement>) => { event.preventDefault(); setDragging(false); if (!busy) queueUploadFiles(event.dataTransfer.files); }}>
+          <div className="organizer-flow-lane__label"><b>02</b><span><strong>파일 추가</strong><small>새로운 파일을 선택한 뒤 파일 분류를 눌러 저장 위치를 분석합니다.</small></span></div>
           <div className="organizer-upload-flow">
             <label className="organizer-upload-source" aria-disabled={busy}>
-              <input type="file" multiple disabled={busy} onChange={(event) => { if (event.target.files) void uploadFiles(event.target.files); event.currentTarget.value = ''; }} />
+              <input type="file" multiple disabled={busy} onChange={(event) => { if (event.target.files) queueUploadFiles(event.target.files); event.currentTarget.value = ''; }} />
               <span className="organizer-flow-node__icon"><UploadCloud size={24} /></span>
-              <span><strong>{busy ? '자동 분류 중…' : '파일 업로드'}</strong><em>여러 파일을 한 번에 올릴 수 있어요</em></span>
+              <span className="organizer-upload-source__content">
+                <span><strong>{classifyingFiles ? '파일 분류 중…' : pendingUploadFiles.length ? `${pendingUploadFiles.length}개 파일 선택됨` : classifiedUploadNames.length ? '파일 분류 완료' : '파일 업로드'}</strong><em>{pendingUploadFiles.length ? '파일을 더 추가하려면 이 영역을 다시 눌러주세요.' : classifiedUploadNames.length ? `${classifiedUploadNames.length}개 파일을 분류했습니다.` : '여러 파일을 한 번에 올릴 수 있어요'}</em></span>
+                {(pendingUploadFiles.length > 0 || classifiedUploadNames.length > 0) && <span className={`organizer-upload-file-list ${classifiedUploadNames.length ? 'is-complete' : ''}`}>
+                  {(pendingUploadFiles.length ? pendingUploadFiles.map((file) => file.name) : classifiedUploadNames).map((name, index) => <span className="organizer-upload-file" key={`${name}-${index}`}><File size={14} /><b title={name}>{name}</b>{classifiedUploadNames.length > 0 && <CheckCircle2 size={14} />}</span>)}
+                </span>}
+              </span>
             </label>
             <div className="organizer-split-arrow" aria-hidden="true"><i /><b /><em /></div>
             <div className="organizer-flow-branches">
-              <div className="organizer-flow-node organizer-flow-node--source organizer-flow-node--branch"><span className="organizer-flow-node__icon"><Server size={20} /></span><span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span></div>
-              <div className="organizer-flow-node organizer-flow-node--result organizer-flow-node--branch"><span className="organizer-flow-node__icon"><HardDrive size={20} /></span><span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span></div>
+              <div className="organizer-flow-node organizer-flow-node--source organizer-flow-node--branch">
+                <span className="organizer-flow-node__icon"><Server size={20} /></span>
+                <span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span>
+                <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('source')} disabled={busy || pathsInfo?.sourceLocked || selectingRoot !== null} title="새 파일을 함께 저장할 기존 폴더 선택"><FolderOpen size={14} /><span>{selectingRoot === 'source' ? '선택 중…' : '폴더 선택'}</span></button>
+              </div>
+              <div className="organizer-flow-node organizer-flow-node--result organizer-flow-node--branch">
+                <span className="organizer-flow-node__icon"><HardDrive size={20} /></span>
+                <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span>
+                <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('destination', 'existing')} disabled={busy || pathsInfo?.destinationLocked || selectingRoot !== null} title="01에서 재구성한 폴더 선택"><FolderOpen size={14} /><span>{selectingRoot === 'destination' ? '선택 중…' : '폴더 선택'}</span></button>
+              </div>
             </div>
           </div>
+          <div className="organizer-upload-classify">
+            <span>{pendingUploadFiles.length ? `선택한 ${pendingUploadFiles.length}개 파일을 분류할 준비가 되었습니다.` : classifiedUploadNames.length ? `${classifiedUploadNames.length}개 파일의 분류가 완료되었습니다.` : '분류할 파일을 먼저 선택해 주세요.'}</span>
+            <button type="button" onClick={() => void uploadFiles(pendingUploadFiles)} disabled={busy || pendingUploadFiles.length === 0 || selectingRoot !== null}><ListFilter size={16} /> {classifyingFiles ? '분류 중…' : '파일 분류'}</button>
+          </div>
         </article>
+        {uploadStorageReport && <div className={`organizer-reconstruction-report organizer-upload-storage-report ${uploadStorageReport.tone}`} role="status" aria-live="polite">
+          <div className="organizer-reconstruction-report__heading">
+            {uploadStorageReport.tone === 'success' ? <CheckCircle2 size={19} /> : uploadStorageReport.tone === 'error' ? <AlertTriangle size={19} /> : <RefreshCw size={19} className="spin" />}
+            <b>{uploadStorageReport.text}</b>
+          </div>
+          {uploadStorageReport.files.length > 0 && <ul>{uploadStorageReport.files.map((file, index) => <li key={`${file.sourcePath}-${index}`}>
+            <b>{file.name}</b>
+            <span className={`organizer-upload-storage-target ${file.existing.status}`}><strong>기존 폴더</strong><code title={file.existing.path}>{file.existing.path || file.existing.message || '저장 위치를 확인하지 못했습니다.'}</code>{file.existing.status === 'error' && file.existing.path && <small>{file.existing.message}</small>}</span>
+            <span className={`organizer-upload-storage-target ${file.reconstructed.status}`}><strong>재구성 폴더</strong><code title={file.reconstructed.path}>{file.reconstructed.path || file.reconstructed.message || '저장 위치를 확인하지 못했습니다.'}</code>{file.reconstructed.status === 'error' && file.reconstructed.path && <small>{file.reconstructed.message}</small>}</span>
+          </li>)}</ul>}
+        </div>}
       </div>
     </section>
     {showFolderOrder && <div className="card file-order-settings">
@@ -2204,29 +2344,8 @@ function FileOrganizerPage() {
       <div><Server size={18} /><span><small>원본 폴더</small><b title={status?.sourceRoot}>{status?.sourceRoot || '확인 중'}</b></span><em className={status?.sourceAvailable ? 'ok' : ''}>{status?.sourceAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('source')} title="탐색기에서 열기" aria-label="원본 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
       <ChevronRight size={17} />
       <div><HardDrive size={18} /><span><small>정리 대상 · 추후 NAS</small><b title={status?.destinationRoot}>{status?.destinationRoot || '확인 중'}</b></span><em className={status?.destinationAvailable ? 'ok' : ''}>{status?.destinationAvailable ? '연결됨' : '경로 없음'}</em><button type="button" className="file-storage-action" onClick={() => void openInExplorer('destination')} title="탐색기에서 열기" aria-label="정리 대상 폴더 탐색기에서 열기"><FolderOpen size={14} /></button></div>
-      <button type="button" className="file-storage-action file-storage-edit" onClick={() => setShowPaths((current) => !current)} title="경로 변경" aria-label="경로 변경"><Settings2 size={14} /></button>
       <div className="file-storage-metrics"><span>카탈로그 <b>{db?.catalogCount || 0}</b></span><span>작업 이력 <b>{db?.operationCount || 0}</b></span></div>
     </div>
-    {showPaths && <div className="card file-path-settings">
-      <div className="file-path-settings__intro"><Settings2 size={20} /><span><b>원본·정리 대상 경로</b><small>{(pathsInfo?.sourceLocked || pathsInfo?.destinationLocked) ? 'ui/.env에 경로가 고정되어 있어 여기서는 바꿀 수 없습니다.' : '두 경로를 바꾸면 다음 스캔부터 적용됩니다.'}</small></span></div>
-      <label>원본 폴더<input value={sourceRootInput} onChange={(event) => setSourceRootInput(event.target.value)} disabled={pathsInfo?.sourceLocked} placeholder="C:\path\to\incoming-files" /></label>
-      <label>정리 대상 폴더<input value={destinationRootInput} onChange={(event) => setDestinationRootInput(event.target.value)} disabled={pathsInfo?.destinationLocked} placeholder="C:\path\to\organized 또는 NAS 경로" /></label>
-      <button type="button" className="primary-button" onClick={saveOrganizerPaths} disabled={savingPaths || pathsInfo?.sourceLocked || pathsInfo?.destinationLocked}>{savingPaths ? '저장 중…' : '저장'}</button>
-    </div>}
-    <details className="organizer-legacy-details">
-      <summary><ListFilter size={17} /><span><b>세부 검토 및 정리</b><small>자동 분류 결과를 확인하고 복사·이동 작업을 실행합니다.</small></span><ChevronDown size={17} /></summary>
-      <div className="file-organizer-grid">
-      <div className="file-organizer-main">
-      <div className="card file-organizer-queue"><div className="card-title"><div><h3>정리 대기 파일</h3></div><div className="file-queue-actions"><button type="button" onClick={scanSource} disabled={busy}><RefreshCw size={14} /> 원본 스캔</button><label><UploadCloud size={14} /> 파일 선택<input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /></label><span className="count-chip">{items.length}개</span></div></div>
-        <label className={`file-organizer-drop ${dragging ? 'active' : ''}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event: DragEvent<HTMLLabelElement>) => { event.preventDefault(); setDragging(false); void uploadFiles(event.dataTransfer.files); }}><input type="file" multiple onChange={(event) => event.target.files && void uploadFiles(event.target.files)} /><UploadCloud size={25} /><b>{busy ? '처리 중입니다…' : '정리할 파일을 여기에 놓으세요'}</b><span>품번 · OP공정 · 자료유형 태그를 자동 감지합니다.</span></label>
-        <div className="file-organizer-table"><div className="file-organizer-table__head"><input type="checkbox" checked={items.length > 0 && selected.size === items.length} onChange={(event) => setSelected(event.target.checked ? new Set(items.map((item) => item.id)) : new Set())} aria-label="전체 선택" /><span>파일명 / 감지 태그</span><span>자료유형</span><span>예정 위치</span><span>신뢰도</span><span /></div>{items.map((item) => <div className="file-organizer-row" key={item.id} draggable onDragStart={(event) => { const ids = selected.has(item.id) ? [...selected] : [item.id]; event.dataTransfer.setData('text/ajin-file-ids', JSON.stringify(ids)); event.dataTransfer.effectAllowed = 'move'; }} title={item.reasons.join('\n')}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`${item.name} 선택`} /><span className="file-organizer-name"><File size={17} /><span><b>{item.name}</b><small>{[item.customer, item.itemNo, item.productName, item.process].filter(Boolean).join(' · ') || '품번 태그 미검출'} <em>{item.sourceKind === 'upload' ? '업로드' : '원본'}</em></small></span></span><span className={`file-category category-${item.categoryKey || 'unknown'}`}>{item.categoryKey || '--'} {item.categoryLabel}</span><span className="file-target-path" title={item.targetPath}>{item.targetDir || '_미분류'}</span><span className={`file-confidence ${item.confidence >= 70 ? 'good' : ''}`}>{item.confidence}%</span><button type="button" className="file-row-delete" onClick={() => removeItem(item)} aria-label={`${item.name} 대기열에서 삭제`} title="대기열에서 삭제"><Trash2 size={14} /></button></div>)}{!items.length && <div className="file-organizer-empty">분류할 파일이 아직 없습니다.</div>}</div>
-        <div className="file-execute-bar"><div className="file-operation-switch"><button type="button" className={operation === 'copy' ? 'active' : ''} onClick={() => setOperation('copy')}><Copy size={14} /> 복사</button><button type="button" className={operation === 'move' ? 'active' : ''} onClick={() => setOperation('move')}><Move size={14} /> 이동</button></div><label>동명 파일<select value={conflict} onChange={(event) => setConflict(event.target.value as typeof conflict)}><option value="rename">자동 이름 변경</option><option value="skip">건너뛰기</option><option value="overwrite">덮어쓰기</option></select></label><button type="button" className="primary-button file-execute" onClick={execute} disabled={busy || !activeItems.length}>{busy ? '처리 중…' : `선택 ${activeItems.length}개 정리 실행`} <ArrowRight size={16} /></button></div>
-      </div>
-      <Explorer />
-      </div>
-      <aside className="card file-organizer-target"><div className="card-title"><div><h3>대상 폴더 탐색기</h3></div></div><div className="file-path-preview"><FolderOpen size={18} /><span>{rootName}</span></div><div className="organizer-folder-tree"><button type="button" className="organizer-folder-root" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); try { assignTarget(JSON.parse(event.dataTransfer.getData('text/ajin-file-ids')) as string[], ''); } catch {} }}><ChevronDown size={14} /><FolderOpen size={17} /><span>{rootName}</span></button>{rootEntries.filter((entry) => entry.isDirectory).map((entry) => <OrganizerFolderNode key={entry.path} entry={entry} onAssign={assignTarget} />)}{rootEntries.filter((entry) => !entry.isDirectory).map((file) => <div className="organizer-folder-file" key={file.path} title={file.name}><File size={13} /><span>{file.name}</span></div>)}{!rootEntries.length && <div className="file-target-hint">대상 폴더 경로를 확인해 주세요.</div>}</div></aside>
-      </div>
-    </details>
   </section>;
 }
 
