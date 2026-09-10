@@ -470,6 +470,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
      그림인지 같이 적는다 — 현업 시트도 전체도와 상세도를 따로 싣고,
      나중에 보는 사람은 그림만으로는 방향을 못 가린다. */
   const [viewName, setViewName] = useState('등각');
+  /* CAD 치수와 평행선을 왜곡 없이 확인하는 직교 투영을 기본으로 쓴다.
+     ref는 WebGL 장면을 다시 만들지 않고 현재 카메라만 교체할 때 사용한다. */
+  const [projection, setProjection] = useState<'orthographic' | 'perspective'>('orthographic');
+  const projectionRef = useRef<'orthographic' | 'perspective'>('orthographic');
   /* 흰 바탕. 시트에 실을 그림이라 이쪽이 기본이다 — 어두운 네모가
      엑셀에 통째로 박히면 인쇄에서 튄다. 화면에서 히트맵을 볼 때는
      어두운 배경이 색을 잘 읽어 주므로 버튼으로 바꾼다.
@@ -618,6 +622,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     zoomBox: (shape: NonNullable<CadRegion['shape']>) => void;
     /* 보는 방향은 그대로 두고 부품 전체가 들어오게 되돌린다. */
     fitAll: () => void;
+    setProjection: (mode: 'orthographic' | 'perspective') => void;
     centre: THREE.Vector3; radius: number;
     /* 단면 슬라이더가 쓸 실제 Z 범위. 구 반지름으로 갈음하면
        원점이 부품 밖에 있는 CAD 에서 최대로 밀어도 잘린다. */
@@ -1458,9 +1463,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     // 감춰진 채로 만들어지면 mount 크기가 0 이라 0/0 = NaN 이 되고
     // 카메라 위치가 통째로 NaN 이 된다. 크기를 얻을 때까지는 임시 비율을
     // 쓰고, ResizeObserver 가 보이는 순간 제대로 맞춘다.
-    const camera = new THREE.PerspectiveCamera(
-      42, (mount.clientWidth / mount.clientHeight) || 16 / 9,
-      radius * 0.01, radius * 60);
+    const CAMERA_FOV = 42;
+    const initialAspect = (mount.clientWidth / mount.clientHeight) || 16 / 9;
+    let camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = projectionRef.current === 'orthographic'
+      ? new THREE.OrthographicCamera(-initialAspect, initialAspect, 1, -1, radius * 0.01, radius * 60)
+      : new THREE.PerspectiveCamera(CAMERA_FOV, initialAspect, radius * 0.01, radius * 60);
+    let cameraAspect = initialAspect;
     // 스캔이 바라본 방향이 있으면 그쪽에 세운다. 안 그러면 얇은 쪽에서
     // 보게 되어 형상이 선처럼 보인다(실측: 판넬이 한 축으로 155mm 다).
     // 바운딩 **구**가 아니라 **상자**로 맞춘다.
@@ -1497,8 +1505,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const right = new THREE.Vector3().crossVectors(worldUp, back).normalize();
       const up = new THREE.Vector3().crossVectors(back, right).normalize();
 
-      const vFov = (camera.fov * Math.PI) / 180;
-      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * camera.aspect);
+      const vFov = (CAMERA_FOV * Math.PI) / 180;
+      const hFov = 2 * Math.atan(Math.tan(vFov / 2) * cameraAspect);
       // 꼭짓점마다 "이 점이 화면에 들어오려면 얼마나 물러나야 하나" 를
       // 따로 구해 최댓값을 쓴다. 원근이라 앞으로 튀어나온 점일수록 크게
       // 보이므로 그 점의 깊이를 그 점에서만 더해야 한다. 가장 큰 반경과
@@ -1509,9 +1517,10 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       for (const corner of corners) {
         const v = corner.clone().sub(centre);
         const depth = v.dot(back);
+        const perspectiveDepth = camera instanceof THREE.PerspectiveCamera ? depth : 0;
         need = Math.max(need,
-          (Math.abs(v.dot(up)) * margin) / Math.tan(vFov / 2) + depth,
-          (Math.abs(v.dot(right)) * margin) / Math.tan(hFov / 2) + depth);
+          (Math.abs(v.dot(up)) * margin) / Math.tan(vFov / 2) + perspectiveDepth,
+          (Math.abs(v.dot(right)) * margin) / Math.tan(hFov / 2) + perspectiveDepth);
       }
       return need;
     };
@@ -1638,6 +1647,15 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       const away = camera.position.distanceTo(centre);
       camera.near = Math.max(radius * 0.001, (away - radius) * 0.5);
       camera.far = away + radius * 4;
+      if (camera instanceof THREE.OrthographicCamera) {
+        const halfHeight = spherical.radius * Math.tan((CAMERA_FOV * Math.PI / 180) / 2);
+        camera.top = halfHeight;
+        camera.bottom = -halfHeight;
+        camera.left = -halfHeight * cameraAspect;
+        camera.right = halfHeight * cameraAspect;
+      } else {
+        camera.aspect = cameraAspect;
+      }
       camera.updateProjectionMatrix();
 
       /* 좌표축 표시를 카메라와 함께 돌린다.
@@ -1717,7 +1735,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       } else if (mode === 'pan') {
         const height = mount.clientHeight || 1;
         const perPixel = 2 * spherical.radius
-          * Math.tan((camera.fov * Math.PI / 180) / 2) / height;
+          * Math.tan((CAMERA_FOV * Math.PI / 180) / 2) / height;
         const right = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 0);
         const up = new THREE.Vector3().setFromMatrixColumn(camera.matrix, 1);
         target.add(right.multiplyScalar(-dx * perPixel));
@@ -1951,8 +1969,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           acrossV = Math.max(acrossV, Math.abs(corner.dot(up)));
         }
       }
-      const halfV = Math.tan((camera.fov * Math.PI / 180) / 2);
-      const halfH = halfV * camera.aspect;
+      const halfV = Math.tan((CAMERA_FOV * Math.PI / 180) / 2);
+      const halfH = halfV * cameraAspect;
       target.set(...shape.center);
       // 1.12 는 테두리가 화면에 딱 붙지 않게 남기는 여백이다.
       spherical.radius = Math.max(acrossV / halfV, acrossU / halfH) * 1.12;
@@ -1967,6 +1985,20 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       dir.normalize();
       target.copy(centre);
       spherical.radius = fitDistance(dir);
+      applyCamera();
+    };
+
+    const setProjectionMode = (mode: 'orthographic' | 'perspective') => {
+      if ((mode === 'orthographic') === (camera instanceof THREE.OrthographicCamera)) return;
+      const position = camera.position.clone();
+      const up = camera.up.clone();
+      camera = mode === 'orthographic'
+        ? new THREE.OrthographicCamera(-cameraAspect, cameraAspect, 1, -1, radius * 0.001, radius * 60)
+        : new THREE.PerspectiveCamera(CAMERA_FOV, cameraAspect, radius * 0.001, radius * 60);
+      camera.position.copy(position);
+      camera.up.copy(up);
+      projectionRef.current = mode;
+      setProjection(mode);
       applyCamera();
     };
 
@@ -2092,7 +2124,7 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       renderer.render(scene, camera);
       return url;
     };
-    viewApi.current = { frame, snapshot, refresh: applyCamera, zoomBox, fitAll,
+    viewApi.current = { frame, snapshot, refresh: applyCamera, zoomBox, fitAll, setProjection: setProjectionMode,
                         centre: centre.clone(), radius,
                         zMin: box.min.z, zMax: box.max.z };
     setBounds({
@@ -2114,8 +2146,8 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
       resizeFrame = requestAnimationFrame(() => {
       const w = mount.clientWidth, h = mount.clientHeight;
       if (!w || !h) return;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
+      cameraAspect = w / h;
+      applyCamera();
       // CSS 크기는 건드리지 않아 ResizeObserver 자기 호출을 막는다.
       renderer.setSize(w, h, false);
       });
@@ -2726,6 +2758,12 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
     </div>
 
     <div className="cad-viewer__views" role="group" aria-label="표준 뷰">
+      <button type="button" className={projection === 'orthographic' ? 'is-on' : undefined}
+        aria-pressed={projection === 'orthographic'}
+        title={projection === 'orthographic' ? '현재 원근감 없는 직교 투영입니다. 눌러 원근 투영으로 전환합니다.' : '원근감 없는 직교 투영으로 전환합니다.'}
+        onClick={() => viewApi.current?.setProjection(projection === 'orthographic' ? 'perspective' : 'orthographic')}>
+        {projection === 'orthographic' ? '직교' : '원근'}
+      </button>
       {VIEWS.map((view) => (
         <button key={view.id} type="button"
           className={viewName === view.label ? 'is-on' : undefined}
@@ -2733,27 +2771,18 @@ export function CadViewer({ active = true, sections, mesh, showHoles, overlay, s
           {view.label}
         </button>
       ))}
-      <button type="button" title="화면을 90도 돌립니다 (길쭉한 부품 눕히기)"
+      <button type="button" title="화면을 90도 회전합니다"
         onClick={() => {
           const next = (roll + 90) % 360;
           setRoll(next);
           rollRef.current = (next * Math.PI) / 180;
           viewApi.current?.refresh();
         }}>
-        {roll ? `${roll}°` : '눕히기'}
+        {roll ? `${roll}°` : '회전'}
       </button>
       <button type="button" onClick={toggleFull}
         title="3D 화면을 전체화면으로 봅니다 (Esc 로 나감)">
         {full ? '축소' : '확대'}
-      </button>
-      {/* 보고 싶은 자리를 네모·동그라미로 훑으면 그만큼이 화면에 꽉 차게
-          커진다. 반대편 살이나 옆 부품이 겹쳐 보일 때는 잡아 둔 자리
-          목록에서 가리기를 켜면 그 안을 안 그린다 — 형상 자체는 그대로다.
-          바로 옆 '확대' 는 창 전체를 키우는 것이라 이름을 나눠 뒀다. */}
-      <button type="button" className={hiding ? 'is-on' : undefined}
-        title="보고 싶은 자리를 네모·동그라미로 훑으면 그만큼 크게 봅니다 (그 줄에서 가리기도 켤 수 있습니다)"
-        onClick={() => pickTool(hiding ? 'none' : 'hide')}>
-        돋보기 {boxes.length ? boxes.length : ''}
       </button>
       <button type="button" onClick={() => setLight((v) => !v)}
         title={light

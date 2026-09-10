@@ -136,6 +136,32 @@ function editableZeroLineCount(result: AnalysisResult): number {
     || result.simpleZeroLines?.length
     || 0;
 }
+
+const distanceToSegment = (px: number, py: number, [ax, ay]: [number, number], [bx, by]: [number, number]) => {
+  const dx = bx - ax; const dy = by - ay;
+  const lengthSquared = dx * dx + dy * dy;
+  const t = lengthSquared > 0 ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared)) : 0;
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+};
+
+function pointInsideClosedLine(px: number, py: number, line: [number, number][]): boolean {
+  if (line.length < 4 || Math.hypot(line[0][0] - line[line.length - 1][0], line[0][1] - line[line.length - 1][1]) > 3) return false;
+  let inside = false;
+  for (let index = 0, previous = line.length - 1; index < line.length; previous = index, index += 1) {
+    const [x, y] = line[index]; const [oldX, oldY] = line[previous];
+    if ((y > py) !== (oldY > py) && px < (oldX - x) * (py - y) / (oldY - y) + x) inside = !inside;
+  }
+  return inside;
+}
+
+function pointTouchesZeroLine(point: PointResult, lines: [number, number][][], width: number, height: number): boolean {
+  /* 보정시트에서는 제로영역 안의 값과 선에 사실상 붙어 있는 값을 작업
+     지시점으로 취급하지 않는다. 해상도 차이를 흡수하도록 대각선의 0.8%를
+     근접 기준으로 쓰되 작은 이미지에서도 최소 6px은 확보한다. */
+  const threshold = Math.max(6, Math.hypot(width, height) * 0.008);
+  return lines.some((line) => pointInsideClosedLine(point.xPx, point.yPx, line)
+    || line.slice(1).some((end, index) => distanceToSegment(point.xPx, point.yPx, line[index], end) <= threshold));
+}
 type FolderEntry = { name: string; path: string; isDirectory: boolean; size: number | null; modified: string };
 type CorrectionMode = 'auto' | 'manual';
 type CorrectionAction = 'edit' | 'reset_auto' | 'reset_all' | 'restore_before' | 'reapply' | 'revise';
@@ -590,7 +616,7 @@ function normalizeAnnotation(annotation: Annotation): Annotation {
   return { ...annotation, x: clamp(x, 0, 100 - w), y: clamp(y, 0, 100 - h), w, h };
 }
 
-function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange, detailMode, onDetailMode, labelAreaMode, onLabelAreaMode, addPointMode, onAddPointMode, zeroEditActive, zeroEditDisabled, onZeroEdit }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void; detailMode?: boolean; onDetailMode?: () => void; labelAreaMode?: 'hide' | 'show' | null; onLabelAreaMode?: (mode: 'hide' | 'show') => void; addPointMode?: boolean; onAddPointMode?: () => void; zeroEditActive?: boolean; zeroEditDisabled?: boolean; onZeroEdit?: () => void }) {
+function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selectedColor, onColorChange, detailMode, onDetailMode, labelAreaMode, onLabelAreaMode, addPointMode, onAddPointMode, zeroEditActive, zeroEditDisabled, onZeroEdit, keyPointsOnly, keyPointsDisabled, onKeyPointsOnlyChange }: { tool: AnnotationTool; setTool: (tool: AnnotationTool) => void; hasAnnotations: boolean; onClearAll: () => void; selectedColor: string | null; onColorChange: (hex: string) => void; detailMode?: boolean; onDetailMode?: () => void; labelAreaMode?: 'hide' | 'show' | null; onLabelAreaMode?: (mode: 'hide' | 'show') => void; addPointMode?: boolean; onAddPointMode?: () => void; zeroEditActive?: boolean; zeroEditDisabled?: boolean; onZeroEdit?: () => void; keyPointsOnly?: boolean; keyPointsDisabled?: boolean; onKeyPointsOnlyChange?: () => void }) {
   const tools: { id: AnnotationTool; icon: typeof Square; label: string }[] = [
     { id: 'select', icon: MousePointer2, label: '선택 · 이동' },
     { id: 'rect', icon: Square, label: '사각형 강조' },
@@ -615,6 +641,7 @@ function AnnotationToolbar({ tool, setTool, hasAnnotations, onClearAll, selected
     {onDetailMode && <span className="annotation-toolbar__divider" />}
     <button type="button" onClick={onClearAll} disabled={!hasAnnotations} aria-label="주석 전체 삭제" title="주석 전체 삭제"><Trash2 size={14} /></button>
     {onZeroEdit && <button type="button" className={`annotation-toolbar__zero-edit ${zeroEditActive ? 'active' : ''}`} onClick={onZeroEdit} disabled={zeroEditDisabled} aria-pressed={Boolean(zeroEditActive)} title={zeroEditDisabled ? '편집 가능한 제로라인 좌표가 없습니다' : '제로라인의 꼭짓점과 위치를 수정합니다'}><Move size={18} /><span>제로라인 수정</span></button>}
+    {onKeyPointsOnlyChange && <button type="button" role="switch" className={`annotation-toolbar__key-points ${keyPointsOnly ? 'active' : ''}`} aria-checked={Boolean(keyPointsOnly)} onClick={onKeyPointsOnlyChange} disabled={keyPointsDisabled} title={keyPointsDisabled ? '주요 포인트 정보가 없습니다. 이미지를 다시 분석해 주세요.' : '주요 포인트만 보정시트에 표시합니다.'}><i /><span>주요포인트만 표시</span></button>}
   </div>;
 }
 
@@ -1674,12 +1701,11 @@ function AlignmentBar({ alignment, partNumber, source, transferred, total, busy,
   </div>;
 }
 
-function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, onRealign, onConfirmAlignment }: { scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
+function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, onRealign, onConfirmAlignment }: { scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
   /* 편차 뷰는 세 가지로 본다: 스캔 위, 제품데이터 위, 그리고 정렬 확인용 실루엣 겹침. */
   const [frame, setFrame] = useState<'scan' | 'product' | 'overlay'>('scan');
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
-  const [keyPointsOnly, setKeyPointsOnly] = useState(false);
   const [hiddenZeroLineIds, setHiddenZeroLineIds] = useState<Set<string>>(new Set());
   useEffect(() => { setHiddenZeroLineIds(new Set()); }, [scan.id]);
   const result = scan.result!;
@@ -1727,7 +1753,7 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
             {productReady && <div className="frame-toggles">{([['scan', '스캔 위'], ['product', '제품데이터 위'], ['overlay', '정렬 확인']] as const).map(([key, label]) => <button key={key} type="button" className={showFrame === key ? 'active' : ''} onClick={() => setFrame(key)}>{label}</button>)}</div>}
             {engine === 'deviation' && <div className={`point-filter-switch ${showKeyPointsOnly ? 'active' : ''}`}>
               <span>주요 포인트만 표시</span>
-              <button type="button" role="switch" aria-checked={showKeyPointsOnly} aria-label="주요 포인트만 표시" disabled={!hasKeySelection} onClick={() => setKeyPointsOnly((current) => !current)} title={hasKeySelection ? '국소 극값, 부호 변화, 전체 최대·최소 포인트만 표시합니다.' : '주요 포인트 정보가 없습니다. 이미지를 다시 분석해 주세요.'}><i /></button>
+              <button type="button" role="switch" aria-checked={showKeyPointsOnly} aria-label="주요 포인트만 표시" disabled={!hasKeySelection} onClick={() => onKeyPointsOnlyChange(!keyPointsOnly)} title={hasKeySelection ? '국소 극값, 부호 변화, 전체 최대·최소 포인트만 표시합니다.' : '주요 포인트 정보가 없습니다. 이미지를 다시 분석해 주세요.'}><i /></button>
             </div>}
           </div>
         </div>
@@ -2274,7 +2300,7 @@ function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, del
   </div>;
 }
 
-function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange, sheetTransformByScan, setSheetTransformByScan, sheetLayoutsByScan, setSheetLayoutsByScan, detailRegionsByScan, setDetailRegionsByScan, frontLabelPositionsByScan, setFrontLabelPositionsByScan, detailLabelPositionsByScan, setDetailLabelPositionsByScan, addedPointsByScan, setAddedPointsByScan }: { scan: ScanItem; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void; sheetTransformByScan: Record<string, SheetImageTransform>; setSheetTransformByScan: React.Dispatch<React.SetStateAction<Record<string, SheetImageTransform>>>; sheetLayoutsByScan: Record<string, SheetLayout[]>; setSheetLayoutsByScan: React.Dispatch<React.SetStateAction<Record<string, SheetLayout[]>>>; detailRegionsByScan: Record<string, DetailRegion[]>; setDetailRegionsByScan: React.Dispatch<React.SetStateAction<Record<string, DetailRegion[]>>>; frontLabelPositionsByScan: Record<string, Record<string, { x: number; y: number }>>; setFrontLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, { x: number; y: number }>>>>; detailLabelPositionsByScan: Record<string, Record<string, Record<string, { x: number; y: number }>>>; setDetailLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, Record<string, { x: number; y: number }>>>>>; addedPointsByScan: Record<string, PointResult[]>; setAddedPointsByScan: React.Dispatch<React.SetStateAction<Record<string, PointResult[]>>> }) {
+function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange, sheetTransformByScan, setSheetTransformByScan, sheetLayoutsByScan, setSheetLayoutsByScan, detailRegionsByScan, setDetailRegionsByScan, frontLabelPositionsByScan, setFrontLabelPositionsByScan, detailLabelPositionsByScan, setDetailLabelPositionsByScan, addedPointsByScan, setAddedPointsByScan }: { scan: ScanItem; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void; sheetTransformByScan: Record<string, SheetImageTransform>; setSheetTransformByScan: React.Dispatch<React.SetStateAction<Record<string, SheetImageTransform>>>; sheetLayoutsByScan: Record<string, SheetLayout[]>; setSheetLayoutsByScan: React.Dispatch<React.SetStateAction<Record<string, SheetLayout[]>>>; detailRegionsByScan: Record<string, DetailRegion[]>; setDetailRegionsByScan: React.Dispatch<React.SetStateAction<Record<string, DetailRegion[]>>>; frontLabelPositionsByScan: Record<string, Record<string, { x: number; y: number }>>; setFrontLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, { x: number; y: number }>>>>; detailLabelPositionsByScan: Record<string, Record<string, Record<string, { x: number; y: number }>>>; setDetailLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, Record<string, { x: number; y: number }>>>>>; addedPointsByScan: Record<string, PointResult[]>; setAddedPointsByScan: React.Dispatch<React.SetStateAction<Record<string, PointResult[]>>> }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [zeroPanel, setZeroPanel] = useState(false);
   const [zeroPointAddMode, setZeroPointAddMode] = useState(false);
@@ -2366,11 +2392,28 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
   const [addPointMode, setAddPointMode] = useState(false);
   const [sampling, setSampling] = useState(false);
   const [sampleError, setSampleError] = useState<string | null>(null);
+  const editedZeroLinePixels = useMemo<[number, number][][]>(() => (result.zeroLines || []).map((line, lineIndex) => {
+    const edit = draftZeroEdits.find((item) => item.index === lineIndex);
+    if (edit?.hidden) return [];
+    const source = Array.isArray(edit?.vertices) && edit.vertices.length >= 2 ? edit.vertices : (line.points || []);
+    return source
+      .filter((point) => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]))
+      .map(([x, y], pointIndex) => {
+        const point = edit?.points?.[String(pointIndex)];
+        return [x + (edit?.dx || 0) + (point?.dx || 0), y + (edit?.dy || 0) + (point?.dy || 0)] as [number, number];
+      });
+  }), [result.zeroLines, draftZeroEdits]);
+  const keyPointIds = useMemo(() => new Set(result.keySelection?.ids
+    ?? points.filter((point) => point.keyReasons?.length).map((point) => point.id)), [result.keySelection, points]);
+  const hasKeySelection = result.keySelection !== undefined;
+  const sheetSourcePoints = [...points, ...addedPoints]
+    .filter((point) => !pointTouchesZeroLine(point, editedZeroLinePixels, result.source.width, result.source.height))
+    .filter((point) => !keyPointsOnly || !hasKeySelection || keyPointIds.has(point.id));
   /* 제품데이터 위에 올릴 때는 같은 포인트의 좌표만 제품 기준으로 바꿔 넘긴다.
      전사되지 않은 포인트는 제품데이터 밖으로 나간 것이라 시트에서 뺀다.
      라벨 위치 계산(아래)이 각 점의 현재 화면 좌표를 알아야 해서, 이 계산을
      그보다 앞으로 옮겨 뒀다(원래는 이 함수 뒤쪽에 있었다). */
-  const sheetPoints = [...points, ...addedPoints].flatMap((point) => {
+  const sheetPoints = sheetSourcePoints.flatMap((point) => {
     if (!onProduct) return [point];
     if (point.xProduct === undefined || point.yProduct === undefined) return [];
     return [{ ...point, x: point.xProduct, y: point.yProduct }];
@@ -2631,17 +2674,6 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
   /* 제로 폴리라인도 포인트와 같은 규칙으로 프레임 % 로 옮긴다. 스캔 원본은 픽셀 좌표라
      [scanW, scanH] 로 나눠 %, 제품데이터는 alignment 행렬로 옮긴 뒤 [productW, productH] 로 % 를 낸다.
      알림: 여기서 알고 있는 alignment 는 shear=0 (b=c=0) 인 축정렬 아핀이라 add point 와 같은 형태를 쓴다. */
-  const editedZeroLinePixels = useMemo<[number, number][][]>(() => (result.zeroLines || []).map((line, lineIndex) => {
-    const edit = draftZeroEdits.find((item) => item.index === lineIndex);
-    if (edit?.hidden) return [];
-    const source = Array.isArray(edit?.vertices) && edit.vertices.length >= 2 ? edit.vertices : (line.points || []);
-    return source
-      .filter((point) => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]))
-      .map(([x, y], pointIndex) => {
-        const point = edit?.points?.[String(pointIndex)];
-        return [x + (edit?.dx || 0) + (point?.dx || 0), y + (edit?.dy || 0) + (point?.dy || 0)] as [number, number];
-      });
-  }), [result.zeroLines, draftZeroEdits]);
   const zeroLineSplineSegments = useMemo(() => (result.zeroLines || []).map((line, lineIndex) => {
     const edit = draftZeroEdits.find((item) => item.index === lineIndex);
     if (Array.isArray(edit?.splineSegments)) return edit.splineSegments;
@@ -3108,7 +3140,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, pointOverrides, o
         <span>{renderedSheetImage.busy ? '이미지 변환 중…' : `${activeSheetTransform.rotation}°`}</span>
         {renderedSheetImage.error && <em>{renderedSheetImage.error}</em>}
       </div>
-      <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} zeroEditActive={zeroPanel} zeroEditDisabled={!editableZeroLineCount(result)} onZeroEdit={toggleZeroEditor} />
+      <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} zeroEditActive={zeroPanel} zeroEditDisabled={!editableZeroLineCount(result)} onZeroEdit={toggleZeroEditor} keyPointsOnly={keyPointsOnly && hasKeySelection} keyPointsDisabled={!hasKeySelection} onKeyPointsOnlyChange={() => onKeyPointsOnlyChange(!keyPointsOnly)} />
       {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
@@ -3460,7 +3492,6 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
         {shots.length > 0 && <button type="button" className="tool-button"
           onClick={() => setShots([])}>담은 화면 비우기</button>}
-        {shots.length > 0 && <button type="button" className="tool-button" onClick={() => setShots([])}>담은 화면 비우기</button>}
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={saveCadTable}>CAD 보정표</button>}
         {overlayError && <span className="cad-overlay-bar__err">{overlayError}</span>}
         {shapeMatchWarning && <span className="cad-overlay-bar__err">{shapeMatchWarning}</span>}
@@ -3531,6 +3562,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
 
 export default function Home() {
   const [view, setView] = useState<View>('overview'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
+  const [keyPointsOnlyByScan, setKeyPointsOnlyByScan] = useState<Record<string, boolean>>({});
   const [resultEngine, setResultEngine] = useState<Engine>('label');
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
   const [sheetTitleFontSizesByScan, setSheetTitleFontSizesByScan] = useState<Record<string, SheetTitleFontSizes>>({});
@@ -3594,6 +3626,7 @@ export default function Home() {
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const pointOverrides = completedScan ? pointOverridesByScan[completedScan.id] || {} : {};
   const coefficient = completedScan ? coefficientByScan[completedScan.id] ?? 1 : 1;
+  const keyPointsOnly = completedScan ? keyPointsOnlyByScan[completedScan.id] ?? false : false;
   const sheetTitle = completedScan ? sheetTitlesByScan[completedScan.id] || createDefaultSheetTitleValues(completedScan) : undefined;
   const sheetTitleFonts = completedScan ? sheetTitleFontsByScan[completedScan.id] || DEFAULT_TITLE_FONTS : DEFAULT_TITLE_FONTS;
   const sheetTitleFontSizes = completedScan ? sheetTitleFontSizesByScan[completedScan.id] || {} : {};
@@ -3626,31 +3659,20 @@ export default function Home() {
       if (!saved) continue;
       if (saved.coefficient !== undefined && coefficientByScan[scan.id] === undefined) setCoefficientByScan((current) => ({ ...current, [scan.id]: saved.coefficient! }));
       if (saved.overrides && pointOverridesByScan[scan.id] === undefined) setPointOverridesByScan((current) => ({ ...current, [scan.id]: { ...saved.overrides } }));
-      if (saved.hidden && hiddenPointIdsByScan[scan.id] === undefined) setHiddenPointIdsByScan((current) => ({ ...current, [scan.id]: new Set(saved.hidden) }));
+      if (saved.hidden && hiddenPointIdsByScan[scan.id] === undefined) {
+        const keyIds = new Set(scan.result?.keySelection?.ids || []);
+        const legacy = scan.result?.keySelection
+          ? scan.result.points.filter((point) => !keyIds.has(point.id)).map((point) => point.id).sort()
+          : [];
+        const stored = [...saved.hidden].sort();
+        const wasLegacyKeyFilter = legacy.length === stored.length && legacy.every((id, index) => id === stored[index]);
+        setHiddenPointIdsByScan((current) => ({ ...current, [scan.id]: new Set(wasLegacyKeyFilter ? [] : saved.hidden) }));
+      }
       if (saved.head && sheetTitlesByScan[scan.id] === undefined) setSheetTitlesByScan((current) => ({ ...current, [scan.id]: saved.head as SheetTitleValues }));
       if (saved.zones && zonesByPart[scan.partNo] === undefined) setZonesByPart((current) => ({ ...current, [scan.partNo]: saved.zones as CadRegion[] }));
       if (saved.zeroEdits && zeroEditsByScan[scan.id] === undefined) setZeroEditsByScan((current) => ({ ...current, [scan.id]: saved.zeroEdits as ZeroEdit[] }));
     }
   }, [sessionLoaded, scans, coefficientByScan, pointOverridesByScan, hiddenPointIdsByScan, sheetTitlesByScan, zonesByPart, zeroEditsByScan]);
-  /* 분석이 끝난 품번은 주요 포인트만 보정시트의 초기 표시 대상으로 삼는다.
-     나머지는 삭제하지 않고 hidden 집합에 보존하므로 작업자가 다시 표시할 수 있다.
-     저장된 작업 상태가 있으면 그 사용자의 표시 선택을 우선한다. */
-  useEffect(() => {
-    if (!sessionLoaded) return;
-    setHiddenPointIdsByScan((current) => {
-      let changed = false;
-      const next = { ...current };
-      for (const scan of scans) {
-        if (!scan.result?.keySelection || next[scan.id] !== undefined) continue;
-        const keyIds = new Set(scan.result.keySelection.ids);
-        next[scan.id] = new Set(scan.result.points
-          .filter((point) => !keyIds.has(point.id))
-          .map((point) => point.id));
-        changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, [sessionLoaded, scans]);
   /* 방향만 다시 계산한다. Qwen 판독은 그대로 두고 좌표만 옮겨 받는다. */
   const realign = async (flipX?: boolean, flipY?: boolean, rotation?: number) => {
     if (!completedScan?.result) return;
@@ -3771,8 +3793,8 @@ export default function Home() {
     <div className="app-main">
       {view === 'overview' && <WorkspaceHub onSelect={selectView} hasResult={hasResult} scanCount={scans.length} backendOnline={backendOnline} />}
       {view === 'workspace' && <Workspace scans={scans} selectedScan={activeScan || scans[0]} setScans={setScans} result={completedScan?.result} onOpenResults={openResults} onOpenEngine={openEngine} backendOnline={backendOnline} />}
-      {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
-      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || []} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
+      {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
+      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || []} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
       {view === 'files' && <FileOrganizerPage />}
       <div style={{ display: view === 'cad' ? 'block' : 'none' }}>
         <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />

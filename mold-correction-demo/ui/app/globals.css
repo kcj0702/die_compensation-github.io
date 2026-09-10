@@ -631,6 +631,12 @@ button { cursor: pointer; }
 .annotation-toolbar button.annotation-toolbar__zero-edit svg { width:19px; height:19px; }
 .annotation-toolbar button.annotation-toolbar__zero-edit:hover:not(:disabled) { border-color:#4fae9b; color:#075c4e; background:#e6f8f3; }
 .annotation-toolbar button.annotation-toolbar__zero-edit.active { border-color:#168a74; color:#fff; background:#168a74; box-shadow:0 2px 7px rgba(22,138,116,.28); }
+.annotation-toolbar button.annotation-toolbar__key-points { width:auto; height:38px; padding:0 13px; display:flex; align-items:center; justify-content:center; gap:7px; border-color:#d7dde4; color:#718095; background:#fff; font-size:9px; font-weight:750; white-space:nowrap; }
+.annotation-toolbar button.annotation-toolbar__key-points i { position:relative; width:24px; height:14px; border-radius:999px; background:#cbd3dc; transition:background .15s ease; }
+.annotation-toolbar button.annotation-toolbar__key-points i:after { content:""; position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(20,37,61,.25); transition:transform .15s ease; }
+.annotation-toolbar button.annotation-toolbar__key-points.active { color:#116d5e; border-color:#9ccfc5; background:#f2fbf8; box-shadow:0 2px 5px rgba(17,109,94,.1); }
+.annotation-toolbar button.annotation-toolbar__key-points.active i { background:#168a74; }
+.annotation-toolbar button.annotation-toolbar__key-points.active i:after { transform:translateX(10px); }
 .sheet-image-toolbar { display:flex; align-items:center; gap:5px; padding:6px 10px; border-bottom:1px solid var(--line); background:#f7f9fb; }
 .sheet-image-toolbar b { margin-right:4px; color:#536275; font-size:8px; }
 .sheet-image-toolbar button { height:27px; padding:0 9px; border:1px solid #d8dee5; border-radius:6px; color:#667487; background:#fff; font-size:8px; font-weight:700; cursor:pointer; }
@@ -725,7 +731,9 @@ button { cursor: pointer; }
 .front-view-layout > img { position:absolute; inset:0; width:100%; height:100%; object-fit:fill; pointer-events:none; }
 .layout-image-clip { position:absolute; inset:0; overflow:hidden; background:#fff; }
 .layout-image-clip > img { position:absolute; max-width:none; max-height:none; object-fit:fill; pointer-events:none; }
-.sheet-layout .point-layer { z-index:20; overflow:visible; }
+/* 레이아웃을 선택하면 상단 이동 막대(z-index:25)가 나타난다. 라벨 레이어를
+   그보다 위로 올려 막대와 겹친 라벨도 계속 클릭하고 드래그할 수 있게 한다. */
+.sheet-layout .point-layer { z-index:40; overflow:visible; }
 .sheet-canvas > .annotation-layer { z-index:12; }
 .layout-resize-handle { position:absolute; z-index:30; width:9px; height:9px; margin:-5px 0 0 -5px; border:1px solid #216ead; border-radius:2px; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.28); touch-action:none; }
 .layout-resize-handle--nw,.layout-resize-handle--se { cursor:nwse-resize; }.layout-resize-handle--ne,.layout-resize-handle--sw { cursor:nesw-resize; }.layout-resize-handle--n,.layout-resize-handle--s { cursor:ns-resize; }.layout-resize-handle--e,.layout-resize-handle--w { cursor:ew-resize; }

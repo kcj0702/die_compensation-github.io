@@ -8,6 +8,8 @@ declare module 'three' {
   export type Vector3 = any; export const Vector3: any;
   export type LineSegments = any; export const LineSegments: any;
   export type WebGLRenderer = any; export const WebGLRenderer: any;
+  export type PerspectiveCamera = any; export const PerspectiveCamera: any;
+  export type OrthographicCamera = any; export const OrthographicCamera: any;
   export type MeshStandardMaterial = any; export const MeshStandardMaterial: any;
   export type Material = any; export const Material: any;
   const THREE: any;
