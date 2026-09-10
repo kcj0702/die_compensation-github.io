@@ -23,7 +23,7 @@
   }
   .studio-shell--overview .studio-navigation { border-color: rgb(255 255 255 / 9%); background: rgb(17 22 31 / 76%); }
   .studio-shell--overview .studio-navigation.is-scrolled { background: rgb(17 22 31 / 95%); }
-  .studio-shell--overview .studio-brand::after { content:''; position:absolute; inset:0; background:url('/ajin-industrial-logo.png') center / contain no-repeat; clip-path:inset(0 0 0 27%); filter:invert(1); pointer-events:none; }
+  .studio-shell--overview .studio-brand__wordmark { filter:invert(1); }
   .studio-shell--overview .studio-areas button { color: #e4e7ee; }
   .studio-shell--overview .studio-areas button span { color: #aeb8c9; }
   .studio-shell--overview .studio-areas button:hover { background: rgb(255 255 255 / 7%); color: #ffd886; }
@@ -32,8 +32,8 @@
   .studio-scroll-progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: linear-gradient(90deg, #ffb51b, #e3a81d); transform: scaleX(var(--studio-scroll-progress, 0)); transform-origin: left; pointer-events: none; }
   .studio-navigation__main { display: flex; align-items: center; gap: 36px; max-width: 1760px; min-height: 82px; padding: 12px clamp(20px, 4vw, 64px); margin: auto; }
   .studio-brand { position: relative; display: flex; width: 162px; aspect-ratio: 957 / 311; flex: 0 0 auto; padding: 0; border: 0; background: transparent; }
-  .studio-brand__yellow { display:none; }
-  .studio-brand__wordmark { position:absolute; inset:0; display:block; width:100%; height:100%; object-fit:contain; }
+  .studio-brand__yellow { position:absolute; inset:0; background:#b9b9b9; -webkit-mask:url('/ajin-industrial-logo.png') center / contain no-repeat; mask:url('/ajin-industrial-logo.png') center / contain no-repeat; }
+  .studio-brand__wordmark { position:absolute; inset:0; display:block; width:100%; height:100%; object-fit:contain; clip-path:inset(0 0 0 27%); }
   .studio-areas { display: flex; align-items: center; gap: 8px; margin-left: auto; }
   .studio-areas button { display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 10px 20px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #657181; font-size: 15px; font-weight: 750; transition: background .2s, color .2s; }
   .studio-areas button span { color: #83909f; font: 12px/1.2 'Consolas', monospace; }
