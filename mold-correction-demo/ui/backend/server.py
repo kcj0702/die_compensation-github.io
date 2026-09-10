@@ -1688,6 +1688,7 @@ def analyze_image(
         ),
         "keySelection": selection.to_dict(),
         "zeroOverlay": _png_data_url(zero_overlay, rgb=True) if zero_overlay is not None else None,
+        "zeroCase": int(hybrid_zero.case) if hybrid_zero is not None else None,
         "zeroMask": (
             _png_data_url(zero_datum_mask)
             if zero_datum_mask is not None and zero_datum_mask.any()

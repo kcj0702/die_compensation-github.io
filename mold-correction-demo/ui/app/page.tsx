@@ -83,6 +83,7 @@ type AnalysisResult = {
   alignment: AlignmentInfo | null;
   alignmentOverlay: string | null;
   zeroOverlay: string | null;
+  zeroCase?: number | null;
   zeroMask: string | null;
   /* 스캔 좌표(픽셀) 기반 제로 폴리라인. id는 현재 UI의 개별 표시/숨김 제어에,
      points는 제품데이터 좌표 변환과 편집 오버레이에 함께 사용한다. */
@@ -1523,7 +1524,7 @@ function Sidebar({ view, setView, collapsed, setCollapsed, hasResult }: { view: 
     { id: 'files' as const, label: '품번 파일 정리', icon: Files, separated: true },
   ];
   return <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
-    <div className="brand"><img className="brand__logo" src="/ajin-industrial-logo.png" alt="아진산업" /></div>
+    <div className="brand"><span className="brand__logo"><span className="brand__positive-symbol" aria-hidden="true" /><img className="brand__wordmark" src="/ajin-industrial-logo.png" alt="아진산업" /></span></div>
     <nav className="sidebar__nav" aria-label="주 메뉴"><span className="sidebar__eyebrow">WORKSPACE</span>{items.map((item) => { const Icon = item.icon; const disabled = item.id === 'service' && !hasResult; const active = item.id === 'workspace' ? view === 'workspace' || view === 'results' : view === item.id; return <button key={item.id} disabled={disabled} onClick={() => !disabled && setView(item.id)} className={`${active ? 'active' : ''}${item.separated ? ' sidebar__nav-item--separated' : ''}`}><Icon size={19} /><span>{item.label}</span></button>; })}</nav>
     <button className="sidebar__collapse" onClick={() => setCollapsed(!collapsed)} aria-label="사이드바 접기"><PanelLeftClose size={18} /><span>메뉴 접기</span></button>
   </aside>;
@@ -1737,7 +1738,8 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
     if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
-  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : engine === 'zero' && hasZeroLineControls ? result.cleanImage || scan.url : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
+  const showReviewedCase1Overlay = engine === 'zero' && result.zeroCase === 1 && showFrame === 'scan' && Boolean(result.zeroOverlay);
+  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : showReviewedCase1Overlay ? result.zeroOverlay : engine === 'zero' && hasZeroLineControls ? result.cleanImage || scan.url : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
   const frameWidth = showFrame === 'scan' || !alignment ? result.source.width : alignment.productSize[0];
   const frameHeight = showFrame === 'scan' || !alignment ? result.source.height : alignment.productSize[1];
   const toggleLabel = onPointToggle;
@@ -1769,7 +1771,7 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
         <div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}>
           <Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'} containImage>
             {engine === 'deviation' && showFrame !== 'overlay' && <CorrectionPoints coefficient={-1} points={showFrame === 'product' ? displayedProductPoints : displayedPoints} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}
-            {engine === 'zero' && hasZeroLineControls && <ZeroLineLayer lines={visibleZeroLines} width={frameWidth} height={frameHeight} />}
+            {engine === 'zero' && hasZeroLineControls && !showReviewedCase1Overlay && <ZeroLineLayer lines={visibleZeroLines} width={frameWidth} height={frameHeight} />}
           </Heatmap>
         </div>
       </div>

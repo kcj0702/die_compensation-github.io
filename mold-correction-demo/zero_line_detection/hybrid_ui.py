@@ -25,7 +25,7 @@ from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-_CACHE_SCHEMA = "hybrid-zero-v4"
+_CACHE_SCHEMA = "hybrid-zero-v6"
 _CACHE_LIMIT = 32
 
 
@@ -205,15 +205,13 @@ class HybridZeroLineOutput:
     warnings: list[str]
 
 
-def _ensure_nonempty_case1_mask(
-    final_mask: np.ndarray, common: dict[str, Any]
-) -> tuple[np.ndarray, bool]:
-    """Never turn a valid Case-1 decision into an invisible zero-line result."""
-    selected = np.asarray(final_mask, dtype=bool)
-    if selected.any():
-        return selected, False
-    candidate = np.asarray(common["zero"], dtype=bool)
-    return candidate, bool(candidate.any())
+def _routes_to_review_mask(
+    selections: list[dict], shape: tuple[int, int]
+) -> np.ndarray:
+    """Rasterize case-2 routes with the shared reviewed-engine contract."""
+    from zero_line_detection.generate_final_hybrid_zero_line import routes_to_mask
+
+    return routes_to_mask(selections, shape).astype(bool)
 
 
 def _matching_review_spec(filename: str):
@@ -385,19 +383,21 @@ def _detect_hybrid_zero_line_uncached(
         )
 
         if selected_case == 1:
-            final_mask, _details = hybrid.run_case1(common)
-            final_mask, used_candidate_fallback = _ensure_nonempty_case1_mask(
-                final_mask, common
+            final_mask, details = hybrid.run_case1(common)
+            # Use the same renderer as the reviewed experiment.  The previous
+            # UI-only cyan tint omitted correction shading, the blue polygon
+            # fill/boundary and Z labels even when the polygon mask matched.
+            _board, overlay = kdt.build_board(
+                common["image"],
+                common["positive"],
+                common["negative"],
+                common["zero"],
+                "case1_contour_polygon",
+                details,
+                None,
+                common["zero_ratio"],
+                common["zero_count"],
             )
-            case1_warnings = list(base.warnings)
-            if used_candidate_fallback:
-                case1_warnings.append(
-                    "Case 1 폴리곤이 비어 있어 검증된 제로 가능영역 경계를 대신 표시했습니다."
-                )
-            overlay = rgb.copy()
-            tint = np.zeros_like(overlay)
-            tint[final_mask] = (0, 235, 255)
-            overlay = cv2.addWeighted(overlay, 1.0, tint, 0.58, 0.0)
             # [버그였던 부분] Case 1(영역/다각형) 은 "선" 이 아니라 "면" 이라는
             # 이유로 lines=[] 를 그냥 박아 뒀다. 하지만 다각형도 윤곽선을 따면
             # 얼마든지 폴리라인으로 낼 수 있다 — 검토용(리뷰 자산) 경로의
@@ -411,22 +411,22 @@ def _detect_hybrid_zero_line_uncached(
                 regions=int(cv2.connectedComponents(final_mask.astype(np.uint8))[0] - 1),
                 ratio=float(final_mask.sum()) / part_px,
                 lines=_mask_contours_as_lines(final_mask.astype(np.uint8)),
-                warnings=case1_warnings + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
+                warnings=list(base.warnings) + ["하이브리드 Case 1: ±0.6 mm 보정영역 기반 오프셋 다각형 결과입니다."],
             )
 
         routed = case2.run_original_case2_pipeline(
             original_bgr=image_bgr,
             colorbar_range_mm=colorbar_range_mm,
         )
-        line_mask = np.zeros(image_bgr.shape[:2], dtype=np.uint8)
         lines: list[dict] = []
         for index, selection in enumerate(routed["selections"], start=1):
             points = np.asarray(selection["closure_validation"]["route"]["path_points"], dtype=np.int32)
             if len(points) < 2:
                 continue
-            cv2.polylines(line_mask, [points.reshape(-1, 1, 2)], False, 255, 5, cv2.LINE_AA)
             lines.append({"id": index, "points": points.tolist()})
-        mask = line_mask.astype(bool)
+        # Use the review engine's exact 4 px / LINE_8 rasterisation.  Redrawing
+        # here with 5 px antialiasing made identical routes look much thicker.
+        mask = _routes_to_review_mask(routed["selections"], image_bgr.shape[:2])
         overlay_base = cv2.cvtColor(routed["cleaned_bgr"], cv2.COLOR_BGR2RGB)
         _construction, overlay = hybrid.draw_team_route_view(overlay_base, routed, mask)
         route_ratio = float(mask.sum()) / part_px

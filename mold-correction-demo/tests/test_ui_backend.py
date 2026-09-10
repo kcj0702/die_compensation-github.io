@@ -1648,6 +1648,27 @@ class RegisteredCadViewerTest(unittest.TestCase):
         self.assertFalse(convert.call_args_list[0].kwargs.get("force_new_instance", False))
         self.assertTrue(convert.call_args_list[1].kwargs["force_new_instance"])
 
+    def test_exportdata_efail_is_retryable_and_not_negative_cached(self) -> None:
+        from cad_import import catia_convert
+
+        reason = (
+            "stp((-2147352567, '예외가 발생했습니다.', "
+            "(0, 'CATIAPartDocument', 'The method ExportData failed', "
+            "None, 0, -2147467259), None))"
+        )
+
+        self.assertTrue(catia_convert._is_transient_com_failure(reason))
+
+    def test_catia_export_uses_a_new_sibling_path_with_the_same_suffix(self) -> None:
+        from cad_import import catia_convert
+
+        target = Path("cache/part__quality_v3.step")
+        pending = catia_convert._pending_export_path(target)
+
+        self.assertEqual(pending.parent, target.parent)
+        self.assertEqual(pending.suffix, ".step")
+        self.assertNotEqual(pending, target)
+
     def test_step_converter_does_not_fall_back_to_stl(self) -> None:
         from cad_import import catia_convert
 

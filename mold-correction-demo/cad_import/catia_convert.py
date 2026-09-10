@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import threading
 import time
+import uuid
 from pathlib import Path
 
 
@@ -70,12 +71,19 @@ _TRANSIENT_COM_MARKERS = (
     "rpc_",
     "remote procedure",
     "원격 프로시저",
+    "-2147467259",  # 0x80004005 E_FAIL from CATIA ExportData
+    "the method exportdata failed",
 )
 
 
 def _is_transient_com_failure(reason: object) -> bool:
     folded = str(reason).lower()
     return any(marker in folded for marker in _TRANSIENT_COM_MARKERS)
+
+
+def _pending_export_path(target: Path) -> Path:
+    """Return a non-existing sibling path while preserving the CAD suffix."""
+    return target.with_name(f"{target.stem}__pending_{uuid.uuid4().hex}{target.suffix}")
 
 
 def _convert_to_mesh_once(
@@ -174,15 +182,22 @@ def _convert_to_mesh_once(
 
             for fmt, ext in export_formats:
                 target = cache_root / f"{source_path.stem}{ext}"
+                pending = _pending_export_path(target)
                 try:
-                    doc.ExportData(str(target.resolve()), fmt)
+                    # ExportData may reject an existing destination instead of
+                    # replacing it.  Export beside the cache and atomically
+                    # replace the old successful result only after validation.
+                    doc.ExportData(str(pending.resolve()), fmt)
                 except pythoncom.com_error as exc:
                     failures.append(f"{fmt}({exc})")
+                    pending.unlink(missing_ok=True)
                     continue
-                if target.is_file() and target.stat().st_size > 0:
+                if pending.is_file() and pending.stat().st_size > 0:
+                    pending.replace(target)
                     successful_path = target
                     break
                 failures.append(f"{fmt}(파일 미생성)")
+                pending.unlink(missing_ok=True)
         finally:
             if doc is not None:
                 try:

@@ -509,7 +509,9 @@ button { cursor: pointer; }
 /* AJIN Industrial brand theme: monochrome structure with safety-yellow accents. */
 .sidebar { color:#343434; border-right:1px solid #e5e5e1; background:#fff; box-shadow:8px 0 28px rgba(0,0,0,.035); }
 .brand { height:64px; gap:10px; padding:2px 5px; overflow:hidden; }
-.brand__logo { width:136px; height:48px; flex:0 0 auto; object-fit:contain; object-position:left center; }
+.brand__logo { position:relative; display:block; width:136px; height:48px; flex:0 0 auto; }
+.brand__positive-symbol { position:absolute; left:14%; top:22%; width:18.1%; height:55%; background:url('/ajin-symbol.svg') center / contain no-repeat; }
+.brand__wordmark { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; object-position:left center; clip-path:inset(0 0 0 37.83%); }
 .brand__copy { padding-left:10px; border-left:1px solid #deded9; }
 .brand__copy strong { color:#151515; letter-spacing:.08em; font-size:14px; }
 .brand__copy span { color:#878783; font-size:7px; letter-spacing:.02em; white-space:nowrap; }
