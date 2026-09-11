@@ -2037,7 +2037,7 @@ function FileOrganizerPage() {
       const executeResponse = await fetch(`${API_BASE}/api/file-organizer/execute`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          operation: 'copy', conflict,
+          operation: 'copy', conflict: 'overwrite', rebuild: true,
           items: scannedItems.map((item) => ({ sourcePath: item.sourcePath, targetDir: item.targetDir })),
         }),
       });

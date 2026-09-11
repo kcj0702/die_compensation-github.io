@@ -6,6 +6,7 @@ import base64
 import json
 import math
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -2727,6 +2728,39 @@ def _safe_organizer_target(relative_path: str) -> Path:
     return candidate
 
 
+def _clear_reconstructed_root() -> int:
+    """Remove only the contents of the configured reconstruction root.
+
+    A full reconstruction is intentionally destructive for the destination,
+    so refuse to run when the source and destination overlap.  This prevents
+    a mistaken path setting from deleting files that are about to be copied.
+    The root directory itself is retained (important for mapped/NAS shares).
+    """
+    source_root = FILE_SOURCE_ROOT.resolve()
+    destination_root = FOLDER_ROOT.resolve()
+    if (
+        source_root == destination_root
+        or _path_is_within(source_root, destination_root)
+        or _path_is_within(destination_root, source_root)
+    ):
+        raise ValueError(
+            "원본 폴더와 재구성 폴더가 같거나 서로 포함되어 있어 재구성 폴더를 "
+            "초기화할 수 없습니다. 서로 분리된 경로를 선택해 주세요."
+        )
+    if destination_root == Path(destination_root.anchor):
+        raise ValueError("드라이브 또는 공유 폴더의 최상위 경로는 초기화할 수 없습니다.")
+
+    destination_root.mkdir(parents=True, exist_ok=True)
+    removed = 0
+    for child in destination_root.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+        removed += 1
+    return removed
+
+
 def _organizer_item(path: Path, classification: Any, *, source_kind: str) -> dict[str, Any]:
     target_dir = classification.target_dir
     if target_dir is None or target_dir == FOLDER_ROOT:
@@ -2963,8 +2997,11 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("한 번에 1~200개 파일을 선택해야 합니다.")
     operation = str(payload.get("operation", "copy"))
     conflict = str(payload.get("conflict", "rename"))
+    rebuild = payload.get("rebuild") is True
     if operation not in {"copy", "move"} or conflict not in {"rename", "skip", "overwrite"}:
         raise ValueError("지원하지 않는 파일 작업 설정입니다.")
+    if rebuild and operation != "copy":
+        raise ValueError("폴더 재구성은 원본을 보존하는 복사 방식으로만 실행할 수 있습니다.")
 
     parsed_items: list[tuple[Path, str | None]] = []
     for raw_item in raw_items:
@@ -3007,6 +3044,7 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
         pairs.append((source, target_dir / source.name))
         classifications[MariaDBRepository._source_key(source)] = classification
 
+    removed_entries = _clear_reconstructed_root() if rebuild else 0
     results = execute_batch(pairs, operation=operation, conflict=conflict)
     _fill_category_skeleton(pairs)
     write_history(results, FILE_LOG_ROOT)
@@ -3046,6 +3084,8 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
             for result in results
         ],
         "databaseNote": database_note,
+        "rebuild": rebuild,
+        "removedEntries": removed_entries,
     }
 
 
