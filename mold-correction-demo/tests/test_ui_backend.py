@@ -177,6 +177,7 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             "/api/file-organizer/database": {"POST"},
             "/api/file-organizer/folder-order": {"GET", "POST"},
             "/api/file-organizer/paths": {"GET", "POST"},
+            "/api/file-organizer/select-folder": {"POST"},
             "/api/file-organizer/reveal": {"POST"},
         }
         declared = {
@@ -524,6 +525,51 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             self.assertEqual(response["results"][0]["status"], "success")
             self.assertIn("로컬 감사 로그", response["databaseNote"])
             self.assertEqual(len(list(log_root.glob("*.jsonl"))), 1)
+
+    def test_uploaded_file_is_stored_in_existing_and_reconstructed_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            log_root = root / "logs"
+            staging_root = root / "staging"
+            upload_dir = staging_root / "upload"
+            source_root.mkdir()
+            destination_root.mkdir()
+            upload_dir.mkdir(parents=True)
+            uploaded = upload_dir / "JM_67312-DZ000_DASH LWR_OP20_구조도_260825.CATDrawing"
+            uploaded.write_bytes(b"drawing")
+
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(backend_server, "FILE_LOG_ROOT", log_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ), patch.object(backend_server, "_active_file_database_url", return_value=""), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["item", "vehicle", "category", "detail"],
+            ):
+                classifier = backend_server.FilenameClassifier(
+                    backend_server.FILE_ORGANIZER_RULES,
+                    destination_root,
+                    ["item", "vehicle", "category", "detail"],
+                )
+                item = backend_server._organizer_item(
+                    uploaded, classifier.classify(uploaded), source_kind="upload"
+                )
+                results = backend_server._store_uploaded_files_in_both_roots(
+                    [item], "rename"
+                )
+
+            self.assertEqual(len(results), 1)
+            existing = Path(results[0]["existing"]["path"])
+            reconstructed = Path(results[0]["reconstructed"]["path"])
+            self.assertEqual(results[0]["existing"]["status"], "success")
+            self.assertEqual(results[0]["reconstructed"]["status"], "success")
+            self.assertTrue(existing.is_file())
+            self.assertTrue(reconstructed.is_file())
+            self.assertIn(source_root, existing.parents)
+            self.assertIn(destination_root, reconstructed.parents)
+            self.assertFalse(uploaded.exists(), "양쪽 복사가 끝나면 임시 업로드를 지워야 한다")
 
     def test_unclassifiable_file_goes_to_the_unclassified_folder_not_the_root(self) -> None:
         """화면이 비운 대상 폴더를 루트로 읽지 않는지 확인한다.

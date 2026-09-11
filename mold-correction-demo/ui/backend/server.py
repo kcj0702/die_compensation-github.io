@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -2871,6 +2872,8 @@ async def file_organizer_upload(request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"error": f"업로드를 읽지 못했습니다: {exc}"}, status_code=400)
     uploads = form.getlist("files")
+    organize_mode = str(form.get("organize") or "").strip()
+    conflict = str(form.get("conflict") or "rename").strip()
     if not uploads:
         return JSONResponse({"error": "업로드할 파일이 없습니다."}, status_code=400)
     destinations: list[Path] = []
@@ -2909,7 +2912,17 @@ async def file_organizer_upload(request: Request) -> JSONResponse:
         _organizer_item(destination, classification, source_kind="upload")
         for destination, classification in zip(destinations, classifications)
     ]
-    return JSONResponse({"items": items, "count": len(items)})
+    response: dict[str, Any] = {"items": items, "count": len(items)}
+    if organize_mode == "both":
+        try:
+            response["storageResults"] = await run_in_threadpool(
+                _store_uploaded_files_in_both_roots, items, conflict,
+            )
+        except (OSError, ValueError) as exc:
+            for destination in destinations:
+                _discard_staged_upload(str(destination))
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(response)
 
 
 def _discard_staged_upload(source_path: str) -> None:
@@ -2995,6 +3008,7 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
         classifications[MariaDBRepository._source_key(source)] = classification
 
     results = execute_batch(pairs, operation=operation, conflict=conflict)
+    _fill_category_skeleton(pairs)
     write_history(results, FILE_LOG_ROOT)
     database_note = "MariaDB 미설정 · 로컬 감사 로그 저장"
     database_url = _active_file_database_url()
@@ -3033,6 +3047,78 @@ def _execute_file_organizer(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "databaseNote": database_note,
     }
+
+
+def _store_uploaded_files_in_both_roots(
+    items: list[dict[str, Any]], conflict: str,
+) -> list[dict[str, Any]]:
+    """분류된 업로드를 기존 구조와 재구성 구조 양쪽에 복사한다."""
+    if conflict not in {"rename", "skip", "overwrite"}:
+        raise ValueError("지원하지 않는 중복 파일 처리 방식입니다.")
+
+    sources = [_safe_organizer_source(str(item.get("sourcePath", ""))) for item in items]
+    existing_classifier = FilenameClassifier(
+        FILE_ORGANIZER_RULES,
+        FILE_SOURCE_ROOT,
+        ["vehicle", "category", "item", "detail"],
+    )
+    existing_classifications = classify_batch(existing_classifier, sources)
+    existing_pairs: list[tuple[Path, Path]] = []
+    for source, classification in zip(sources, existing_classifications):
+        target_dir = classification.target_dir or (
+            FILE_SOURCE_ROOT / FILE_ORGANIZER_RULES.get("unclassified_folder", "_미분류")
+        )
+        existing_pairs.append((source, target_dir / source.name))
+
+    existing_results = execute_batch(
+        existing_pairs, operation="copy", conflict=conflict,
+    )
+    write_history(existing_results, FILE_LOG_ROOT)
+
+    reconstructed = _execute_file_organizer(
+        {
+            "operation": "copy",
+            "conflict": conflict,
+            "items": [
+                {"sourcePath": item["sourcePath"], "targetDir": item.get("targetDir", "")}
+                for item in items
+            ],
+        }
+    )
+    reconstructed_by_source = {
+        str(result.get("source", "")): result
+        for result in reconstructed.get("results", [])
+    }
+
+    storage_results: list[dict[str, Any]] = []
+    for source, existing_result in zip(sources, existing_results):
+        reconstructed_result = reconstructed_by_source.get(str(source), {
+            "destination": "",
+            "status": "error",
+            "message": "재구성 폴더의 처리 결과를 확인하지 못했습니다.",
+        })
+        storage_results.append(
+            {
+                "name": source.name,
+                "sourcePath": str(source),
+                "existing": {
+                    "path": existing_result.destination,
+                    "status": existing_result.status,
+                    "message": existing_result.message,
+                },
+                "reconstructed": {
+                    "path": str(reconstructed_result.get("destination", "")),
+                    "status": str(reconstructed_result.get("status", "error")),
+                    "message": reconstructed_result.get("message"),
+                },
+            }
+        )
+        if (
+            existing_result.status != "error"
+            and reconstructed_result.get("status") == "skipped"
+        ):
+            _discard_staged_upload(str(source))
+    return storage_results
 
 
 async def file_organizer_execute(request: Request) -> JSONResponse:
@@ -3162,6 +3248,162 @@ async def file_organizer_paths(request: Request) -> JSONResponse:
         )
     except (OSError, ValueError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+def _choose_organizer_folder(initial_path: Path, title: str) -> Path | None:
+    """로컬 Windows 폴더 선택 창을 열고 사용자가 고른 경로를 돌려준다."""
+    if os.name != "nt":
+        raise OSError("폴더 선택 창은 Windows 로컬 실행 환경에서만 지원합니다.")
+    # Windows 기본 대화상자를 별도 STA 프로세스에서 실행한다.
+    # 경로와 제목은 코드에 삽입하지 않고 환경변수로 전달한다.
+    script = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$owner = New-Object System.Windows.Forms.Form
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+try {
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+    $owner.Size = New-Object System.Drawing.Size(1, 1)
+    $owner.Opacity = 0
+    # 실제 창 핸들을 표시해야 TopMost가 소유한 폴더 선택 창에도 적용된다.
+    $owner.Show()
+    $owner.BringToFront()
+    $owner.Activate()
+    $dialog.Description = $env:AJIN_PICKER_TITLE
+    $dialog.SelectedPath = $env:AJIN_PICKER_INITIAL
+    $dialog.ShowNewFolderButton = $true
+    $result = $dialog.ShowDialog($owner)
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Write($dialog.SelectedPath)
+    }
+} finally {
+    $dialog.Dispose()
+    $owner.Close()
+    $owner.Dispose()
+}
+"""
+    picker_env = os.environ.copy()
+    picker_env["AJIN_PICKER_TITLE"] = title
+    picker_env["AJIN_PICKER_INITIAL"] = str(
+        initial_path if initial_path.is_dir() else initial_path.parent
+    )
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / (
+        "System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    result = subprocess.run(
+        [str(powershell), "-NoProfile", "-STA", "-EncodedCommand",
+         base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
+        env=picker_env, capture_output=True, encoding="utf-8", errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    if result.returncode:
+        raise OSError("Windows 폴더 선택 창을 열지 못했습니다.")
+    selected = result.stdout.strip()
+    return Path(selected).resolve() if selected else None
+
+
+async def file_organizer_select_folder(request: Request) -> JSONResponse:
+    source_locked, destination_locked = _organizer_path_locks()
+    try:
+        payload = await request.json()
+        which = str(payload.get("which", ""))
+        purpose = str(payload.get("purpose", "configure"))
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    if which not in {"source", "destination"}:
+        return JSONResponse(
+            {"error": "which은 source 또는 destination이어야 합니다."},
+            status_code=400,
+        )
+    if (which == "source" and source_locked) or (
+        which == "destination" and destination_locked
+    ):
+        return JSONResponse(
+            {"error": "ui/.env에서 이 경로가 고정되어 있어 화면에서 바꿀 수 없습니다."},
+            status_code=400,
+        )
+
+    initial_path = FILE_SOURCE_ROOT if which == "source" else FOLDER_ROOT
+    title = (
+        "재구성할 기존 폴더 선택"
+        if which == "source"
+        else (
+            "01에서 재구성한 폴더 선택"
+            if purpose == "existing"
+            else "재구성 폴더를 생성할 위치 선택"
+        )
+    )
+    try:
+        selected = await run_in_threadpool(
+            _choose_organizer_folder, initial_path, title,
+        )
+        if selected is None:
+            return JSONResponse(
+                {
+                    "cancelled": True,
+                    "sourceRoot": str(FILE_SOURCE_ROOT),
+                    "destinationRoot": str(FOLDER_ROOT),
+                    "sourceLocked": source_locked,
+                    "destinationLocked": destination_locked,
+                }
+            )
+        source_root = selected if which == "source" else FILE_SOURCE_ROOT
+        destination_root = selected if which == "destination" else FOLDER_ROOT
+        await run_in_threadpool(
+            _set_organizer_roots, str(source_root), str(destination_root),
+        )
+    except (OSError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    return JSONResponse(
+        {
+            "cancelled": False,
+            "sourceRoot": str(FILE_SOURCE_ROOT),
+            "destinationRoot": str(FOLDER_ROOT),
+            "sourceLocked": False,
+            "destinationLocked": False,
+        }
+    )
+
+
+def _fill_category_skeleton(pairs: list[tuple[Path, Path]]) -> None:
+    """정리한 품번·차종마다 카테고리 여섯 칸을 빈 채로라도 만들어 둔다.
+
+    [왜]
+    파일이 하나도 없는 카테고리는 옮길 것이 없어 폴더도 안 생긴다. 그러면
+    품번마다 보이는 칸이 달라져 "01·04·05 는 왜 없냐" 는 말이 나온다(실측
+    금형팀 폴더에서 그랬다 — 원본의 01·04·05 가 빈 폴더였다).
+
+    현업은 품번을 열었을 때 늘 같은 여섯 칸이 보이기를 기대한다. 그래서
+    실제로 파일이 들어간 품번·차종 아래에는 여섯 칸을 다 만든다. 세부 칸
+    (구조도·패턴도·OP10 …)은 파일이 있을 때만 만든다 — 그것까지 미리
+    만들면 빈 폴더가 수십 개씩 생긴다.
+
+    이미 있으면 그냥 둔다. 실패해도 정리 결과에는 영향을 주지 않는다.
+    """
+    folders = [c.get("folder") for c in FILE_ORGANIZER_RULES.get("categories", [])]
+    folders = [name for name in folders if name]
+    if not folders:
+        return
+    seen: set[Path] = set()
+    for _source, destination in pairs:
+        # destination 은 <정리폴더>/…/<카테고리>/<세부>/<파일> 꼴이다.
+        # 카테고리 칸을 찾아 그 부모(품번·차종 자리)를 집는다.
+        for parent in destination.parents:
+            if parent.name in folders:
+                seen.add(parent.parent)
+                break
+    for base in seen:
+        for name in folders:
+            try:
+                (base / name).mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
 
 
 async def file_organizer_reveal(request: Request) -> JSONResponse:
@@ -4476,12 +4718,21 @@ app = Starlette(
         Route("/api/file-organizer/database", file_organizer_database, methods=["GET", "POST"]),
         Route("/api/file-organizer/folder-order", file_organizer_folder_order, methods=["GET", "POST"]),
         Route("/api/file-organizer/paths", file_organizer_paths, methods=["GET", "POST"]),
+        Route("/api/file-organizer/select-folder", file_organizer_select_folder, methods=["POST"]),
         Route("/api/file-organizer/reveal", file_organizer_reveal, methods=["POST"]),
     ]
 )
 app.add_middleware(
     CORSMiddleware,
+    # 사내망의 다른 PC 에서도 열 수 있게 사설 대역을 허용한다.
+    # 와일드카드(*) 대신 사설 IP 만 받는다 — 바깥에서 오는 요청은 막힌다.
     allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origin_regex=(
+        r"http://(localhost|127\.0\.0\.1"
+        r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        r"|192\.168\.\d{1,3}\.\d{1,3}"
+        r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}):3000"
+    ),
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
     # 시트 생성 결과 요약은 헤더로 오므로 브라우저가 읽을 수 있게 열어 준다.
@@ -4490,4 +4741,6 @@ app.add_middleware(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    # 0.0.0.0 = 이 PC 의 모든 랜카드에서 듣는다. 판독·CATIA·파일은 전부
+    # 이 PC 에서 돌고, 다른 PC 는 화면만 그린다.
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
