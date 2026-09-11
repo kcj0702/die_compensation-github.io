@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>보정치 생성 실행 해설</title>
+<style>
+  :root{
+    --ink:#1B2A41; --body:#5A6B7B; --mute:#8895A5;
+    --line:#D8DEE6; --tint:#F3F5F8; --page:#EEF1F4;
+    --accent:#E85D26; --teal:#00A6A6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--ink);
+       font-family:"맑은 고딕","Malgun Gothic",system-ui,sans-serif}
+  .wrap{max-width:1360px;margin:0 auto;padding:26px 22px 60px}
+
+  header{display:flex;align-items:flex-end;justify-content:space-between;
+         gap:20px;flex-wrap:wrap;margin-bottom:18px}
+  .eyebrow{font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent)}
+  h1{margin:4px 0 0;font-size:27px;letter-spacing:-.3px}
+  .sub{margin:6px 0 0;font-size:13px;color:var(--body)}
+  .facts{display:flex;gap:22px;font-size:12px;color:var(--body)}
+  .facts b{display:block;font-size:19px;color:var(--ink);
+           font-variant-numeric:tabular-nums}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}
+  @media(max-width:1040px){.grid{grid-template-columns:1fr}}
+
+  .stage{position:relative;background:#0d1620;border-radius:10px;overflow:hidden;
+         box-shadow:0 6px 24px rgba(27,42,65,.16)}
+  video{display:block;width:100%;height:auto;background:#0d1620}
+
+  /* 배속 표시 — 원본에서 얼마나 줄였는지 숨기지 않는다 */
+  .rate{position:absolute;top:10px;right:12px;padding:4px 9px;border-radius:5px;
+        background:rgba(10,17,26,.78);color:#CFE0EE;font-size:11.5px;
+        font-variant-numeric:tabular-nums;pointer-events:none;letter-spacing:.2px}
+
+  /* 자막 */
+  .caption{position:absolute;z-index:1;left:0;right:0;bottom:0;padding:0 4% 18px;
+           text-align:center;pointer-events:none;
+           background:linear-gradient(to top,rgba(8,14,22,.86) 0%,rgba(8,14,22,.66) 55%,transparent 100%)}
+  .caption b{display:inline-block;max-width:92%;padding:7px 15px;border-radius:6px;
+             background:rgba(10,17,26,.9);color:#fff;font-size:17px;line-height:1.45}
+  .caption em{display:block;margin:7px auto 0;max-width:86%;font-style:normal;
+              font-size:12.5px;line-height:1.5;color:#BFD0DE}
+  .caption.off{opacity:0}
+
+  /* 짚어주기 표시 */
+  .ping{position:absolute;z-index:2;width:70px;height:70px;margin:-35px 0 0 -35px;
+        border:3px solid var(--accent);border-radius:50%;opacity:0;
+        pointer-events:none;animation:ping 1.5s ease-out infinite}
+  .ping.on{opacity:1}
+  @keyframes ping{0%{transform:scale(.55);opacity:.95}70%{transform:scale(1.25);opacity:.12}100%{transform:scale(1.3);opacity:0}}
+  @media(prefers-reduced-motion:reduce){.ping{animation:none}}
+
+  /* 조작부 */
+  .bar{display:flex;align-items:center;gap:12px;padding:11px 13px;background:#12202e}
+  .bar button{border:1px solid rgba(255,255,255,.22);border-radius:6px;
+              background:rgba(255,255,255,.08);color:#fff;font:inherit;font-size:12px;
+              padding:6px 13px;cursor:pointer}
+  .bar button:hover{border-color:var(--accent)}
+  .bar button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .bar .time{color:#9FB2C4;font-size:11.5px;font-variant-numeric:tabular-nums;min-width:82px}
+  .track{position:relative;flex:1;height:7px;border-radius:4px;
+         background:rgba(255,255,255,.16);cursor:pointer}
+  .played{position:absolute;left:0;top:0;bottom:0;border-radius:4px;background:var(--accent)}
+  .tick{position:absolute;top:-4px;width:2px;height:15px;background:rgba(255,255,255,.5)}
+  .tick.now{background:#fff;width:3px}
+
+  /* 목차 */
+  .list{background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .list h2{margin:0;padding:13px 15px;border-bottom:1px solid var(--line);
+           font-size:13px;letter-spacing:.2px}
+  .list h2 span{float:right;color:var(--mute);font-weight:400;font-size:11px}
+  .list ol{margin:0;padding:0;list-style:none;max-height:584px;overflow-y:auto}
+  .list li{border-bottom:1px solid #EDF0F4}
+  .list button{display:grid;grid-template-columns:44px 1fr;gap:9px;width:100%;
+               padding:10px 14px;border:0;background:#fff;text-align:left;
+               font:inherit;cursor:pointer}
+  .list button:hover{background:var(--tint)}
+  .list li.on button{background:#FFF3ED}
+  .list li.on strong{color:var(--accent)}
+  .list time{color:var(--mute);font-size:11px;font-variant-numeric:tabular-nums;padding-top:2px}
+  .list strong{display:block;font-size:12.5px;line-height:1.45;font-weight:700}
+  .list small{display:block;margin-top:4px;color:var(--body);font-size:11px;line-height:1.5}
+  .list i{display:inline-block;margin-top:5px;padding:1px 5px;border-radius:3px;
+          background:var(--tint);color:var(--mute);font-style:normal;font-size:10px;
+          font-variant-numeric:tabular-nums}
+
+  footer{margin-top:16px;padding-top:13px;border-top:1px solid var(--line);
+         color:var(--mute);font-size:11.5px;line-height:1.7}
+  footer code{background:var(--tint);padding:1px 5px;border-radius:3px;color:var(--body)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <div class="eyebrow">AJIN · 금형 보정 시트 자동 산출 시스템</div>
+      <h1>보정치 생성 — 실행 해설</h1>
+      <p class="sub">스캔 한 장에서 보정 시트와 3D 검토까지. 무엇을 누르고 그때 어떤 코드가 도는지 자막으로 따라갑니다.</p>
+    </div>
+    <div class="facts">
+      <div><b id="fTotal">–</b>편집 길이</div>
+      <div><b>8:26</b>원본 길이</div>
+      <div><b>75</b>보정 포인트</div>
+      <div><b>2.800</b>최대 보정량 mm</div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div>
+      <div class="stage">
+        <video id="v" playsinline preload="metadata" src="__VIDEO__"></video>
+        <div class="rate" id="rate"></div>
+        <div class="ping" id="ping"></div>
+        <div class="caption off" id="cap"><b id="capText"></b><em id="capNote"></em></div>
+      </div>
+      <div class="bar">
+        <button id="play">재생</button>
+        <button id="prev">이전</button>
+        <button id="next">다음</button>
+        <span class="time" id="time">0:00 / 0:00</span>
+        <div class="track" id="track"><div class="played" id="played"></div></div>
+        <button id="subs">자막 끄기</button>
+      </div>
+    </div>
+
+    <aside class="list">
+      <h2>진행 순서 <span id="count"></span></h2>
+      <ol id="chapters"></ol>
+    </aside>
+  </div>
+
+  <footer>
+    원본 8분 26초를 구간별로 다르게 줄여 2분 42초로 맞췄습니다. 손이 멈춘 구간은 최대 9.5배까지,
+    결과가 뜨는 구간은 1.3배 정도만 빠르게 했고, 지금 몇 배속인지는 화면 오른쪽 위에 표시됩니다.
+    같은 폴더의 <code>보정치생성_자막포함.mp4</code> 는 자막이 영상에 구워져 있어 어디서든 그대로 재생됩니다.
+  </footer>
+</div>
+
+<script>
+const CUES = __CUES__;
+
+const v = document.getElementById('v');
+const cap = document.getElementById('cap');
+const capText = document.getElementById('capText');
+const capNote = document.getElementById('capNote');
+const rate = document.getElementById('rate');
+const ping = document.getElementById('ping');
+const list = document.getElementById('chapters');
+const played = document.getElementById('played');
+const track = document.getElementById('track');
+const timeEl = document.getElementById('time');
+const playBtn = document.getElementById('play');
+let showSubs = true, current = -1;
+
+const clock = (t) => Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+
+/* 목차 — 누르면 그 대목으로 건너뛴다 */
+CUES.forEach((cue) => {
+  const li = document.createElement('li');
+  const b = document.createElement('button');
+  b.innerHTML = '<time></time><span><strong></strong><small></small><i></i></span>';
+  b.querySelector('time').textContent = clock(cue.start);
+  b.querySelector('strong').textContent = cue.text;
+  b.querySelector('small').textContent = cue.note;
+  b.querySelector('i').textContent =
+    '원본 ' + clock(cue.srcStart) + '–' + clock(cue.srcEnd) + ' · ' + cue.speed.toFixed(1) + '배속';
+  b.onclick = () => { v.currentTime = cue.start + 0.05; v.play(); };
+  li.appendChild(b);
+  list.appendChild(li);
+});
+document.getElementById('count').textContent = CUES.length + '단계';
+
+/* 진행 막대에 대목마다 눈금 */
+v.addEventListener('loadedmetadata', () => {
+  document.getElementById('fTotal').textContent = clock(v.duration);
+  CUES.forEach((cue) => {
+    const t = document.createElement('i');
+    t.className = 'tick';
+    t.style.left = (cue.start / v.duration * 100) + '%';
+    track.appendChild(t);
+  });
+  paint();
+});
+
+function indexAt(t) {
+  for (let i = 0; i < CUES.length; i += 1) {
+    if (t >= CUES[i].start && t < CUES[i].end) return i;
+  }
+  return -1;
+}
+
+function paint() {
+  const t = v.currentTime || 0;
+  const d = v.duration || 1;
+  played.style.width = (t / d * 100) + '%';
+  timeEl.textContent = clock(t) + ' / ' + clock(d);
+
+  const i = indexAt(t);
+  if (i !== current) {
+    current = i;
+    [...list.children].forEach((li, k) => li.classList.toggle('on', k === i));
+    [...track.querySelectorAll('.tick')].forEach((el, k) => el.classList.toggle('now', k === i));
+    if (i >= 0) {
+      capText.textContent = CUES[i].text;
+      capNote.textContent = CUES[i].note;
+      rate.textContent = CUES[i].speed.toFixed(1) + '배속 · 원본 ' + clock(CUES[i].srcStart);
+      /* 짚어줄 자리가 있으면 동그라미를 띄운다 */
+      const m = CUES[i].mark;
+      if (m && m.x != null) {
+        ping.style.left = m.x + '%';
+        ping.style.top = m.y + '%';
+        ping.classList.add('on');
+      } else ping.classList.remove('on');
+    } else {
+      ping.classList.remove('on');
+      rate.textContent = '';
+    }
+    cap.classList.toggle('off', i < 0 || !showSubs);
+  }
+  requestAnimationFrame(paint);
+}
+
+playBtn.onclick = () => (v.paused ? v.play() : v.pause());
+v.addEventListener('play', () => playBtn.textContent = '일시정지');
+v.addEventListener('pause', () => playBtn.textContent = '재생');
+document.getElementById('next').onclick = () => {
+  const n = CUES.find((c) => c.start > v.currentTime + 0.15);
+  if (n) { v.currentTime = n.start + 0.05; }
+};
+document.getElementById('prev').onclick = () => {
+  const before = CUES.filter((c) => c.start < v.currentTime - 0.6);
+  v.currentTime = before.length ? before[before.length - 1].start + 0.05 : 0;
+};
+document.getElementById('subs').onclick = (e) => {
+  showSubs = !showSubs;
+  e.target.textContent = showSubs ? '자막 끄기' : '자막 켜기';
+  cap.classList.toggle('off', !showSubs || current < 0);
+};
+track.onclick = (e) => {
+  const r = track.getBoundingClientRect();
+  v.currentTime = (e.clientX - r.left) / r.width * v.duration;
+};
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); playBtn.click(); }
+  if (e.code === 'ArrowRight') document.getElementById('next').click();
+  if (e.code === 'ArrowLeft') document.getElementById('prev').click();
+});
+</script>
+</body>
+</html>
