@@ -184,11 +184,19 @@ button { cursor: pointer; }
 .organizer-flow-track { display:grid; grid-template-columns:minmax(250px,1fr) minmax(110px,.32fr) minmax(250px,1fr); align-items:center; gap:13px; }
 .organizer-flow-node { min-width:0; min-height:100px; display:flex; align-items:center; gap:12px; padding:15px; border:1px solid #d8e1e4; border-radius:11px; background:#fff; box-shadow:0 6px 16px rgba(27,45,58,.045); }
 .organizer-flow-node__icon { width:43px; height:43px; display:grid; place-items:center; flex:0 0 auto; border-radius:10px; color:#287586; background:#eaf4f6; }
+.organizer-flow-node__reveal { padding:0; border:0; cursor:pointer; transition:transform .15s ease, box-shadow .15s ease, background-color .15s ease; }
+.organizer-flow-node__reveal:hover { transform:translateY(-1px); box-shadow:0 4px 10px rgba(40,117,134,.16); background:#dfeff2; }
+.organizer-flow-node--result .organizer-flow-node__reveal:hover { background:#dcefe9; }
+.organizer-flow-node__reveal:focus-visible, .organizer-flow-node__path:focus-visible { outline:2px solid #287586; outline-offset:2px; }
+.organizer-flow-node__reveal:disabled, .organizer-flow-node__path:disabled { cursor:default; opacity:.55; }
 .organizer-flow-node--result { border-color:#cfdfdb; background:#fbfefd; }
 .organizer-flow-node--result .organizer-flow-node__icon { color:#1d7b65; background:#e8f5f1; }
 .organizer-flow-node__text { min-width:0; display:flex; flex:1; flex-direction:column; gap:3px; }
 .organizer-flow-node__text strong { color:#263744; font-size:14px; }
 .organizer-flow-node__text code { overflow:hidden; color:#8a949a; font-family:inherit; font-size:11px; line-height:1.45; text-overflow:ellipsis; white-space:nowrap; }
+.organizer-flow-node__path { min-width:0; padding:0; overflow:hidden; border:0; text-align:left; background:transparent; cursor:pointer; }
+.organizer-flow-node__path code { display:block; text-decoration:underline; text-decoration-color:transparent; text-underline-offset:2px; transition:color .15s ease, text-decoration-color .15s ease; }
+.organizer-flow-node__path:hover code { color:#287586; text-decoration-color:currentColor; }
 .organizer-flow-open { min-width:34px; height:34px; display:grid; place-items:center; flex:0 0 auto; border:1px solid #dde3e5; border-radius:7px; color:#68777e; background:#fff; }
 .organizer-flow-open:hover { color:#246d7c; border-color:#b9d0d5; background:#f3f8f9; }
 .organizer-flow-open:disabled { opacity:.45; cursor:not-allowed; }
