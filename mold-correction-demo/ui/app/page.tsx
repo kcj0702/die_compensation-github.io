@@ -6,7 +6,7 @@
 import {
   Activity, AlertTriangle, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCircle2, ChevronDown, ChevronRight,
   Circle, CircleHelp, Copy, Crosshair, Database, Eye, EyeOff, File, FileSpreadsheet, Files, Folder, FolderOpen, Gauge, HardDrive, Image as ImageIcon,
-  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Play, RefreshCw, Settings2,
+  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Play, RefreshCw,
   Printer, Server, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -2259,15 +2259,15 @@ function FileOrganizerPage() {
           <div className="organizer-flow-lane__label"><b>01</b><span><strong>폴더 재구성</strong></span></div>
           <div className="organizer-flow-track">
             <div className="organizer-flow-node organizer-flow-node--source">
-              <span className="organizer-flow-node__icon"><Server size={22} /></span>
-              <span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span>
+              <button type="button" className="organizer-flow-node__icon organizer-flow-node__reveal" onClick={() => void openInExplorer('source')} disabled={!status?.sourceAvailable} title="기존 폴더 열기" aria-label="기존 폴더 탐색기에서 열기"><Server size={22} /></button>
+              <span className="organizer-flow-node__text"><strong>기존 폴더</strong><button type="button" className="organizer-flow-node__path" onClick={() => void openInExplorer('source')} disabled={!status?.sourceAvailable} title={`${status?.sourceRoot || '경로 확인 중'} · 클릭하여 폴더 열기`}><code>{status?.sourceRoot || '경로 확인 중'}</code></button></span>
               <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('source')} disabled={busy || pathsInfo?.sourceLocked || selectingRoot !== null} title="정리할 기존 폴더 선택·변경"><FolderOpen size={15} /><span>{selectingRoot === 'source' ? '선택 중…' : '폴더 선택'}</span></button>
             </div>
             <div className="organizer-flow-arrow organizer-flow-arrow--copy" aria-hidden="true"><i /></div>
             <div className="organizer-flow-node organizer-flow-node--result">
-              <span className="organizer-flow-node__icon"><HardDrive size={22} /></span>
-              <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span>
-              <span className="organizer-flow-node__actions"><button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--settings" onClick={() => void chooseOrganizerFolder('destination')} disabled={busy || pathsInfo?.destinationLocked || selectingRoot !== null} title="재구성 폴더 경로 설정"><Settings2 size={14} /><span>{selectingRoot === 'destination' ? '선택 중…' : '경로 설정'}</span></button></span>
+              <button type="button" className="organizer-flow-node__icon organizer-flow-node__reveal" onClick={() => void openInExplorer('destination')} disabled={!status?.destinationAvailable} title="재구성 폴더 열기" aria-label="재구성 폴더 탐색기에서 열기"><HardDrive size={22} /></button>
+              <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><button type="button" className="organizer-flow-node__path" onClick={() => void openInExplorer('destination')} disabled={!status?.destinationAvailable} title={`${status?.destinationRoot || '경로 확인 중'} · 클릭하여 폴더 열기`}><code>{status?.destinationRoot || '경로 확인 중'}</code></button></span>
+              <span className="organizer-flow-node__actions"><button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('destination')} disabled={busy || pathsInfo?.destinationLocked || selectingRoot !== null} title="재구성 폴더 선택·변경"><FolderOpen size={14} /><span>{selectingRoot === 'destination' ? '선택 중…' : '폴더 선택'}</span></button></span>
             </div>
           </div>
           <div className="organizer-flow-lane-footer">
@@ -2314,13 +2314,13 @@ function FileOrganizerPage() {
             <div className="organizer-split-arrow" aria-hidden="true"><i /><b /><em /></div>
             <div className="organizer-flow-branches">
               <div className="organizer-flow-node organizer-flow-node--source organizer-flow-node--branch">
-                <span className="organizer-flow-node__icon"><Server size={20} /></span>
-                <span className="organizer-flow-node__text"><strong>기존 폴더</strong><code title={status?.sourceRoot}>{status?.sourceRoot || '경로 확인 중'}</code></span>
+                <button type="button" className="organizer-flow-node__icon organizer-flow-node__reveal" onClick={() => void openInExplorer('source')} disabled={!status?.sourceAvailable} title="기존 폴더 열기" aria-label="기존 폴더 탐색기에서 열기"><Server size={20} /></button>
+                <span className="organizer-flow-node__text"><strong>기존 폴더</strong><button type="button" className="organizer-flow-node__path" onClick={() => void openInExplorer('source')} disabled={!status?.sourceAvailable} title={`${status?.sourceRoot || '경로 확인 중'} · 클릭하여 폴더 열기`}><code>{status?.sourceRoot || '경로 확인 중'}</code></button></span>
                 <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('source')} disabled={busy || pathsInfo?.sourceLocked || selectingRoot !== null} title="새 파일을 함께 저장할 기존 폴더 선택"><FolderOpen size={14} /><span>{selectingRoot === 'source' ? '선택 중…' : '폴더 선택'}</span></button>
               </div>
               <div className="organizer-flow-node organizer-flow-node--result organizer-flow-node--branch">
-                <span className="organizer-flow-node__icon"><HardDrive size={20} /></span>
-                <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><code title={status?.destinationRoot}>{status?.destinationRoot || '경로 확인 중'}</code></span>
+                <button type="button" className="organizer-flow-node__icon organizer-flow-node__reveal" onClick={() => void openInExplorer('destination')} disabled={!status?.destinationAvailable} title="재구성 폴더 열기" aria-label="재구성 폴더 탐색기에서 열기"><HardDrive size={20} /></button>
+                <span className="organizer-flow-node__text"><strong>재구성 폴더</strong><button type="button" className="organizer-flow-node__path" onClick={() => void openInExplorer('destination')} disabled={!status?.destinationAvailable} title={`${status?.destinationRoot || '경로 확인 중'} · 클릭하여 폴더 열기`}><code>{status?.destinationRoot || '경로 확인 중'}</code></button></span>
                 <button type="button" className="organizer-flow-open organizer-flow-open--labeled organizer-flow-open--select" onClick={() => void chooseOrganizerFolder('destination', 'existing')} disabled={busy || pathsInfo?.destinationLocked || selectingRoot !== null} title="01에서 재구성한 폴더 선택"><FolderOpen size={14} /><span>{selectingRoot === 'destination' ? '선택 중…' : '폴더 선택'}</span></button>
               </div>
             </div>
