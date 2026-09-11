@@ -526,6 +526,61 @@ class UiBackendFileOrganizerTest(unittest.TestCase):
             self.assertIn("로컬 감사 로그", response["databaseNote"])
             self.assertEqual(len(list(log_root.glob("*.jsonl"))), 1)
 
+    def test_rebuild_clears_previous_output_before_reconstructing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source_root = root / "incoming"
+            destination_root = root / "organized"
+            log_root = root / "logs"
+            staging_root = root / "staging"
+            source_root.mkdir()
+            destination_root.mkdir()
+            staging_root.mkdir()
+            source = source_root / "64XX2-DR000 제품데이터.png"
+            source.write_bytes(b"latest")
+            stale = destination_root / "old" / "stale.txt"
+            stale.parent.mkdir()
+            stale.write_bytes(b"stale")
+
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ), patch.object(backend_server, "FILE_LOG_ROOT", log_root), patch.object(
+                backend_server, "FILE_STAGING_ROOT", staging_root
+            ), patch.object(backend_server, "_active_file_database_url", return_value=""), patch.object(
+                backend_server, "_active_folder_order",
+                return_value=["item", "vehicle", "category", "detail"],
+            ):
+                payload = {
+                    "operation": "copy",
+                    "conflict": "overwrite",
+                    "rebuild": True,
+                    "items": [{"sourcePath": str(source)}],
+                }
+                first = backend_server._execute_file_organizer(payload)
+                second = backend_server._execute_file_organizer(payload)
+
+            self.assertFalse(stale.exists())
+            self.assertTrue(source.exists(), "재구성해도 원본은 보존해야 한다")
+            copied_files = [path for path in destination_root.rglob("*") if path.is_file()]
+            self.assertEqual(len(copied_files), 1)
+            self.assertEqual(copied_files[0].read_bytes(), b"latest")
+            self.assertNotIn(" (1)", copied_files[0].name)
+            self.assertTrue(first["rebuild"])
+            self.assertGreaterEqual(first["removedEntries"], 1)
+            self.assertGreaterEqual(second["removedEntries"], 1)
+
+    def test_rebuild_rejects_overlapping_source_and_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            source_root = Path(temp) / "incoming"
+            destination_root = source_root / "organized"
+            source_root.mkdir()
+            destination_root.mkdir()
+            with patch.object(backend_server, "FILE_SOURCE_ROOT", source_root), patch.object(
+                backend_server, "FOLDER_ROOT", destination_root
+            ):
+                with self.assertRaisesRegex(ValueError, "서로 분리된 경로"):
+                    backend_server._clear_reconstructed_root()
+
     def test_uploaded_file_is_stored_in_existing_and_reconstructed_roots(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
