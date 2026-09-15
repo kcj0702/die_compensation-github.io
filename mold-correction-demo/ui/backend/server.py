@@ -112,6 +112,7 @@ from cad_import.mesh_io import (  # noqa: E402
     split_symmetric_pair, to_web_mesh,
 )
 from cad_import.overlay import fit_view as fit_mesh_view, refine_fit_by_silhouette, to_pixels as cad_to_pixels  # noqa: E402
+from cad_import.pose_search import FALLBACK_OUTLINE_IOU, cached_search_pose, pose_to_view  # noqa: E402
 from cad_import.catia_management_geometry import extract_management_boundaries, management_source_key  # noqa: E402
 from cad_import.catia_capture import capture_product_image as capture_catia_product_image  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
@@ -1221,7 +1222,8 @@ def management_overlay_for(analysis_id: str, catpart_path: Any = None, alignment
         _log(f"boundaries {_time.time() - started:.1f}s groups={len(extracted)}")
 
         # 같은 분석·같은 정합 CAD면 관리 CATPart가 바뀌어도 자세는 같다. 정합(2~3초)을 다시 하지 않는다.
-        fit = _management_fit_cache.get(alignment_key)
+        cached_fit = _management_fit_cache.get(alignment_key)
+        fit, pose_m = cached_fit if cached_fit is not None else (None, None)
         if fit is None:
             fit_started = _time.time()
             mesh = load_any_mesh(alignment_path, cache_dir=_cad_cache_dir())
@@ -1239,7 +1241,20 @@ def management_overlay_for(analysis_id: str, catpart_path: Any = None, alignment
             coarse_iou = float(fit.iou)
             fit = refine_fit_by_silhouette(fit, fit_vertices, fit_faces, scan_mask)
             _log(f"refine outline iou {coarse_iou:.4f} -> {fit.iou:.4f} mm_per_px={fit.mm_per_px:.4f}")
-            _management_fit_cache[alignment_key] = fit
+            if float(fit.iou) < FALLBACK_OUTLINE_IOU:
+                # 축 정면 어느 방향에도 안 맞으면(등각 캡처 등) 회전 3자유도 전체를 탐색한다. 90초 안팎, 디스크 캐시.
+                # 찾은 회전은 정점에 미리 적용하고(Z축 정면 ViewFit), BOUNDARY 점도 같은 행렬로 돌려 투영한다.
+                best_3d = None
+                for vertices, faces in mesh_parts:
+                    score, pose = cached_search_pose(vertices, faces, scan_mask, PROJECT_DIR / "data" / ".management_overlay_cache", log=_log)
+                    if best_3d is None or score > best_3d[0]:
+                        best_3d = (score, pose, vertices, faces)
+                if best_3d is not None and best_3d[0] > float(fit.iou):
+                    fit3d, rotated, matrix = pose_to_view(best_3d[1], best_3d[2], best_3d[0])
+                    fit3d = refine_fit_by_silhouette(fit3d, rotated, best_3d[3], scan_mask)
+                    _log(f"3D pose fallback: outline iou {fit.iou:.4f} -> {fit3d.iou:.4f}")
+                    fit, pose_m = fit3d, matrix
+            _management_fit_cache[alignment_key] = (fit, pose_m)
             while len(_management_fit_cache) > _MANAGEMENT_OVERLAY_CACHE_MAX:
                 _management_fit_cache.popitem(last=False)
             _log(f"fit {_time.time() - fit_started:.1f}s iou={fit.iou:.4f} detail={fit.detail_iou:.4f}")
@@ -1258,7 +1273,7 @@ def management_overlay_for(analysis_id: str, catpart_path: Any = None, alignment
                 points_3d = np.asarray(polyline, dtype=np.float64)
                 if len(points_3d) < 3:
                     continue
-                xs, ys = cad_to_pixels(points_3d, fit)
+                xs, ys = cad_to_pixels(points_3d @ pose_m.T if pose_m is not None else points_3d, fit)
                 points_px = np.stack([xs, ys], axis=1).astype(np.int32)
                 if points_px[:, 0].max() < 0 or points_px[:, 0].min() >= width or points_px[:, 1].max() < 0 or points_px[:, 1].min() >= height:
                     continue
@@ -4244,6 +4259,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     # LH·RH 가 한 파일에 들어 있으면 갈라서 **각각** 맞춰 보고 잘 맞는
     # 쪽을 쓴다. 스캔은 한 짝뿐이라 두 짝을 합친 실루엣과는 맞지 않는다
     # (실측 71XX1: 통째로 30% -> 한 짝만 쓰면 아래 hit_rate 참고).
+    all_vertices, all_faces = vertices, faces
     best = None
     for half in ov.split_sides(vertices, faces):
         half_vertices, half_faces, cut_axis, cut_mid, cut_side = half
@@ -4278,6 +4294,31 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     #   64XX2 99.7 -> 99.7 · 67XX6 88.0 -> 99.0 · 71XX2 67.7 -> 90.0
     fit = ov.polish_by_hit_rate(
         fit, vertices, faces, analysis["part_mask"], shifted)
+
+    # 축 정면 6방향 어디에도 얹히지 않으면(등각으로 찍힌 스캔) 회전 3자유도 전체를 탐색한다.
+    # 찾은 회전은 정점에 미리 적용해 Z축 정면 ViewFit 으로 쓰고, unproject 결과는 pose_m 으로 되돌린다.
+    pose_m = None
+    if fit.hit_rate < ov.MIN_HIT_RATE:
+        try:
+            score, pose = cached_search_pose(all_vertices, all_faces, _analysis_silhouette(analysis),
+                                             PROJECT_DIR / "data" / ".management_overlay_cache",
+                                             log=lambda message: print(f"[cad] {message}", file=sys.stderr, flush=True))
+            fit3d, rotated, matrix = pose_to_view(pose, all_vertices, score)
+            piece3d = trimesh.Trimesh(vertices=rotated, faces=all_faces, process=False)
+            fit3d = ov.polish_by_hit_rate(fit3d, rotated, all_faces, analysis["part_mask"], piece3d)
+            print(f"[cad] 3D pose fallback: hit_rate {fit.hit_rate} -> {fit3d.hit_rate} (outline iou {score:.4f})", file=sys.stderr, flush=True)
+            if fit3d.hit_rate > fit.hit_rate:
+                fit, vertices, faces, shifted, pose_m = fit3d, rotated, all_faces, piece3d, matrix
+                cut_axis, cut_mid, cut_side = -1, 0.0, 0
+        except Exception as exc:
+            print(f"[cad] 3D pose fallback FAIL: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    def _unproject(points_px: list) -> list:
+        """표면에 얹은 3D 점을 원래 부품 좌표로 돌려준다(3D 자세일 때만 회전이 들어간다)."""
+        hits = ov.unproject(points_px, vertices, faces, fit, shifted)
+        if pose_m is None:
+            return hits
+        return [None if hit is None else (np.asarray(hit, dtype=float) @ pose_m).tolist() for hit in hits]
 
     # 작업자가 손으로 맞춘 값이 있으면 그대로 따른다. 자동 정합은
     # 실루엣만 보므로 몇 퍼센트가 모자랄 수 있는데, 그때 사람이 조금
@@ -4355,8 +4396,8 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         pts = line["points"]
         if len(pts) < 2:
             continue
-        placed = ov.unproject(_densify(
-            pts, spline_segments=line.get("splineSegments")), vertices, faces, fit, shifted)
+        placed = _unproject(_densify(
+            pts, spline_segments=line.get("splineSegments")))
         kept = [spot for spot in placed if spot is not None]
         dropped_line_points += len(placed) - len(kept)
         if len(kept) < 2:
@@ -4412,8 +4453,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
         wanted.append(point)
 
     # 광선은 한 번에 쏘는 게 훨씬 빠르다
-    placed = ov.unproject([[p["xPx"], p["yPx"]] for p in wanted],
-                          vertices, faces, fit, shifted)
+    placed = _unproject([[p["xPx"], p["yPx"]] for p in wanted])
     points = [
         {"id": point.get("id"), "position": spot,
          "value": round(float(point.get("value", 0.0)), 3)}
@@ -4488,7 +4528,7 @@ def cad_overlay_for(cad_id: str, analysis_id: str,
     # 영역 테두리를 표면 위로 옮긴다 — 제로라인과 같은 방식이다.
     zero_areas: list = []
     for ring in area_outlines:
-        placed = ov.unproject(_densify(ring), vertices, faces, fit, shifted)
+        placed = _unproject(_densify(ring))
         runs, current = [], []
         for spot in placed:
             if spot is None:
