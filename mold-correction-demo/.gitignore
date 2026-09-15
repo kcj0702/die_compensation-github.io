@@ -49,3 +49,9 @@ ui/.env
 ui/backend/.label_cache.json
 cad_import/_parsed/
 zero_line_detection/.lab_cache/
+
+# 관리면 엔진: 등록된 관리 CATPart 원본과 CATIA 추출 캐시(IGES·manifest·STEP)는 회사 자료 — 커밋 금지.
+data/management_surface/*
+data/.management_overlay_cache/
+# 검토용 산출물(CLAUDE.md §0-3)은 로컬에서만 본다.
+outputs/
