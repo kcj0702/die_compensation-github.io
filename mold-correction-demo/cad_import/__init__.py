@@ -21,6 +21,11 @@ from cad_import.step_reader import (
     find_cylinders, find_planes, is_step_file, load_step,
     read_step_full, tessellate,
 )
+from cad_import.management_surface import (
+    ManagementGroup, ManagementResult, ManagementSurface,
+    apply_management_value, calculate_management_result, discover_management_groups,
+    fit_with_cad_viewer, parse_management_value, project_boundary,
+)
 
 __all__ = [
     "MESH_SUFFIXES", "MeshBounds", "MeshSummary",
@@ -28,4 +33,7 @@ __all__ = [
     "STEP_SUFFIXES", "Cylinder", "PlaneFace",
     "find_cylinders", "find_planes", "is_step_file", "load_step",
     "read_step_full", "tessellate",
+    "ManagementGroup", "ManagementResult", "ManagementSurface",
+    "apply_management_value", "calculate_management_result", "discover_management_groups",
+    "fit_with_cad_viewer", "parse_management_value", "project_boundary",
 ]

@@ -970,8 +970,88 @@ def polish_by_hit_rate(fit: "ViewFit", vertices, faces, part_mask, mesh,
     return best
 
 
+# 실루엣 겹침으로 다듬을 때 흔들어 볼 값들. fit_view 의 배율 단계(0.88/1.0/1.12,
+# 2차 절반)가 거칠어 몇 % 배율 오차가 남는다 — 관리면 BOUNDARY 처럼 부품
+# 가장자리에 붙은 도형은 그 오차가 그대로 "바깥으로 늘어난" 띠로 보인다.
+SILHOUETTE_STEPS = (
+    ("scale", (0.96, 0.98, 0.99, 0.995, 1.005, 1.01, 1.02, 1.04)),
+    ("dx", (-12.0, -6.0, -3.0, -1.0, 1.0, 3.0, 6.0, 12.0)),
+    ("dy", (-12.0, -6.0, -3.0, -1.0, 1.0, 3.0, 6.0, 12.0)),
+    ("angle_deg", (-1.0, -0.5, -0.25, 0.25, 0.5, 1.0)),
+)
+SILHOUETTE_ROUNDS = 4
+SILHOUETTE_MAX_FACES = 40_000
+
+
+def _silhouette_raster(vertices: np.ndarray, faces: np.ndarray, fit: "ViewFit",
+                       shape) -> np.ndarray:
+    """자세대로 투영한 부품의 채워진 실루엣(전체 해상도)."""
+    import cv2
+    height, width = int(shape[0]), int(shape[1])
+    xs, ys = to_pixels(vertices, fit)
+    points = np.stack([xs, ys], axis=1)
+    canvas = np.zeros((height, width), np.uint8)
+    triangles = points[faces].astype(np.int32)
+    cv2.fillPoly(canvas, list(triangles), 255)
+    # 면을 솎아 그렸으면 생긴 잔구멍을 메운다.
+    canvas = cv2.morphologyEx(canvas, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    return canvas
+
+
+def _outer_fill(binary: np.ndarray) -> np.ndarray:
+    """가장 큰 바깥 윤곽을 채운다. 구멍·솎은 면의 잔구멍이 점수를 흔들지 않게 바깥선만 비교한다."""
+    import cv2
+    contours, _ = cv2.findContours((np.asarray(binary) > 0).astype(np.uint8),
+                                   cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filled = np.zeros(binary.shape, np.uint8)
+    if contours:
+        cv2.fillPoly(filled, [max(contours, key=cv2.contourArea)], 255)
+    return filled
+
+
+def silhouette_iou(vertices: np.ndarray, faces: np.ndarray, fit: "ViewFit",
+                   part_mask: np.ndarray) -> float:
+    """바깥 윤곽끼리의 겹침. 실측: fit_view 직후 64XX2 0.960 · 71XX2 0.963 → 다듬은 뒤 0.969 · 0.982."""
+    mask = _outer_fill(part_mask) > 0
+    raster = _outer_fill(_silhouette_raster(vertices, faces, fit, mask.shape)) > 0
+    union = int((raster | mask).sum())
+    return float((raster & mask).sum()) / union if union else 0.0
+
+
+def refine_fit_by_silhouette(fit: "ViewFit", vertices, faces, part_mask,
+                             rounds: int = SILHOUETTE_ROUNDS) -> "ViewFit":
+    """배율·이동·각도를 잘게 흔들어 **전체 해상도 실루엣 겹침**이 오를 때만 채택한다.
+
+    fit_view 는 256 격자 볼록 껍질로 자세를 고르고 배율을 거친 단계로만 훑는다.
+    관리면 오버레이는 가장자리 정확도가 중요해서 마지막에 실제 픽셀 크기로 다듬는다.
+    polish_by_hit_rate 와 달리 광선을 쏘지 않아 rtree 없이도 돌고 한 후보에 0.05초 안팎이다.
+    """
+    faces = np.asarray(faces)
+    if len(faces) > SILHOUETTE_MAX_FACES:
+        faces = faces[::int(np.ceil(len(faces) / SILHOUETTE_MAX_FACES))]
+    vertices = np.asarray(vertices, dtype=np.float64)
+    mask = np.asarray(part_mask) > 0
+    best = fit
+    best_iou = silhouette_iou(vertices, faces, fit, mask)
+    for _round in range(max(1, rounds)):
+        moved = False
+        for key, options in SILHOUETTE_STEPS:
+            for option in options:
+                kwargs = {"angle_deg": 0.0, "dx": 0.0, "dy": 0.0, "scale": 1.0}
+                kwargs[key] = option
+                candidate = nudge_fit(best, mask.shape, **kwargs)
+                score = silhouette_iou(vertices, faces, candidate, mask)
+                if score > best_iou + 1e-4:
+                    best, best_iou, moved = candidate, score, True
+        if not moved:
+            break
+    best.iou = round(float(best_iou), 4)
+    return best
+
+
 __all__ = ["ViewFit", "MIN_IOU", "MIN_HIT_RATE",
            "fit_view", "measure_hit_rate", "nudge_fit", "polish_by_hit_rate",
+           "refine_fit_by_silhouette", "silhouette_iou",
            "split_sides",
            "unproject",
            "sample_deviation", "sample_flags", "to_pixels"]
