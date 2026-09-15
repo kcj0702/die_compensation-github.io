@@ -888,7 +888,9 @@ function ManagementRegionEditor({ regions, selectedId, partMask, activeSwatch, d
       const region = regions.find((item) => item.id === drag.regionId);
       const box = region ? draggedLabelBox(region) : null;
       if (moved && region && box) {
-        const labelPos: [number, number] = [clampPercent((box.x + box.w / 2) / layer.width * 100), clampPercent((box.y + box.h / 2) / layer.height * 100)];
+        /* 라벨은 이미지 밖 여백(레터박스)에도 둘 수 있게 이미지 크기의 ±25% 까지 허용한다. 뷰포트 밖은 어차피 잘린다. */
+        const clampLabel = (value: number) => Math.max(-25, Math.min(125, value));
+        const labelPos: [number, number] = [clampLabel((box.x + box.w / 2) / layer.width * 100), clampLabel((box.y + box.h / 2) / layer.height * 100)];
         onChange(regions.map((item) => item.id === region.id ? { ...item, labelPos } : item));
       }
     } else if (moved) {
@@ -935,7 +937,8 @@ function ManagementRegionEditor({ regions, selectedId, partMask, activeSwatch, d
       })}
       {draftPoints.length > 0 && <polyline className="manual-management-draft__line" style={{ stroke: activeSwatch.color }} points={draftPoints.map(([x, y]) => `${x},${y}`).join(' ')} />}
     </svg>
-    <svg className="management-editor__leaders" viewBox={`0 0 ${layer.width || 1} ${layer.height || 1}`} preserveAspectRatio="none" aria-hidden="true">
+    {/* 지시선 SVG 는 이미지 사방 25% 를 더 덮는다. 여백에 둔 라벨로 가는 선이 이미지 경계에서 잘리지 않게. */}
+    <svg className="management-editor__leaders" viewBox={`${-(layer.width || 1) * 0.25} ${-(layer.height || 1) * 0.25} ${(layer.width || 1) * 1.5} ${(layer.height || 1) * 1.5}`} preserveAspectRatio="none" overflow="visible" aria-hidden="true">
       {regions.map((region) => {
         const box = draggedLabelBox(region);
         const start = box ? rectEdgeToward(box, box.target) : null;
@@ -3074,6 +3077,22 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   const alignment = result.alignment;
   const productReady = Boolean(result.productImage && alignment);
   const [useProduct, setUseProduct] = useState(true);
+  /* 보정계수 슬라이더 범위. 기본 0.5~1.5 이지만 사용자가 바꿀 수 있고, 직접 입력한 값이 범위를 벗어나면
+     값을 그대로 적용하면서 범위도 그 값까지 넓힌다(슬라이더가 값을 되돌리지 않게). */
+  const [coefficientRange, setCoefficientRange] = useState({ min: 0.5, max: 1.5 });
+  const applyCoefficient = (value: number) => {
+    setCoefficientRange((current) => ({ min: Math.min(current.min, value), max: Math.max(current.max, value) }));
+    onCoefficientChange(value);
+  };
+  /* 카드 제목의 큰 숫자를 클릭하면 그 자리에서 입력한다. null 이면 표시 모드. */
+  const [coefficientText, setCoefficientText] = useState<string | null>(null);
+  const commitCoefficientText = () => {
+    if (coefficientText !== null) {
+      const value = Number(coefficientText);
+      if (coefficientText.trim() !== '' && Number.isFinite(value)) applyCoefficient(value);
+    }
+    setCoefficientText(null);
+  };
   /* 제품 이미지는 기본으로 스캔 프레임에 맞춘 판(productScanImage)을 쓴다. 그러면 좌표계가 스캔과 같아
      포인트·제로라인·Detail 영역이 스캔 위에서와 똑같이 동작한다. 원본 방향은 버튼으로 전환한다. */
   const [productInScanFrame, setProductInScanFrame] = useState(true);
@@ -3929,7 +3948,12 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
         <button type="button" className="sheet-print" onClick={() => void saveSheetExcel()} disabled={excelSaving}><FileSpreadsheet size={14} /> {excelSaving ? '엑셀 저장 중…' : '보정 시트 엑셀 저장'}</button>
         <button type="button" className="sheet-print" onClick={savePdf}><Printer size={14} /> 보정 시트 PDF 저장</button>
       </div>
-    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3></div><span>{coefficient.toFixed(2)}×</span></div><div className="coefficient-input"><input aria-label="보정 계수 직접 입력" type="number" min="0.5" max="1.5" step="0.01" value={coefficient} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) onCoefficientChange(Math.max(0.5, Math.min(1.5, value))); }} /><span>×</span></div><input aria-label="보정 계수" type="range" min="0.5" max="1.5" step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels"><span>보수적 0.50</span><span>기준 1.00</span><span>적극적 1.50</span></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
+    </div><aside className="control-panel"><div className="card coefficient-card"><div className="card-title"><div><h3>보정 계수</h3></div>{coefficientText === null
+      ? <button type="button" className="coefficient-value" title="클릭하여 직접 입력" onClick={() => setCoefficientText(String(Number(coefficient.toFixed(2))))}>{coefficient.toFixed(2)}×</button>
+      : <span className="coefficient-value coefficient-value--editing"><input type="number" step="0.01" aria-label="보정 계수 직접 입력" value={coefficientText} autoFocus onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => setCoefficientText(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitCoefficientText(); } else if (e.key === 'Escape') { e.preventDefault(); setCoefficientText(null); } }}
+          onBlur={commitCoefficientText} />×</span>}</div><input aria-label="보정 계수" type="range" min={coefficientRange.min} max={coefficientRange.max} step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels coefficient-range-labels"><label>최소 <input aria-label="보정 계수 최소값" type="number" step="0.1" value={coefficientRange.min} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: Math.min(value, current.max - 0.05), max: current.max })); }} /></label><label>최대<input aria-label="보정 계수 최대값" type="number" step="0.1" value={coefficientRange.max} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: current.min, max: Math.max(value, current.min + 0.05) })); }} /></label></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
   </section>;
 }
 
