@@ -6,8 +6,8 @@
 import {
   Activity, AlertTriangle, ArrowLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCircle2, ChevronDown, ChevronRight,
   Circle, CircleHelp, Copy, Crosshair, Database, Eye, EyeOff, File, FileSpreadsheet, Files, Folder, FolderOpen, Gauge, HardDrive, Image as ImageIcon,
-  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Play, RefreshCw,
-  Printer, Server, ShieldCheck, Sparkles, Square, Trash2, Type, UploadCloud, X, ZoomIn, ZoomOut,
+  Layers3, ListFilter, Maximize2, MousePointer2, Move, MoveRight, PanelLeftClose, Pencil, Play, RefreshCw,
+  Printer, Redo2, RotateCcw, Server, ShieldCheck, Square, Trash2, Type, Undo2, UploadCloud, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { ChangeEvent, DragEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -32,7 +32,8 @@ type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
    섞이지 않도록 화면에서도 구분해 보여준다. */
 /* xProduct/yProduct 는 같은 포인트를 제품데이터 이미지 기준 %로 다시 적은 값이다.
    정렬에 실패했거나 제품데이터가 없으면 비어 있다. */
-type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[] };
+/* rawValue/managementTargetMm 은 관리영역 안 포인트에만 붙는다. 그때 value 는 `원래 편차 − 관리치`(수정 편차)다. */
+type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[]; rawValue?: number; managementTargetMm?: number };
 type KeySelection = { ids: string[]; total: number; selected: number; peaks: number; signChanges: number; extremes: number };
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number; source?: string; kind?: 'point' | 'zone'; strength?: number };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
@@ -44,6 +45,17 @@ type ZeroLineResult = { id: number | string; points: [number, number][] };
 type LabShape = { shape_id: number; points: [number, number][]; is_closed: boolean };
 type LabDistance = { to_lab_pct: number; to_predicted_pct: number; diagonal_px: number };
 type LabelZeroLine = { points: [number, number][]; length_px: number; mean_abs_deviation: number };
+/* status: VISIBLE 자동 계산 가능 / PARTIAL 참고값 / HIDDEN 정면 PNG에서 옆으로 보여 계산 금지. viewFactor 는 투영 넓이 / 3D 넓이. */
+type ManagementRegionStatus = 'VISIBLE' | 'PARTIAL' | 'HIDDEN';
+type ManagementRegion = { id: string; targetMm: number; label: string; color: string; points: [number, number][]; status?: ManagementRegionStatus; viewFactor?: number };
+/* 부품 실루엣을 거칠게 줄인 격자. data 는 행 우선 '0'/'1' 문자열이다. */
+type PartMaskGrid = { cols: number; rows: number; data: string };
+type ManagementOverlayResult = {
+  image: string; width: number; height: number; source: string; alignmentCad: string;
+  fit: { iou: number; detailIou: number; reliable: boolean; axis: number; sign: number };
+  regions: ManagementRegion[];
+  partMask?: PartMaskGrid;
+};
 type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; contours: [number, number][][]; partNo: string; sourceSheet: string; mirrored: boolean };
 /* 스캔을 제품데이터 위로 옮기는 변환. margin 은 1위와 2위 방향의 점수 차이고,
    대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
@@ -86,6 +98,8 @@ type AnalysisResult = {
   partNumber: string | null;
   cleanImage: string | null;
   productImage: string | null;
+  /* 제품 이미지를 정렬 행렬의 역변환으로 스캔 프레임(같은 크기·방향)에 맞춘 것. 시트는 이걸 기본으로 쓴다. */
+  productScanImage?: string | null;
   productSource: string | null;
   alignment: AlignmentInfo | null;
   alignmentOverlay: string | null;
@@ -124,10 +138,22 @@ type AnalysisResult = {
   errors: Partial<Record<Engine | 'product', string>>;
   valueMode: string;
 };
-type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; cadUploading?: boolean; assetError?: string; assetStatus?: string };
+type ScanItem = { id: string; name: string; partNo: string; size: string; url: string; file: File; status: ScanStatus; tone: number; result?: AnalysisResult; error?: string; productFile?: File; productUrl?: string; cadFiles?: File[]; cadUploading?: boolean; assetError?: string; assetStatus?: string; managementCadName?: string; managementCadPath?: string; managementCadUploading?: boolean; managementCadError?: string; management?: ManagementOverlayResult; managementError?: string };
+/* CATIA에서 온 영역과 수동으로 그린 영역을 같은 형식으로 편집한다. points 는 닫지 않은 꼭짓점(%) 목록이고,
+   splineSegments 의 i 는 i번 점 → i+1번 점(마지막은 첫 점으로 돌아오는 변)이다. */
+/* apply 가 false 면 화면에만 보이고 보정시트 계산에서는 뺀다. CATIA 결과는 HIDDEN(옆으로 보이는 띠)만 기본 제외, PARTIAL 은 참고값으로 포함한다. */
+type EditableManagementRegion = { id: string; targetMm: number; color: string; points: [number, number][]; splineSegments: number[]; source: 'cad' | 'manual'; labelPos?: [number, number]; status?: ManagementRegionStatus; viewFactor?: number; apply?: boolean };
 type FitAdjust = { angle: number; dx: number; dy: number; scale: number };
 type ZeroPointOffset = { dx: number; dy: number };
-type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean; points?: Record<string, ZeroPointOffset>; vertices?: [number, number][]; spline?: boolean; splineSegments?: number[] };
+/* hidden 은 표시만 끈 것(다시 켤 수 있음), deleted 는 편집 화면에서 지운 것. 둘 다 시트·3D·분석 화면에서 빠진다. */
+type ZeroEdit = { index: number; dx: number; dy: number; hidden?: boolean; deleted?: boolean; points?: Record<string, ZeroPointOffset>; vertices?: [number, number][]; spline?: boolean; splineSegments?: number[] };
+const zeroLineSuppressed = (edit: ZeroEdit | undefined) => Boolean(edit?.hidden || edit?.deleted);
+/* index 번 제로라인의 편집 항목을 바꾼다. 없으면 만든다. */
+function updateZeroEdit(edits: ZeroEdit[], index: number, change: Partial<ZeroEdit>): ZeroEdit[] {
+  const existing = edits.find((edit) => edit.index === index);
+  if (existing) return edits.map((edit) => edit.index === index ? { ...edit, ...change } : edit);
+  return [...edits, { index, dx: 0, dy: 0, ...change }];
+}
 /* 아직 한 번도 "3D에 적용"을 안 누른 스캔은 zeroEditsByScan[scan.id]가
    없어서 Home 이 매번 `... || []`로 새 빈 배열을 만들어 내려보낸다. 이걸
    그대로 ServicePreview의 draftZeroEdits 동기화 이펙트(의존성 배열에
@@ -313,13 +339,13 @@ function useTransformedSheetImage(source: string, requested: SheetImageTransform
 }
 
 const engineMeta: Record<Engine, { name: string; short: string; color: string }> = {
-  label: { name: '라벨 제거 및 복원', short: 'label_removal', color: '#7058e8' },
+  label: { name: '이미지 처리 및 정합', short: 'management_alignment', color: '#7058e8' },
   deviation: { name: '스캔 포인트 추출', short: 'deviation_extraction', color: '#ee6b3c' },
   zero: { name: '추천 제로라인', short: 'zero_line_detection', color: '#17a58b' },
 };
 
 const analysisStepMeta: { key: AnalysisStep; name: string; short: string; color: string }[] = [
-  { key: 'scan', name: '스캔 데이터', short: 'scan_data', color: '#3b75c3' },
+  { key: 'scan', name: '데이터 입력', short: 'data_input', color: '#3b75c3' },
   ...(Object.keys(engineMeta) as Engine[]).map((key) => ({ key, ...engineMeta[key] })),
 ];
 
@@ -543,6 +569,438 @@ function ZeroLineLayer({ lines, width, height }: { lines: ZeroLineResult[]; widt
       </g>;
     })}
   </svg>;
+}
+
+type ManagementSwatch = { color: string; targetMm: number };
+/* 색 하나가 관리치 하나를 뜻한다. CATIA 결과가 오면 그쪽 색↔관리치가 앞에 온다. */
+const DEFAULT_MANAGEMENT_PALETTE: ManagementSwatch[] = [
+  { color: '#f4b740', targetMm: 0.5 }, { color: '#3f78d4', targetMm: -0.5 }, { color: '#cf4aaa', targetMm: -0.7 },
+  { color: '#e34b43', targetMm: -1 }, { color: '#26a98b', targetMm: 0.3 }, { color: '#6e5ccf', targetMm: -0.3 },
+];
+type LabelRect = { x: number; y: number; w: number; h: number };
+type ManagementLayer = { width: number; height: number; font: string; obstacles: LabelRect[] };
+type ManagementLabelBox = LabelRect & { target: [number, number] };
+type ManagementDrag = { kind: 'region' | 'draft' | 'label'; regionId?: string; index: number; pointerId: number; start: [number, number]; delta: [number, number] };
+
+/* initial 은 분석이 준 CATIA 영역(수동 모드면 빈 목록)이고 초기화 버튼이 돌아가는 곳이다.
+   past/future 는 Ctrl+Z / Ctrl+Y 용 스냅샷. 영역 목록이 바뀌는 조작만 쌓고 선택·활성 색은 쌓지 않는다. */
+type ManagementEditState = { regions: EditableManagementRegion[]; selectedId: string | null; palette: ManagementSwatch[]; activeColor: string; initial: EditableManagementRegion[]; past: EditableManagementRegion[][]; future: EditableManagementRegion[][]; initialKey: string };
+const EMPTY_MANAGEMENT_EDIT: ManagementEditState = { regions: [], selectedId: null, palette: DEFAULT_MANAGEMENT_PALETTE, activeColor: DEFAULT_MANAGEMENT_PALETTE[0].color, initial: [], past: [], future: [], initialKey: '' };
+
+function pointInPolygon([x, y]: [number, number], polygon: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const [xi, yi] = polygon[i]; const [xj, yj] = polygon[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/* 점에서 다각형 변까지의 최단 거리(px). x·y 는 % 라 프레임 크기로 환산해 잰다. */
+function distanceToPolygonPx([x, y]: [number, number], polygon: [number, number][], width: number, height: number): number {
+  let best = Infinity;
+  polygon.forEach((start, index) => {
+    const end = polygon[(index + 1) % polygon.length];
+    const sx = start[0] / 100 * width; const sy = start[1] / 100 * height;
+    const dx = (end[0] - start[0]) / 100 * width; const dy = (end[1] - start[1]) / 100 * height;
+    const px = x / 100 * width; const py = y / 100 * height;
+    const lengthSq = dx * dx + dy * dy;
+    const t = lengthSq ? Math.max(0, Math.min(1, ((px - sx) * dx + (py - sy) * dy) / lengthSq)) : 0;
+    best = Math.min(best, Math.hypot(px - (sx + dx * t), py - (sy + dy * t)));
+  });
+  return best;
+}
+
+/* 관리영역 안 포인트의 편차를 `원래 편차 − 관리치`로 바꾼다. 보정치는 이 수정 편차에 보정계수를 곱해 나온다.
+   스플라인 변은 꼭짓점 다각형으로 근사한다. 영역 밖 포인트는 원래 값으로 되돌린다.
+   플랜지 끝처럼 BOUNDARY 가 부품 가장자리에 붙어 있으면 리더라인 끝점이 경계 바로 바깥에 찍히는 일이 잦아,
+   변에서 MANAGEMENT_EDGE_TOLERANCE_PX 안에 있는 점은 가장 가까운 영역에 넣는다. */
+const MANAGEMENT_EDGE_TOLERANCE_PX = 14;
+function applyManagementToPoints(points: PointResult[], regions: EditableManagementRegion[], width: number, height: number): PointResult[] {
+  const polygons = regions.filter((item) => item.points.length >= 3 && item.apply !== false);
+  return points.map((point) => {
+    const raw = point.rawValue ?? point.value;
+    let region = polygons.find((item) => pointInPolygon([point.x, point.y], item.points));
+    if (!region && width > 0 && height > 0) {
+      let nearest = MANAGEMENT_EDGE_TOLERANCE_PX;
+      polygons.forEach((item) => {
+        const distance = distanceToPolygonPx([point.x, point.y], item.points, width, height);
+        if (distance <= nearest) { nearest = distance; region = item; }
+      });
+    }
+    if (!region) return point.rawValue === undefined ? point : { ...point, value: raw, rawValue: undefined, managementTargetMm: undefined };
+    return { ...point, value: raw - region.targetMm, rawValue: raw, managementTargetMm: region.targetMm };
+  });
+}
+const MANAGEMENT_HISTORY_LIMIT = 100;
+function commitManagementRegions(current: ManagementEditState, regions: EditableManagementRegion[]): ManagementEditState {
+  if (regions === current.regions) return current;
+  return { ...current, regions, past: [...current.past.slice(-(MANAGEMENT_HISTORY_LIMIT - 1)), current.regions], future: [] };
+}
+
+function formatManagementTarget(value: number) {
+  return `관리치 ${value >= 0 ? '+' : ''}${Number(value.toFixed(3))} mm`;
+}
+
+function mergeManagementPalette(regions: { color: string; targetMm: number }[]): ManagementSwatch[] {
+  const merged: ManagementSwatch[] = [];
+  regions.forEach((region) => { if (!merged.some((swatch) => swatch.color === region.color)) merged.push({ color: region.color, targetMm: region.targetMm }); });
+  DEFAULT_MANAGEMENT_PALETTE.forEach((swatch) => { if (!merged.some((item) => item.color === swatch.color)) merged.push(swatch); });
+  return merged;
+}
+
+/* 닫힌 영역이라 첫 변·마지막 변의 스플라인 이웃 점도 반대편 끝에서 순환해 잡는다. */
+function managementSegmentPath(points: [number, number][], index: number, spline: boolean): string {
+  const count = points.length;
+  const start = points[index];
+  const end = points[(index + 1) % count];
+  if (!start || !end) return '';
+  if (!spline || count < 3) return `M ${start[0]} ${start[1]} L ${end[0]} ${end[1]}`;
+  const before = points[(index - 1 + count) % count];
+  const after = points[(index + 2) % count];
+  const control1: [number, number] = [start[0] + (end[0] - before[0]) / 6, start[1] + (end[1] - before[1]) / 6];
+  const control2: [number, number] = [end[0] - (after[0] - start[0]) / 6, end[1] - (after[1] - start[1]) / 6];
+  return `M ${start[0]} ${start[1]} C ${control1[0]} ${control1[1]} ${control2[0]} ${control2[1]} ${end[0]} ${end[1]}`;
+}
+
+function managementRegionPath(points: [number, number][], splineSegments: number[]): string {
+  if (points.length < 2) return '';
+  return `${points.map((_, index) => {
+    const segment = managementSegmentPath(points, index, splineSegments.includes(index));
+    return index === 0 ? segment : segment.replace(/^M [^LC]+/, '');
+  }).join(' ')} Z`;
+}
+
+let managementMeasureContext: CanvasRenderingContext2D | null = null;
+/* .management-region__label 과 같은 8px · 800 글꼴로 폭을 재고 좌우 여백(14px)·테두리(5px)를 더한다. */
+function measureManagementLabel(text: string, fontFamily: string): { w: number; h: number } {
+  if (!managementMeasureContext && typeof document !== 'undefined') managementMeasureContext = document.createElement('canvas').getContext('2d');
+  const context = managementMeasureContext;
+  if (!context) return { w: text.length * 6 + 21, h: 18 };
+  context.font = `800 8px ${fontFamily}`;
+  return { w: Math.ceil(context.measureText(text).width) + 21, h: 18 };
+}
+
+function rectsOverlap(a: LabelRect, b: LabelRect, gap: number) {
+  return a.x < b.x + b.w + gap && a.x + a.w + gap > b.x && a.y < b.y + b.h + gap && a.y + a.h + gap > b.y;
+}
+
+function nearestPolygonPoint(points: [number, number][], target: [number, number]): [number, number] {
+  let best = points[0];
+  let bestDistance = Infinity;
+  points.forEach((start, index) => {
+    const end = points[(index + 1) % points.length];
+    const dx = end[0] - start[0]; const dy = end[1] - start[1];
+    const lengthSq = dx * dx + dy * dy;
+    const t = lengthSq ? Math.max(0, Math.min(1, ((target[0] - start[0]) * dx + (target[1] - start[1]) * dy) / lengthSq)) : 0;
+    const point: [number, number] = [start[0] + dx * t, start[1] + dy * t];
+    const distance = (point[0] - target[0]) ** 2 + (point[1] - target[1]) ** 2;
+    if (distance < bestDistance) { best = point; bestDistance = distance; }
+  });
+  return best;
+}
+
+/* 라벨 사각형 둘레에서 target 쪽으로 나가는 점. target 이 라벨 안이면 지시선을 긋지 않는다. */
+function rectEdgeToward(box: LabelRect, target: [number, number]): [number, number] | null {
+  const cx = box.x + box.w / 2; const cy = box.y + box.h / 2;
+  const dx = target[0] - cx; const dy = target[1] - cy;
+  const scale = Math.min(dx ? box.w / 2 / Math.abs(dx) : Infinity, dy ? box.h / 2 / Math.abs(dy) : Infinity);
+  return scale >= 1 ? null : [cx + dx * scale, cy + dy * scale];
+}
+
+/* 관리치 라벨 자동 배치(레이어 px 좌표). 사용자가 끌어다 둔 라벨(labelPos)은 그 자리에 고정하고 먼저 차지한다.
+   나머지는 영역 중심에서 부품 바깥 방향부터 거리를 늘려 가며 다른 라벨·도구막대와 겹치지 않고
+   부품 실루엣에 걸리지 않는 첫 자리를 고른다. 실루엣 밖에 빈자리가 없으면 부품과 가장 적게 겹치는 자리로 물러난다. */
+function placeManagementLabels(regions: EditableManagementRegion[], layer: ManagementLayer, mask: PartMaskGrid | null): Record<string, ManagementLabelBox> {
+  const { width, height } = layer;
+  const placed: Record<string, ManagementLabelBox> = {};
+  if (!width || !height) return placed;
+  const shapes = regions.filter((region) => region.points.length >= 3).map((region) => {
+    const px = region.points.map(([x, y]) => [x / 100 * width, y / 100 * height] as [number, number]);
+    const anchor: [number, number] = [px.reduce((sum, [x]) => sum + x, 0) / px.length, px.reduce((sum, [, y]) => sum + y, 0) / px.length];
+    return { region, px, anchor, size: measureManagementLabel(formatManagementTarget(region.targetMm), layer.font) };
+  });
+  if (!shapes.length) return placed;
+  let partCenter: [number, number] = [shapes.reduce((sum, { anchor }) => sum + anchor[0], 0) / shapes.length, shapes.reduce((sum, { anchor }) => sum + anchor[1], 0) / shapes.length];
+  let partHits: (rect: LabelRect) => number;
+  const grid = mask && mask.cols > 0 && mask.rows > 0 && mask.data.length === mask.cols * mask.rows ? mask : null;
+  if (grid) {
+    let sumX = 0; let sumY = 0; let count = 0;
+    for (let row = 0; row < grid.rows; row += 1) {
+      for (let col = 0; col < grid.cols; col += 1) {
+        if (grid.data.charCodeAt(row * grid.cols + col) === 49) { sumX += col + 0.5; sumY += row + 0.5; count += 1; }
+      }
+    }
+    if (count) partCenter = [sumX / count / grid.cols * width, sumY / count / grid.rows * height];
+    partHits = (rect) => {
+      const col0 = Math.max(0, Math.floor(rect.x / width * grid.cols));
+      const col1 = Math.min(grid.cols - 1, Math.floor((rect.x + rect.w) / width * grid.cols));
+      const row0 = Math.max(0, Math.floor(rect.y / height * grid.rows));
+      const row1 = Math.min(grid.rows - 1, Math.floor((rect.y + rect.h) / height * grid.rows));
+      let hits = 0;
+      for (let row = row0; row <= row1; row += 1) {
+        for (let col = col0; col <= col1; col += 1) if (grid.data.charCodeAt(row * grid.cols + col) === 49) hits += 1;
+      }
+      return hits;
+    };
+  } else {
+    /* 실루엣 격자를 못 받았으면 관리영역 외곽 사각형만이라도 피한다. */
+    const outlines = shapes.map(({ px }) => {
+      const xs = px.map(([x]) => x); const ys = px.map(([, y]) => y);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    });
+    partHits = (rect) => outlines.filter((outline) => rectsOverlap(rect, outline, 0)).length;
+  }
+  const margin = 4; const gap = 4; const step = 8; const directions = 24;
+  const maxDistance = Math.hypot(width, height);
+  const taken: LabelRect[] = [...layer.obstacles];
+  shapes.filter(({ region }) => region.labelPos).forEach(({ region, px, size }) => {
+    const [cx, cy] = region.labelPos!;
+    const rect = { x: cx / 100 * width - size.w / 2, y: cy / 100 * height - size.h / 2, w: size.w, h: size.h };
+    taken.push(rect);
+    placed[region.id] = { ...rect, target: nearestPolygonPoint(px, [rect.x + rect.w / 2, rect.y + rect.h / 2]) };
+  });
+  shapes.filter(({ region }) => !region.labelPos).sort((a, b) => a.anchor[1] - b.anchor[1] || a.anchor[0] - b.anchor[0]).forEach(({ region, px, anchor, size }) => {
+    const awayX = anchor[0] - partCenter[0]; const awayY = anchor[1] - partCenter[1];
+    const base = Math.hypot(awayX, awayY) > 1 ? Math.atan2(awayY, awayX) : -Math.PI / 2;
+    const angles = Array.from({ length: directions }, (_, index) => base + Math.ceil(index / 2) * (index % 2 ? 1 : -1) * 2 * Math.PI / directions);
+    let best: { rect: LabelRect; hits: number } | null = null;
+    for (let distance = 0; distance <= maxDistance && best?.hits !== 0; distance += step) {
+      for (const angle of distance === 0 ? [base] : angles) {
+        const rect = { x: anchor[0] + Math.cos(angle) * distance - size.w / 2, y: anchor[1] + Math.sin(angle) * distance - size.h / 2, w: size.w, h: size.h };
+        if (rect.x < margin || rect.y < margin || rect.x + rect.w > width - margin || rect.y + rect.h > height - margin) continue;
+        if (taken.some((other) => rectsOverlap(rect, other, gap))) continue;
+        const hits = partHits(rect);
+        if (!best || hits < best.hits) best = { rect, hits };
+        if (hits === 0) break;
+      }
+    }
+    const rect = best?.rect ?? {
+      x: Math.max(margin, Math.min(width - margin - size.w, anchor[0] - size.w / 2)),
+      y: Math.max(margin, Math.min(height - margin - size.h, anchor[1] - size.h / 2)),
+      w: size.w, h: size.h,
+    };
+    taken.push(rect);
+    placed[region.id] = { ...rect, target: nearestPolygonPoint(px, [rect.x + rect.w / 2, rect.y + rect.h / 2]) };
+  });
+  return placed;
+}
+
+/* 화면 px 기준 넓이. 점을 몰아 두거나 한 줄로 그린 영역은 관리치 계산에 의미가 없어 지운다. */
+const MIN_MANAGEMENT_AREA_PX = 25;
+function polygonAreaPx(points: [number, number][], layer: { width: number; height: number }): number {
+  if (points.length < 3 || !layer.width || !layer.height) return 0;
+  let twice = 0;
+  points.forEach(([x0, y0], index) => {
+    const [x1, y1] = points[(index + 1) % points.length];
+    twice += (x0 / 100 * layer.width) * (y1 / 100 * layer.height) - (x1 / 100 * layer.width) * (y0 / 100 * layer.height);
+  });
+  return Math.abs(twice) / 2;
+}
+
+function ManagementRegionEditor({ regions, selectedId, partMask, activeSwatch, drawing, onDrawingChange, onSelect, onChange, onDelete, onUndo, onRedo }: { regions: EditableManagementRegion[]; selectedId: string | null; partMask: PartMaskGrid | null; activeSwatch: ManagementSwatch; drawing: boolean; onDrawingChange: (drawing: boolean) => void; onSelect: (id: string | null) => void; onChange: (regions: EditableManagementRegion[]) => void; onDelete: (id: string) => void; onUndo: () => void; onRedo: () => void }) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [layer, setLayer] = useState<ManagementLayer>({ width: 0, height: 0, font: 'sans-serif', obstacles: [] });
+  const [draft, setDraft] = useState<[number, number][]>([]);
+  const [drag, setDrag] = useState<ManagementDrag | null>(null);
+  /* 그리기가 꺼지면 찍어 둔 점을 버린다. effect 대신 렌더 중 상태 조정으로 처리한다. */
+  const [wasDrawing, setWasDrawing] = useState(drawing);
+  if (wasDrawing !== drawing) { setWasDrawing(drawing); if (!drawing) setDraft([]); }
+  useEffect(() => {
+    const element = layerRef.current;
+    if (!element) return;
+    const update = () => {
+      const next = { width: element.clientWidth, height: element.clientHeight, font: getComputedStyle(element).fontFamily || 'sans-serif', obstacles: [] };
+      setLayer((current) => current.width === next.width && current.height === next.height && current.font === next.font ? current : next);
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const labelBoxes = useMemo(() => placeManagementLabels(regions, layer, partMask), [regions, layer, partMask]);
+  const selectedRegion = drawing ? undefined : regions.find((region) => region.id === selectedId);
+  /* Delete 로 선택 영역 삭제, Ctrl+Z / Ctrl+Y(또는 Ctrl+Shift+Z) 로 되돌리기·다시 실행.
+     입력칸에 커서가 있을 때는 브라우저 기본 동작에 맡긴다. 그리기 중 Ctrl+Z 는 마지막 점을 뺀다. */
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === 'z' && !event.shiftKey) {
+        event.preventDefault();
+        if (drawing) setDraft((current) => current.slice(0, -1)); else onUndo();
+      } else if ((event.ctrlKey || event.metaKey) && (key === 'y' || (key === 'z' && event.shiftKey))) {
+        event.preventDefault(); if (!drawing) onRedo();
+      } else if (event.key === 'Delete' && selectedRegion) {
+        event.preventDefault(); onDelete(selectedRegion.id);
+      } else if (event.key === 'Escape' && drawing) {
+        onDrawingChange(false);
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [selectedRegion, drawing, onDelete, onUndo, onRedo, onDrawingChange]);
+  const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
+  const movePoint = ([x, y]: [number, number], delta: [number, number]): [number, number] => [clampPercent(x + delta[0]), clampPercent(y + delta[1])];
+  const withDrag = (points: [number, number][], kind: ManagementDrag['kind'], regionId?: string) => drag && drag.kind === kind && drag.regionId === regionId
+    ? points.map((point, index) => index === drag.index ? movePoint(point, drag.delta) : point)
+    : points;
+  const pointerPercent = (event: React.PointerEvent): [number, number] | null => {
+    const rect = layerRef.current?.getBoundingClientRect();
+    return rect?.width && rect.height ? [(event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100] : null;
+  };
+  const closeDraft = (points: [number, number][]) => {
+    if (points.length < 3) return;
+    /* 넓이가 거의 없는 도형은 만들지 않는다. */
+    if (polygonAreaPx(points, layer) < MIN_MANAGEMENT_AREA_PX) { onDrawingChange(false); return; }
+    const id = crypto.randomUUID();
+    onChange([...regions, { id, targetMm: activeSwatch.targetMm, color: activeSwatch.color, points, splineSegments: [], source: 'manual' }]);
+    onDrawingChange(false); onSelect(id);
+  };
+  const beginDrag = (event: React.PointerEvent<HTMLButtonElement>, kind: ManagementDrag['kind'], index: number, regionId?: string) => {
+    const point = pointerPercent(event);
+    if (!point) return;
+    event.preventDefault(); event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDrag({ kind, regionId, index, pointerId: event.pointerId, start: point, delta: [0, 0] });
+  };
+  const moveDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const point = pointerPercent(event);
+    if (point) setDrag({ ...drag, delta: [point[0] - drag.start[0], point[1] - drag.start[1]] });
+  };
+  /* 라벨을 끌면 중심을 % 로 기억해 확대·창 크기 변화에도 같은 자리에 둔다. */
+  const draggedLabelBox = (region: EditableManagementRegion): ManagementLabelBox | null => {
+    const box = labelBoxes[region.id];
+    if (!box) return null;
+    if (drag?.kind !== 'label' || drag.regionId !== region.id) return box;
+    const moved = { ...box, x: box.x + drag.delta[0] * layer.width / 100, y: box.y + drag.delta[1] * layer.height / 100 };
+    const px = region.points.map(([x, y]) => [x / 100 * layer.width, y / 100 * layer.height] as [number, number]);
+    return { ...moved, target: nearestPolygonPoint(px, [moved.x + moved.w / 2, moved.y + moved.h / 2]) };
+  };
+  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    const moved = Math.hypot(drag.delta[0] * layer.width / 100, drag.delta[1] * layer.height / 100) > 2;
+    if (drag.kind === 'draft') {
+      if (moved) setDraft(withDrag(draft, 'draft'));
+      else if (drag.index === 0) closeDraft(draft);
+    } else if (drag.kind === 'label') {
+      const region = regions.find((item) => item.id === drag.regionId);
+      const box = region ? draggedLabelBox(region) : null;
+      if (moved && region && box) {
+        const labelPos: [number, number] = [clampPercent((box.x + box.w / 2) / layer.width * 100), clampPercent((box.y + box.h / 2) / layer.height * 100)];
+        onChange(regions.map((item) => item.id === region.id ? { ...item, labelPos } : item));
+      }
+    } else if (moved) {
+      /* 꼭짓점을 옮겨 도형이 납작해졌으면 그 영역은 지운다. */
+      const next = regions.flatMap((region) => {
+        if (region.id !== drag.regionId) return [region];
+        const points = withDrag(region.points, 'region', region.id);
+        return polygonAreaPx(points, layer) < MIN_MANAGEMENT_AREA_PX ? [] : [{ ...region, points }];
+      });
+      if (next.length < regions.length) onSelect(null);
+      onChange(next);
+    }
+    setDrag(null);
+  };
+  const toggleSpline = (regionId: string, segmentIndex: number) => onChange(regions.map((region) => region.id !== regionId ? region : {
+    ...region,
+    splineSegments: region.splineSegments.includes(segmentIndex)
+      ? region.splineSegments.filter((index) => index !== segmentIndex)
+      : [...region.splineSegments, segmentIndex],
+  }));
+  const handleCanvasClick = (event: React.MouseEvent<SVGSVGElement>) => {
+    if (!drawing) { onSelect(null); return; }
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    setDraft((current) => [...current, [clampPercent((event.clientX - rect.left) / rect.width * 100), clampPercent((event.clientY - rect.top) / rect.height * 100)]]);
+  };
+  const selectRegion = (event: React.MouseEvent, id: string) => { if (drawing) return; event.stopPropagation(); onSelect(id); };
+  const draftPoints = withDrag(draft, 'draft');
+  return <div ref={layerRef} className={`management-editor${drawing ? ' management-editor--drawing' : ''}`}>
+    {/* 확대 상태에서 Heatmap 이 포인터를 잡아 이동으로 처리하지 않도록, 그리기와 영역 선택은 여기서 멈춘다. */}
+    <svg className="management-editor__svg" viewBox="0 0 100 100" preserveAspectRatio="none" onClick={handleCanvasClick}
+      onPointerDown={(event) => { if (drawing) event.stopPropagation(); }}
+      onDoubleClick={(event) => { if (drawing || event.target !== event.currentTarget) event.stopPropagation(); }}>
+      {regions.map((region) => {
+        const points = withDrag(region.points, 'region', region.id);
+        const path = managementRegionPath(points, region.splineSegments);
+        return <g key={region.id} className={`management-edit-region${region.id === selectedRegion?.id ? ' management-edit-region--selected' : ''}${region.apply === false ? ' management-edit-region--excluded' : ''}`} style={{ color: region.color }}>
+          <path className="management-edit-region__halo" d={path} />
+          <path className="management-edit-region__area" d={path} onPointerDown={(event) => { if (!drawing) event.stopPropagation(); }} onClick={(event) => selectRegion(event, region.id)} />
+          {points.map((_, index) => <path key={index} d={managementSegmentPath(points, index, region.splineSegments.includes(index))} className="management-edit-region__hit"
+            onPointerDown={(event) => { if (!drawing) event.stopPropagation(); }} onClick={(event) => selectRegion(event, region.id)}
+            onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); toggleSpline(region.id, index); }} />)}
+        </g>;
+      })}
+      {draftPoints.length > 0 && <polyline className="manual-management-draft__line" style={{ stroke: activeSwatch.color }} points={draftPoints.map(([x, y]) => `${x},${y}`).join(' ')} />}
+    </svg>
+    <svg className="management-editor__leaders" viewBox={`0 0 ${layer.width || 1} ${layer.height || 1}`} preserveAspectRatio="none" aria-hidden="true">
+      {regions.map((region) => {
+        const box = draggedLabelBox(region);
+        const start = box ? rectEdgeToward(box, box.target) : null;
+        if (!box || !start) return null;
+        return <g key={region.id}>
+          <line className="management-leader__halo" x1={start[0]} y1={start[1]} x2={box.target[0]} y2={box.target[1]} />
+          <line className="management-leader" style={{ stroke: region.color }} x1={start[0]} y1={start[1]} x2={box.target[0]} y2={box.target[1]} />
+          <circle className="management-leader__dot" style={{ fill: region.color }} cx={box.target[0]} cy={box.target[1]} r={2.5} />
+        </g>;
+      })}
+    </svg>
+    {regions.map((region) => {
+      const box = draggedLabelBox(region);
+      if (!box) return null;
+      const dragging = drag?.kind === 'label' && drag.regionId === region.id;
+      return <button type="button" key={`${region.id}-label`} className={`management-region__label management-editor__label${region.id === selectedRegion?.id ? ' selected' : ''}${dragging ? ' management-editor__label--dragging' : ''}`}
+        style={{ left: `${box.x}px`, top: `${box.y}px`, borderColor: region.color }} title="드래그로 이동 · 클릭으로 선택"
+        onPointerDown={(event) => { if (!drawing) beginDrag(event, 'label', 0, region.id); }} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={() => setDrag(null)}
+        onClick={(event) => selectRegion(event, region.id)}>
+        {formatManagementTarget(region.targetMm)}
+      </button>;
+    })}
+    {selectedRegion && withDrag(selectedRegion.points, 'region', selectedRegion.id).map(([x, y], index) => <button type="button" key={`handle-${index}`}
+      className="zero-line-handle management-edit-handle" style={{ left: `${x}%`, top: `${y}%`, borderColor: selectedRegion.color }}
+      aria-label={`관리영역 ${index + 1}번 꼭짓점`} title="끌어서 꼭짓점 이동"
+      onPointerDown={(event) => beginDrag(event, 'region', index, selectedRegion.id)} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={() => setDrag(null)} />)}
+    {drawing && draftPoints.map(([x, y], index) => <button type="button" key={`draft-${index}`}
+      className={`zero-line-handle management-edit-handle${index === 0 && draft.length >= 3 ? ' management-edit-handle--closable' : ''}`} style={{ left: `${x}%`, top: `${y}%`, borderColor: activeSwatch.color }}
+      aria-label={`${index + 1}번 점`} title={index === 0 && draft.length >= 3 ? '첫 점을 눌러 영역 완성 · 끌어서 이동' : '끌어서 점 이동'}
+      onPointerDown={(event) => beginDrag(event, 'draft', index)} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={() => setDrag(null)} />)}
+  </div>;
+}
+
+/* 이미지 밖(viewer-stage 위)에 놓는 관리영역 도구막대. 그리기 상태와 팔레트는 Results 가 갖는다. */
+function ManagementToolbar({ drawing, hasSelection, palette, activeColor, canUndo, canRedo, canReset, guide, onToggleDrawing, onDelete, onUndo, onRedo, onReset, onPickSwatch, onSwatchTarget }: { drawing: boolean; hasSelection: boolean; palette: ManagementSwatch[]; activeColor: string; canUndo: boolean; canRedo: boolean; canReset: boolean; guide: string; onToggleDrawing: () => void; onDelete: () => void; onUndo: () => void; onRedo: () => void; onReset: () => void; onPickSwatch: (swatch: ManagementSwatch) => void; onSwatchTarget: (color: string, targetMm: number) => void }) {
+  const activeSwatch = palette.find((swatch) => swatch.color === activeColor) ?? palette[0];
+  return <div className="management-toolbar" role="toolbar" aria-label="관리영역 편집">
+    <button type="button" className={`management-tool${drawing ? ' active' : ''}`} aria-label={drawing ? '그리기 취소' : '관리영역 그리기'} title={drawing ? '그리기 취소 (Esc)' : '관리영역 그리기'} onClick={onToggleDrawing}>{drawing ? <X size={14} /> : <Pencil size={14} />}</button>
+    <button type="button" className="management-tool" disabled={!hasSelection} aria-label="선택한 관리영역 삭제" title={hasSelection ? '선택한 관리영역 삭제 (Delete)' : '삭제할 관리영역을 먼저 선택'} onClick={onDelete}><Trash2 size={14} /></button>
+    <i className="management-toolbar__divider" aria-hidden="true" />
+    <button type="button" className="management-tool" disabled={drawing || !canUndo} aria-label="되돌리기" title="되돌리기 (Ctrl+Z)" onClick={onUndo}><Undo2 size={14} /></button>
+    <button type="button" className="management-tool" disabled={drawing || !canRedo} aria-label="다시 실행" title="다시 실행 (Ctrl+Shift+Z)" onClick={onRedo}><Redo2 size={14} /></button>
+    <button type="button" className="management-tool" disabled={drawing || !canReset} aria-label="관리영역 초기화" title="분석 결과의 관리영역으로 초기화" onClick={onReset}><RotateCcw size={14} /></button>
+    <i className="management-toolbar__divider" aria-hidden="true" />
+    <div className="management-palette" role="radiogroup" aria-label="관리치 색상">
+      {palette.map((swatch) => <button type="button" key={swatch.color} role="radio" aria-checked={swatch.color === activeSwatch?.color}
+        className={`management-swatch${swatch.color === activeSwatch?.color ? ' management-swatch--active' : ''}`} style={{ background: swatch.color }}
+        aria-label={formatManagementTarget(swatch.targetMm)} title={hasSelection ? `선택한 영역을 ${formatManagementTarget(swatch.targetMm)}로 변경` : `새 영역: ${formatManagementTarget(swatch.targetMm)}`}
+        onClick={() => onPickSwatch(swatch)} />)}
+    </div>
+    {activeSwatch && <ManagementTargetInput value={activeSwatch.targetMm} label="선택한 색상의 관리치" onCommit={(value) => onSwatchTarget(activeSwatch.color, value)} />}
+    <span className="management-toolbar__guide">{guide}</span>
+  </div>;
+}
+
+/* 입력 중에는 '-' 같은 미완성 값을 그대로 두고, 숫자가 되는 순간 바로 반영한다. */
+function ManagementTargetInput({ value, label, onCommit }: { value: number; label: string; onCommit: (value: number) => void }) {
+  const [text, setText] = useState<string | null>(null);
+  return <label className="management-target-input" onClick={(event) => event.stopPropagation()}>
+    <input type="number" step="0.1" aria-label={label} value={text ?? String(Number(value.toFixed(3)))}
+      onFocus={() => setText(String(Number(value.toFixed(3))))} onBlur={() => setText(null)}
+      onChange={(event) => { const next = event.target.value; setText(next); if (next.trim() !== '' && Number.isFinite(Number(next))) onCommit(Number(next)); }}
+      onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} />
+    <small>mm</small>
+  </label>;
 }
 
 const MIN_ANNOTATION_SIZE = 2;
@@ -1269,7 +1727,7 @@ function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds,
     if (isEditing) labelClasses.push('measure-point__label--editing');
     if (point.source === 'colormap') labelClasses.push('measure-point__label--estimated');
     return <div className={`measure-point ${display >= 0 ? 'measure-point--plus' : 'measure-point--minus'} ${onLabelToggle ? 'measure-point--interactive' : ''} ${labelVisible ? '' : 'measure-point--hidden'} ${point.source === 'colormap' ? 'measure-point--estimated' : ''}`} style={{ left: `${point.x}%`, top: `${point.y}%` }} key={point.id}>
-      <button type="button" className="measure-point__dot" onClick={() => onLabelToggle?.(point.id)} aria-label={`${point.id} 라벨 ${labelVisible ? '숨기기' : '표시하기'}`} aria-pressed={labelVisible} title={`${point.id} 편차 ${point.value > 0 ? '+' : ''}${point.value.toFixed(3)} · 점 클릭으로 표시 전환`} />
+      <button type="button" className="measure-point__dot" onClick={() => onLabelToggle?.(point.id)} aria-label={`${point.id} 라벨 ${labelVisible ? '숨기기' : '표시하기'}`} aria-pressed={labelVisible} title={`${point.id} 편차 ${point.value > 0 ? '+' : ''}${point.value.toFixed(3)}${point.managementTargetMm !== undefined ? ` (원래 ${(point.rawValue ?? point.value) > 0 ? '+' : ''}${(point.rawValue ?? point.value).toFixed(3)} − 관리치 ${point.managementTargetMm > 0 ? '+' : ''}${point.managementTargetMm})` : ''} · 점 클릭으로 표시 전환`} />
       {labels && labelVisible && position && (isEditing ? <span className={labelClasses.join(' ')} style={labelStyle}>
         <input type="text" inputMode="decimal" className="measure-point__label__input" value={editValue} onChange={(e) => setEditValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitEdit(); } else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(); } }} onBlur={commitEdit} autoFocus onFocus={(e) => e.currentTarget.select()} aria-label={`${point.id} 보정치 편집`} />
         {isOverridden && <button type="button" className="measure-point__label__reset" onMouseDown={(e) => e.preventDefault()} onClick={resetOverride} aria-label="자동값으로 되돌리기" title="자동값으로 되돌리기">↺</button>}
@@ -1578,7 +2036,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
       id: `${file.name}-${file.lastModified}-${crypto.randomUUID()}`,
       name: file.name,
       partNo: partNoFromName(file.name) || `NEW-${String(scans.length + index + 1).padStart(2, '0')}`,
-      size: `${(file.size / 1024 / 1024).toFixed(1)} MB`, url: URL.createObjectURL(file), file,
+      size: `${(file.size / 1024 / 1024).toFixed(1)}MB`, url: URL.createObjectURL(file), file,
       status: 'ready', tone: (scans.length + index) % 3,
     }));
     setScans((current) => [...current, ...next]);
@@ -1594,7 +2052,24 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
         const response = await fetch(`${API_BASE}/api/analyze`, { method: 'POST', body: form });
         const data = await response.json() as AnalysisResult & { error?: string };
         if (!response.ok) throw new Error(data.error || '분석 중 오류가 발생했습니다.');
-        setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'done', result: data } : scan));
+        /* 관리치 CAD가 지정돼 있으면 정합까지 분석의 한 단계로 이어서 돈다. 탭을 바꿀 때는 다시 돌리지 않는다.
+           정합 실패는 분석 실패가 아니라 관리면 화면에만 표시한다. */
+        let management: ManagementOverlayResult | undefined;
+        let managementError: string | undefined;
+        if (target.managementCadPath && data.analysisId) {
+          try {
+            const overlay = await fetch(`${API_BASE}/api/management-overlay`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ analysisId: data.analysisId, catpartPath: target.managementCadPath }),
+            });
+            const payload = await overlay.json() as ManagementOverlayResult & { error?: string };
+            if (!overlay.ok) throw new Error(payload.error || '관리면 정합에 실패했습니다.');
+            management = payload;
+          } catch (error) {
+            managementError = error instanceof Error ? error.message : '관리면 정합에 실패했습니다.';
+          }
+        }
+        setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'done', result: data, management, managementError } : scan));
       } catch (error) {
         const message = error instanceof Error ? error.message : '분석 서버에 연결할 수 없습니다.';
         setScans((current) => current.map((scan) => scan.id === target.id ? { ...scan, status: 'error', error: message } : scan));
@@ -1646,6 +2121,27 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
       ? { ...item, cadUploading: false, cadFiles: [...(item.cadFiles || []).filter((old) => !cadFiles.some((file) => file.name === old.name)), ...cadFiles] }
       : item));
   };
+  const attachManagementCad = async (id: string, file: File) => {
+    const scan = scans.find((item) => item.id === id);
+    if (!scan) return;
+    setScans((current) => current.map((item) => item.id === id ? { ...item, managementCadUploading: true, managementCadError: undefined } : item));
+    try {
+      const form = new FormData();
+      form.append('file', file, file.name); form.append('partNumber', scan.partNo);
+      const response = await fetch(`${API_BASE}/api/management-cad`, { method: 'POST', body: form });
+      const data = await response.json() as { path?: string; name?: string; error?: string };
+      if (!response.ok || !data.path) throw new Error(data.error || '관리치 CATPart 등록에 실패했습니다.');
+      /* 제품데이터를 바꿀 때와 같이, 이미 분석한 항목은 다시 분석 대상으로 돌려 정합을 분석 버튼으로 돌린다. */
+      setScans((current) => current.map((item) => item.id === id ? {
+        ...item, managementCadUploading: false, managementCadName: data.name || file.name,
+        managementCadPath: data.path, managementCadError: undefined,
+        management: undefined, managementError: undefined, status: item.status === 'done' ? 'ready' : item.status,
+      } : item));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '관리치 CATPart 등록에 실패했습니다.';
+      setScans((current) => current.map((item) => item.id === id ? { ...item, managementCadUploading: false, managementCadError: message } : item));
+    }
+  };
   const detachProduct = (id: string) => setScans((current) => current.map((scan) => {
     if (scan.id !== id) return scan;
     if (scan.productUrl) URL.revokeObjectURL(scan.productUrl);
@@ -1671,7 +2167,9 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
           {scans.map((scan) => <div className="file-row" key={scan.id}>
             <div className={`file-thumb tone-${scan.tone}`}><img src={scan.url} alt="" /></div>
             <div className="file-row__name">
-              <b>{scan.name}</b><span>{scan.partNo} · {scan.error || scan.size}</span>
+              <b>{scan.name}</b><span>{scan.partNo}</span><span>{scan.error || scan.size}</span>
+              {scan.managementCadName && <span className="asset-status">관리치 · {scan.managementCadName}</span>}
+              {scan.managementCadError && <span className="asset-error">{scan.managementCadError}</span>}
             </div>
             <div className="file-row__actions">
               {scan.status === 'done'
@@ -1681,6 +2179,11 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
                 <input type="file" multiple accept=".catpart,.catproduct,.step,.stp,.stl" disabled={scan.cadUploading} onChange={(event: ChangeEvent<HTMLInputElement>) => { if (event.target.files?.length) void attachReferenceFiles(scan.id, event.target.files); event.currentTarget.value = ''; }} />
                 <Layers3 size={13} /> CAD 파일 업로드
                 {scan.cadUploading ? <Activity className="cad-upload-action__progress" size={13} /> : scan.cadFiles?.length ? <Check className="cad-upload-action__check" size={14} strokeWidth={3} /> : null}
+              </label>
+              <label className={`cad-upload-action management-cad-action${scan.managementCadPath ? ' cad-upload-action--done' : ''}${scan.managementCadError ? ' cad-upload-action--error' : ''}`} title={scan.managementCadName || '관리치 기준면과 BOUNDARY가 들어 있는 CATPart를 지정합니다'}>
+                <input type="file" accept=".catpart" disabled={scan.managementCadUploading} onChange={(event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) void attachManagementCad(scan.id, file); event.currentTarget.value = ''; }} />
+                <Crosshair size={13} /> 관리치 CAD 지정
+                {scan.managementCadUploading ? <Activity className="cad-upload-action__progress" size={13} /> : scan.managementCadPath ? <Check className="cad-upload-action__check" size={14} strokeWidth={3} /> : null}
               </label>
               <button className="icon-button icon-button--small upload-cancel-button" onClick={() => removeScan(scan.id)} aria-label={`${scan.name} 업로드 취소`} title="업로드 취소"><X size={15} /></button>
             </div>
@@ -1694,7 +2197,7 @@ function Workspace({ scans, selectedScan, setScans, result, onOpenResults, onOpe
 
 function engineSummary(engine: Engine, result: AnalysisResult) {
   if (result.errors[engine]) return { stat: '실패', detail: result.errors[engine] || '엔진 오류' };
-  if (engine === 'label') return { stat: `${result.stats.labelsRemoved}개`, detail: '검출된 라벨 제거 및 주변 색상 복원 완료' };
+  if (engine === 'label') return { stat: '정합', detail: 'CATIA 관리면을 스캔 이미지 좌표로 정합' };
   if (engine === 'deviation') {
     const detected = result.stats.detectedCandidates ?? result.stats.pointsDetected;
     const connected = result.stats.validCandidates ?? result.stats.pointsDetected;
@@ -1719,14 +2222,47 @@ function AlignmentBar({ alignment, partNumber, source, transferred, total, busy,
   </div>;
 }
 
-function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, onRealign, onConfirmAlignment }: { scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void> }) {
+function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, onRealign, onConfirmAlignment, managementEdit, setManagementEdit, zeroEdits, onZeroEditsChange }: { zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void; scan: ScanItem; engine: Engine; setEngine: (engine: Engine) => void; onScanData: () => void; onService: () => void; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; onRealign?: (flipX?: boolean, flipY?: boolean) => Promise<void>; onConfirmAlignment?: () => Promise<void>; managementEdit: ManagementEditState; setManagementEdit: (updater: (current: ManagementEditState) => ManagementEditState) => void }) {
   /* 편차 뷰는 세 가지로 본다: 스캔 위, 제품데이터 위, 그리고 정렬 확인용 실루엣 겹침. */
   const [frame, setFrame] = useState<'scan' | 'product' | 'overlay'>('scan');
   const [busy, setBusy] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
-  const [hiddenZeroLineIds, setHiddenZeroLineIds] = useState<Set<string>>(new Set());
-  useEffect(() => { setHiddenZeroLineIds(new Set()); }, [scan.id]);
+  /* 관리면 정합 결과는 분석 단계에서 받아 scan 에 실려 온다. 여기서는 편집용 사본만 만든다. */
+  const management = scan.management ?? null;
+  const managementError = scan.managementError ?? null;
+  const [managementDrawing, setManagementDrawing] = useState(false);
+  /* 관리 CAD 없이 수동으로 그릴 때의 라벨 배치용 실루엣. 다른 분석 결과의 것이면 쓰지 않는다. */
+  const [manualPartMask, setManualPartMask] = useState<{ analysisId: string; grid: PartMaskGrid } | null>(null);
+  /* 제로라인 숨김은 zeroEdits(hidden/deleted)에 기록해 보정시트·3D 와 같은 상태를 본다. */
+  const zeroLineIndexById = useMemo(() => new Map((scan.result?.zeroLines ?? []).map((line, index) => [String(line.id), index] as const)), [scan.result?.zeroLines]);
+  const zeroEditByIndex = useMemo(() => new Map(zeroEdits.map((edit) => [edit.index, edit] as const)), [zeroEdits]);
+  const hiddenZeroLineIds = useMemo(() => new Set([...zeroLineIndexById.entries()].filter(([, index]) => zeroLineSuppressed(zeroEditByIndex.get(index))).map(([id]) => id)), [zeroLineIndexById, zeroEditByIndex]);
+  useEffect(() => { setManagementDrawing(false); }, [scan.id]);
+  /* 편집 상태는 스캔별로 App 이 갖고 있어 시트로 갔다 와도 남는다. 분석 결과(정합 결과)가 새로 오면 그때만 다시 채운다. */
+  const managementInitialKey = `${scan.id}|${scan.result?.analysisId ?? ''}|${management ? management.source : 'manual'}`;
+  useEffect(() => {
+    setManagementEdit((current) => {
+      if (current.initialKey === managementInitialKey) return current;
+      if (!management) return { ...EMPTY_MANAGEMENT_EDIT, initialKey: managementInitialKey };
+      const palette = mergeManagementPalette(management.regions);
+      const regions: EditableManagementRegion[] = management.regions.map((region) => ({ id: region.id, targetMm: region.targetMm, color: region.color, points: region.points, splineSegments: [], source: 'cad', status: region.status, viewFactor: region.viewFactor, apply: region.status !== 'HIDDEN' }));
+      return { regions, selectedId: null, palette, activeColor: palette[0].color, initial: regions, past: [], future: [], initialKey: managementInitialKey };
+    });
+  }, [managementInitialKey, management, setManagementEdit]);
   const result = scan.result!;
+  useEffect(() => {
+    if (engine !== 'label' || scan.managementCadPath || !result.analysisId || manualPartMask?.analysisId === result.analysisId) return;
+    const analysisId = result.analysisId;
+    const controller = new AbortController();
+    void fetch(`${API_BASE}/api/part-mask`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ analysisId }), signal: controller.signal,
+    }).then(async (response) => {
+      if (!response.ok) return;
+      setManualPartMask({ analysisId, grid: await response.json() as PartMaskGrid });
+    }).catch(() => { /* 실루엣이 없어도 라벨끼리는 겹치지 않게 배치된다. */ });
+    return () => controller.abort();
+  }, [engine, result.analysisId, scan.managementCadPath, manualPartMask?.analysisId]);
   const keyPointIds = new Set(result.keySelection?.ids ?? result.points.filter((point) => point.keyReasons?.length).map((point) => point.id));
   const hasKeySelection = result.keySelection !== undefined;
   const showKeyPointsOnly = keyPointsOnly && hasKeySelection;
@@ -1741,16 +2277,64 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
   const zeroLines = (result.zeroLines ?? []).filter((line) => Array.isArray(line.points) && line.points.length >= 2);
   const visibleZeroLines = zeroLines.filter((line) => !hiddenZeroLineIds.has(String(line.id)));
   const hasZeroLineControls = engine === 'zero' && zeroLines.length > 0;
-  const hasInspectionPanel = engine === 'label' || engine === 'deviation' || hasZeroLineControls;
-  const toggleZeroLine = (id: number | string) => setHiddenZeroLineIds((current) => {
-    const next = new Set(current); const key = String(id);
-    if (next.has(key)) next.delete(key); else next.add(key);
-    return next;
+  const showManagementEditor = engine === 'label' && (Boolean(management) || !scan.managementCadPath);
+  const hasInspectionPanel = engine === 'deviation' || hasZeroLineControls || showManagementEditor;
+  const managementRegions = managementEdit.regions;
+  const managementPartMask = management?.partMask ?? (manualPartMask && manualPartMask.analysisId === result.analysisId ? manualPartMask.grid : null);
+  const setManagementRegions = (regions: EditableManagementRegion[]) => setManagementEdit((current) => commitManagementRegions(current, regions));
+  const undoManagement = () => setManagementEdit((current) => {
+    const previous = current.past[current.past.length - 1];
+    if (!previous) return current;
+    const selectedId = previous.some((region) => region.id === current.selectedId) ? current.selectedId : null;
+    return { ...current, regions: previous, selectedId, past: current.past.slice(0, -1), future: [current.regions, ...current.future] };
   });
+  const redoManagement = () => setManagementEdit((current) => {
+    const [next, ...future] = current.future;
+    if (!next) return current;
+    const selectedId = next.some((region) => region.id === current.selectedId) ? current.selectedId : null;
+    return { ...current, regions: next, selectedId, past: [...current.past, current.regions], future };
+  });
+  /* 분석이 준 영역으로 되돌린다. 이것도 되돌리기 한 단계라 Ctrl+Z 로 취소할 수 있다. */
+  const resetManagement = () => setManagementEdit((current) => ({ ...commitManagementRegions(current, current.initial), selectedId: null }));
+  /* 영역을 고르면 그 색이 활성 색이 되어 툴바 입력칸이 그 관리치를 보여 준다. */
+  const selectManagementRegion = (id: string | null) => setManagementEdit((current) => {
+    const region = current.regions.find((item) => item.id === id);
+    return { ...current, selectedId: id, activeColor: region ? region.color : current.activeColor };
+  });
+  /* 색 하나 = 관리치 하나. 값을 바꾸면 같은 색 영역 전부가 따라간다. */
+  const setManagementSwatchTarget = (color: string, targetMm: number) => setManagementEdit((current) => {
+    const palette = current.palette.map((swatch) => swatch.color === color ? { ...swatch, targetMm } : swatch);
+    const affected = current.regions.some((region) => region.color === color && region.targetMm !== targetMm);
+    const regions = affected ? current.regions.map((region) => region.color === color ? { ...region, targetMm } : region) : current.regions;
+    return { ...commitManagementRegions(current, regions), palette };
+  });
+  const deleteManagementRegion = (id: string) => setManagementEdit((current) => ({
+    ...commitManagementRegions(current, current.regions.filter((region) => region.id !== id)),
+    selectedId: current.selectedId === id ? null : current.selectedId,
+  }));
+  const setManagementRegionApply = (id: string, apply: boolean) => setManagementEdit((current) => commitManagementRegions(current, current.regions.map((region) => region.id === id ? { ...region, apply } : region)));
+  const selectedManagementRegion = managementDrawing ? undefined : managementRegions.find((region) => region.id === managementEdit.selectedId);
+  const activeManagementSwatch = managementEdit.palette.find((swatch) => swatch.color === managementEdit.activeColor) ?? managementEdit.palette[0];
+  /* 색을 고르면 활성 색이 되고, 영역이 선택돼 있으면 그 영역의 색·관리치도 함께 바뀐다. */
+  const pickManagementSwatch = (swatch: ManagementSwatch) => setManagementEdit((current) => {
+    const selected = current.regions.find((region) => region.id === current.selectedId);
+    const regions = selected && !managementDrawing ? current.regions.map((region) => region.id === selected.id ? { ...region, color: swatch.color, targetMm: swatch.targetMm } : region) : current.regions;
+    return { ...commitManagementRegions(current, regions), activeColor: swatch.color };
+  });
+  const managementGuide = managementDrawing
+    ? '관리영역 외곽을 따라 점을 찍고 첫 점을 다시 누르면 완성 · Ctrl+Z 마지막 점 취소 · Esc 취소'
+    : selectedManagementRegion ? '꼭짓점·라벨 드래그로 이동 · 변 더블클릭으로 직선/스플라인 전환 · 색상 클릭으로 관리치 변경 · Delete 삭제' : '관리영역 클릭으로 꼭짓점 편집 · 라벨 드래그로 이동';
+  const toggleZeroLine = (id: number | string) => {
+    const index = zeroLineIndexById.get(String(id));
+    if (index === undefined) return;
+    const suppressed = zeroLineSuppressed(zeroEditByIndex.get(index));
+    /* 다시 켜면 숨김과 삭제를 모두 푼다. */
+    onZeroEditsChange(updateZeroEdit(zeroEdits, index, suppressed ? { hidden: false, deleted: false } : { hidden: true }));
+  };
   const showReviewedCase1Overlay = engine === 'zero' && result.zeroCase === 1 && showFrame === 'scan' && Boolean(result.zeroOverlay);
-  const image = showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : showReviewedCase1Overlay ? result.zeroOverlay : engine === 'zero' && hasZeroLineControls ? result.cleanImage || scan.url : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
-  const frameWidth = showFrame === 'scan' || !alignment ? result.source.width : alignment.productSize[0];
-  const frameHeight = showFrame === 'scan' || !alignment ? result.source.height : alignment.productSize[1];
+  const image = engine === 'label' ? management?.image || result.cleanImage || scan.url : showFrame === 'product' ? result.productImage : showFrame === 'overlay' ? result.alignmentOverlay : showReviewedCase1Overlay ? result.zeroOverlay : engine === 'zero' && hasZeroLineControls ? result.cleanImage || scan.url : engine === 'zero' ? result.zeroOverlay : result.cleanImage || scan.url;
+  const frameWidth = engine === 'label' && management ? management.width : showFrame === 'scan' || !alignment ? result.source.width : alignment.productSize[0];
+  const frameHeight = engine === 'label' && management ? management.height : showFrame === 'scan' || !alignment ? result.source.height : alignment.productSize[1];
   const toggleLabel = onPointToggle;
   const runRealign = async (flipX?: boolean, flipY?: boolean) => {
     if (!onRealign || busy) return;
@@ -1769,6 +2353,8 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
         <div className="viewer-toolbar">
           <div><b>{scan.name}</b></div>
           <div>
+            {engine === 'label' && management && <span className="management-fit-summary">관리영역 {managementRegions.length}개 · 정합 {(management.fit.iou * 100).toFixed(1)}%</span>}
+            {engine === 'label' && !scan.managementCadPath && <span className="management-fit-summary management-fit-summary--manual">수동 관리영역 {managementRegions.length}개</span>}
             {productReady && <div className="frame-toggles">{([['scan', '스캔 위'], ['product', '제품데이터 위'], ['overlay', '정렬 확인']] as const).map(([key, label]) => <button key={key} type="button" className={showFrame === key ? 'active' : ''} onClick={() => setFrame(key)}>{label}</button>)}</div>}
             {engine === 'deviation' && <div className={`point-filter-switch ${showKeyPointsOnly ? 'active' : ''}`}>
               <span>주요 포인트만 표시</span>
@@ -1777,24 +2363,33 @@ function Results({ scan, engine, setEngine, onScanData, onService, hiddenPointId
           </div>
         </div>
         {productReady && alignment && <AlignmentBar alignment={alignment} partNumber={result.partNumber} source={result.productSource} transferred={productPoints.length} total={result.points.length} busy={busy} confirmed={confirmed} onFlip={onRealign ? runRealign : undefined} onConfirm={onConfirmAlignment ? runConfirm : undefined} />}
+        {showManagementEditor && <ManagementToolbar drawing={managementDrawing} hasSelection={Boolean(selectedManagementRegion)} palette={managementEdit.palette} activeColor={managementEdit.activeColor}
+          canUndo={managementEdit.past.length > 0} canRedo={managementEdit.future.length > 0} canReset={managementEdit.regions !== managementEdit.initial} guide={managementGuide}
+          onToggleDrawing={() => { setManagementDrawing((current) => !current); selectManagementRegion(null); }} onDelete={() => { if (selectedManagementRegion) deleteManagementRegion(selectedManagementRegion.id); }}
+          onUndo={undoManagement} onRedo={redoManagement} onReset={resetManagement} onPickSwatch={pickManagementSwatch} onSwatchTarget={setManagementSwatchTarget} />}
         <div className={`viewer-stage ${engine === 'deviation' ? 'viewer-stage--light' : ''}`}>
-          <Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'} containImage>
+          {engine === 'label' && scan.managementCadPath && !management ? <div className={`management-overlay-state ${managementError ? 'management-overlay-state--error' : ''}`}>
+            <AlertTriangle size={26} /><b>{managementError ? '관리면을 표시하지 못했습니다.' : '관리면 정합 결과가 없습니다.'}</b><span>{managementError || '데이터 입력 화면에서 분석을 다시 실행하면 정합이 함께 진행됩니다.'}</span>
+          </div> : <Heatmap key={`${scan.id}-${engine}-${showFrame}`} imageUrl={image} width={frameWidth} height={frameHeight} lightBackground={engine === 'deviation'} containImage>
+            {showManagementEditor && <ManagementRegionEditor regions={managementRegions} selectedId={managementEdit.selectedId} partMask={managementPartMask} activeSwatch={activeManagementSwatch} drawing={managementDrawing} onDrawingChange={setManagementDrawing} onSelect={selectManagementRegion} onChange={setManagementRegions} onDelete={deleteManagementRegion} onUndo={undoManagement} onRedo={redoManagement} />}
             {engine === 'deviation' && showFrame !== 'overlay' && <CorrectionPoints coefficient={-1} points={showFrame === 'product' ? displayedProductPoints : displayedPoints} visibleLabelIds={visibleLabelIds} onLabelToggle={toggleLabel} />}
             {engine === 'zero' && hasZeroLineControls && !showReviewedCase1Overlay && <ZeroLineLayer lines={visibleZeroLines} width={frameWidth} height={frameHeight} />}
-          </Heatmap>
+          </Heatmap>}
         </div>
       </div>
-      {engine === 'label' && <aside className="inspection-panel">
-        <div className="card label-removal-count">
-          <span className="label-removal-count__icon"><Sparkles size={19} /></span>
-          <div><span>제거된 라벨 영역</span><strong>{result.stats.labelsRemoved}<small>개</small></strong><p>라벨 제거 및 주변 색상 복원 완료</p></div>
-        </div>
-      </aside>}
       {engine === 'deviation' && <aside className="inspection-panel">
         <div className="card mini-table"><div className="card-title"><h3>검출 포인트</h3><span>{showKeyPointsOnly ? `주요 ${displayedPoints.length}/${result.points.length}` : `${visibleLabelIds.size}/${result.points.length}`}</span></div>{displayedPoints.map((point) => { const visible = visibleLabelIds.has(point.id); return <div className="point-list-row" key={point.id}><span>{point.id}</span><b className={point.value > 0 ? 'positive' : 'negative'}>{point.value > 0 ? '+' : ''}{point.value.toFixed(3)} mm</b><small>{point.xPx}, {point.yPx}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleLabel(point.id)} aria-label={`${point.id} 라벨 ${visible ? '숨기기' : '표시하기'}`} title={`라벨 ${visible ? 'OFF' : 'ON'}`}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}{!displayedPoints.length && <p className="empty-mini">표시할 포인트가 없습니다.</p>}</div>
       </aside>}
       {hasZeroLineControls && <aside className="inspection-panel">
-        <div className="card mini-table zero-line-list"><div className="card-title"><h3>추천 제로라인</h3><span>{visibleZeroLines.length}/{zeroLines.length}</span></div>{zeroLines.map((line, index) => { const visible = !hiddenZeroLineIds.has(String(line.id)); const label = `ZL-${String(index + 1).padStart(2, '0')}`; return <div className="zero-line-list-row" key={String(line.id)}><span><i className="zero-line-swatch" />{label}</span><small>{visible ? '표시' : '숨김'}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleZeroLine(line.id)} aria-label={`${label} ${visible ? '숨기기' : '표시하기'}`} title={visible ? '제로라인 숨기기' : '제로라인 표시하기'}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}</div>
+        <div className="card mini-table zero-line-list"><div className="card-title"><h3>추천 제로라인</h3><span>{visibleZeroLines.length}/{zeroLines.length}</span></div>{zeroLines.map((line, index) => { const visible = !hiddenZeroLineIds.has(String(line.id)); const deleted = Boolean(zeroEditByIndex.get(zeroLineIndexById.get(String(line.id)) ?? -1)?.deleted); const label = `ZL-${String(index + 1).padStart(2, '0')}`; return <div className="zero-line-list-row" key={String(line.id)}><span><i className="zero-line-swatch" />{label}</span><small>{deleted ? '삭제됨' : visible ? '표시' : '숨김'}</small><button type="button" className={visible ? 'label-visibility active' : 'label-visibility'} onClick={() => toggleZeroLine(line.id)} aria-label={`${label} ${visible ? '숨기기' : '표시하기'}`} title={visible ? '제로라인 숨기기' : '제로라인 표시하기'}>{visible ? <Eye size={14} /> : <EyeOff size={14} />}</button></div>; })}</div>
+      </aside>}
+      {showManagementEditor && <aside className="inspection-panel">
+        <div className="card mini-table management-region-list"><div className="card-title"><h3>관리영역</h3><span>{managementRegions.length}개</span></div>{managementRegions.map((region, index) => { const name = `MR-${String(index + 1).padStart(2, '0')}`; return <div key={region.id} className={`management-region-row${region.id === managementEdit.selectedId ? ' selected' : ''}`} onClick={() => selectManagementRegion(region.id)}>
+          <span><i className="management-region-swatch" style={{ background: region.color }} />{name}<small>{region.source === 'cad' ? 'CATIA' : '수동'}</small>{region.status && region.status !== 'VISIBLE' && <em className={`management-region-status management-region-status--${region.status.toLowerCase()}`} title={`투영 넓이 / 3D 넓이 = ${((region.viewFactor ?? 0) * 100).toFixed(0)}% · ${region.status === 'HIDDEN' ? '정면에서 옆으로 보여 자동 계산 불가' : '일부만 보여 참고값'}`}>{region.status === 'HIDDEN' ? '옆면' : '부분'}</em>}</span>
+          <input type="checkbox" className="management-region-apply" checked={region.apply !== false} title={region.apply !== false ? '보정시트 계산에 포함' : '표시만 하고 계산에서 제외'} aria-label={`${name} 보정시트 계산 포함`} onClick={(event) => event.stopPropagation()} onChange={(event) => setManagementRegionApply(region.id, event.target.checked)} />
+          <ManagementTargetInput value={region.targetMm} label={`${name} 관리치`} onCommit={(value) => setManagementSwatchTarget(region.color, value)} />
+          <button type="button" className="label-visibility" onClick={(event) => { event.stopPropagation(); deleteManagementRegion(region.id); }} aria-label={`${name} 삭제`} title="관리영역 삭제"><Trash2 size={13} /></button>
+        </div>; })}{!managementRegions.length && <p className="empty-mini">관리영역이 없습니다.</p>}</div>
       </aside>}
     </div></section>;
 }
@@ -2444,8 +3039,34 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   const [zeroPanel, setZeroPanel] = useState(false);
   const [zeroPointAddMode, setZeroPointAddMode] = useState(false);
   const [zeroPointDeleteMode, setZeroPointDeleteMode] = useState(false);
-  const [draftZeroEdits, setDraftZeroEdits] = useState<ZeroEdit[]>(zeroEdits);
-  useEffect(() => { setDraftZeroEdits(zeroEdits); }, [scan.id, zeroEdits]);
+  /* 제로라인 편집 초안과 되돌리기 히스토리. edits 가 화면에 보이는 값이고 past/future 는
+     Ctrl+Z / Ctrl+Shift+Z(또는 Ctrl+Y) 용이다. "3D에 적용"으로 기준(zeroEdits)이 바뀌면 히스토리는 비운다. */
+  const [zeroDraft, setZeroDraft] = useState<{ edits: ZeroEdit[]; past: ZeroEdit[][]; future: ZeroEdit[][] }>({ edits: zeroEdits, past: [], future: [] });
+  useEffect(() => { setZeroDraft({ edits: zeroEdits, past: [], future: [] }); }, [scan.id, zeroEdits]);
+  const draftZeroEdits = zeroDraft.edits;
+  const setDraftZeroEdits = useCallback((updater: ZeroEdit[] | ((current: ZeroEdit[]) => ZeroEdit[])) => setZeroDraft((current) => {
+    const edits = typeof updater === 'function' ? updater(current.edits) : updater;
+    return edits === current.edits ? current : { edits, past: [...current.past.slice(-99), current.edits], future: [] };
+  }), []);
+  const undoZeroDraft = useCallback(() => setZeroDraft((current) => {
+    const previous = current.past[current.past.length - 1];
+    return previous ? { edits: previous, past: current.past.slice(0, -1), future: [current.edits, ...current.future] } : current;
+  }), []);
+  const redoZeroDraft = useCallback(() => setZeroDraft((current) => {
+    const [next, ...future] = current.future;
+    return next ? { edits: next, past: [...current.past, current.edits], future } : current;
+  }), []);
+  useEffect(() => {
+    if (!zeroPanel) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      const key = event.key.toLowerCase();
+      if (key === 'z' && !event.shiftKey) { event.preventDefault(); undoZeroDraft(); }
+      else if (key === 'y' || (key === 'z' && event.shiftKey)) { event.preventDefault(); redoZeroDraft(); }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [zeroPanel, undoZeroDraft, redoZeroDraft]);
   /* 보정치 수치 라벨(+1.5 등) 글꼴 — "선택하면 자유롭게" 가 아니라 시트 전체 한 번에 바뀌는 값이라 여기 하나로 둔다. */
   const [pointLabelFont, setPointLabelFont] = useState(DEFAULT_POINT_LABEL_FONT);
   /* 보정시트에 들어가는 그림은 편차 히트맵이 아니라 깨끗한 제품데이터다.
@@ -2453,16 +3074,22 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   const alignment = result.alignment;
   const productReady = Boolean(result.productImage && alignment);
   const [useProduct, setUseProduct] = useState(true);
-  const onProduct = productReady && useProduct;
+  /* 제품 이미지는 기본으로 스캔 프레임에 맞춘 판(productScanImage)을 쓴다. 그러면 좌표계가 스캔과 같아
+     포인트·제로라인·Detail 영역이 스캔 위에서와 똑같이 동작한다. 원본 방향은 버튼으로 전환한다. */
+  const [productInScanFrame, setProductInScanFrame] = useState(true);
+  const scanFrameProduct = productReady && useProduct && productInScanFrame && Boolean(result.productScanImage);
+  const onProduct = productReady && useProduct && !scanFrameProduct;
   /* 미리 렌더된 zeroOverlay 는 스캔 좌표계 래스터라 제품데이터 위에는 못 얹지만,
      벡터 폴리라인(result.zeroLines) 이 있으면 alignment 로 좌표를 옮겨 SVG 로 그려 준다. */
   const hasZeroVector = Boolean(result.zeroLines && result.zeroLines.length);
   const zeroReady = hasZeroVector || (Boolean(result.zeroOverlay) && !onProduct);
   const frameWidth = onProduct ? alignment!.productSize[0] : result.source.width;
   const frameHeight = onProduct ? alignment!.productSize[1] : result.source.height;
-  const sheetImageSource = onProduct
-    ? result.productImage!
-    : showZero && result.zeroOverlay && !hasZeroVector ? result.zeroOverlay : result.cleanImage || scan.url;
+  const sheetImageSource = scanFrameProduct
+    ? result.productScanImage!
+    : onProduct
+      ? result.productImage!
+      : showZero && result.zeroOverlay && !hasZeroVector ? result.zeroOverlay : result.cleanImage || scan.url;
   /* 회전/반전 상태도 위(sheetLayoutsByScan 등)와 같은 이유로 Home 에서
      scan.id 로 갈라 물려받는다 -- 탭을 옮겨도 유지되면서, 다른 파트는
      scan.id 가 다르니 자동으로 항등 변환(IDENTITY_SHEET_TRANSFORM)부터
@@ -2533,7 +3160,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   const [sampleError, setSampleError] = useState<string | null>(null);
   const editedZeroLinePixels = useMemo<[number, number][][]>(() => (result.zeroLines || []).map((line, lineIndex) => {
     const edit = draftZeroEdits.find((item) => item.index === lineIndex);
-    if (edit?.hidden) return [];
+    if (zeroLineSuppressed(edit)) return [];
     const source = Array.isArray(edit?.vertices) && edit.vertices.length >= 2 ? edit.vertices : (line.points || []);
     return source
       .filter((point) => Array.isArray(point) && point.length >= 2 && Number.isFinite(point[0]) && Number.isFinite(point[1]))
@@ -3269,7 +3896,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   return <section className="page page--service">
     <div className="page-heading page-heading--compact"><div><h2>보정 시트 작성</h2></div></div>
     <div className="service-grid"><div className="correction-card card">
-      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button><button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
+      <div className="viewer-toolbar"><div><span className="status status--done"><Check size={13} /> 레이아웃 편집</span><b>{scan.partNo} · 보정 작업 지시도</b></div><div className="layer-toggles"><button className={onProduct || scanFrameProduct ? 'active blue' : ''} onClick={() => setUseProduct(!useProduct)} disabled={!productReady} title={productReady ? '제품데이터 위에 보정치를 올립니다' : '이 품번의 제품데이터가 등록되어 있지 않습니다'}><i /> 제품데이터</button>{productReady && useProduct && result.productScanImage && <button className={scanFrameProduct ? 'active blue' : ''} onClick={() => setProductInScanFrame((current) => !current)} title={scanFrameProduct ? '제품데이터를 스캔과 같은 방향·크기로 돌려 놓은 상태. 누르면 원본 방향' : '제품데이터를 스캔 방향으로 맞춥니다'}><i /> 스캔 방향</button>}<button className={showPoints ? 'active orange' : ''} onClick={() => setShowPoints(!showPoints)}><i /> 보정치</button><button className={showZero && zeroReady ? 'active green' : ''} onClick={() => setShowZero(!showZero)} disabled={!zeroReady} title={!zeroReady ? '이 스캔에는 제로라인 데이터가 없습니다' : (onProduct && !hasZeroVector ? '제품데이터 위에 겹칠 제로라인 벡터가 없습니다' : '')}><i /> 제로라인</button><button className={showAnnotations ? 'active amber' : ''} onClick={() => { setShowAnnotations(!showAnnotations); setTool('select'); setSelectedAnnotationId(null); }}><i /> 주석</button></div></div>
       <div className="sheet-image-toolbar" role="toolbar" aria-label="보정시트 이미지 방향">
         <b>이미지 방향</b>
         <button type="button" onClick={rotateSheet} title="이미지와 보정 위치를 함께 시계 방향으로 90° 회전">90° 회전</button>
@@ -3280,7 +3907,18 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
         {renderedSheetImage.error && <em>{renderedSheetImage.error}</em>}
       </div>
       <AnnotationToolbar tool={tool} setTool={(next) => { setShowAnnotations(true); setTool(next); setDetailMode(false); setLabelAreaMode(null); if (next !== 'select') setSelectedAnnotationId(null); }} hasAnnotations={annotations.length > 0} onClearAll={clearAnnotations} selectedColor={selectedColor} onColorChange={changeColor} detailMode={detailMode} onDetailMode={() => { setDetailMode(!detailMode); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); }} labelAreaMode={labelAreaMode} onLabelAreaMode={(mode) => { setLabelAreaMode((current) => current === mode ? null : mode); setDetailMode(false); setAddPointMode(false); setTool('select'); setSelectedAnnotationId(null); }} addPointMode={addPointMode} onAddPointMode={() => { setAddPointMode(!addPointMode); setDetailMode(false); setLabelAreaMode(null); setTool('select'); setSelectedAnnotationId(null); setSampleError(null); }} zeroEditActive={zeroPanel} zeroEditDisabled={!editableZeroLineCount(result)} onZeroEdit={toggleZeroEditor} keyPointsOnly={keyPointsOnly && hasKeySelection} keyPointsDisabled={!hasKeySelection} onKeyPointsOnlyChange={() => onKeyPointsOnlyChange(!keyPointsOnly)} />
-      {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
+      {zeroPanel && <div className="zero-edit zero-edit--compact"><div className="zero-edit__head"><div><b>제로라인 직접 편집</b><span>점을 끌어 이동 · 구간을 더블클릭해 직선/스플라인 전환</span></div>
+        <div className="zero-edit__lines" role="list" aria-label="제로라인 표시·삭제">{(result.zeroLines ?? []).map((line, index) => {
+          const edit = draftZeroEdits.find((item) => item.index === index);
+          const label = `ZL-${String(index + 1).padStart(2, '0')}`;
+          const suppressed = zeroLineSuppressed(edit);
+          return <span key={String(line.id)} role="listitem" className={`zero-edit__line${suppressed ? ' is-off' : ''}`}><i className="zero-line-swatch" />{label}
+            {edit?.deleted
+              ? <button type="button" className="zero-edit__icon" aria-label={`${label} 복구`} title="삭제 취소" onClick={() => setDraftZeroEdits((current) => updateZeroEdit(current, index, { deleted: false, hidden: false }))}><RotateCcw size={12} /></button>
+              : <><button type="button" className="zero-edit__icon" aria-label={`${label} ${edit?.hidden ? '표시' : '숨기기'}`} title={edit?.hidden ? '표시' : '숨기기'} onClick={() => setDraftZeroEdits((current) => updateZeroEdit(current, index, { hidden: !edit?.hidden }))}>{edit?.hidden ? <EyeOff size={12} /> : <Eye size={12} />}</button>
+                <button type="button" className="zero-edit__icon" aria-label={`${label} 삭제`} title="삭제" onClick={() => setDraftZeroEdits((current) => updateZeroEdit(current, index, { deleted: true }))}><Trash2 size={12} /></button></>}
+          </span>;
+        })}</div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__icon" disabled={!zeroDraft.past.length} onClick={undoZeroDraft} aria-label="되돌리기" title="되돌리기 (Ctrl+Z)"><Undo2 size={13} /></button><button type="button" className="zero-edit__icon" disabled={!zeroDraft.future.length} onClick={redoZeroDraft} aria-label="다시 실행" title="다시 실행 (Ctrl+Shift+Z)"><Redo2 size={13} /></button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
       <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} initialRegions={detailRegions} initialLayouts={sheetLayouts} initialLabelPositionsByLayout={labelPositionsByLayout} frontRotationSeed={{ transform: activeSheetTransform, canonicalOffsets: storedFrontLabelOffsets }} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} onLabelPositionsChange={handleLabelPositionsChange} onLayerSizeChange={handleLayerSizeChange} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
@@ -3709,6 +4347,7 @@ export default function Home() {
   const [regionsByCad, setRegionsByCad] = useState<Record<string, CadRegion[]>>({});
   const [zonesByPart, setZonesByPart] = useState<Record<string, CadRegion[]>>({});
   const [zeroEditsByScan, setZeroEditsByScan] = useState<Record<string, ZeroEdit[]>>({});
+  const [managementEditByScan, setManagementEditByScan] = useState<Record<string, ManagementEditState>>({});
   /* 보정시트 탭에서 회전/라벨위치/창 크기 조절은 전부 ServicePreview 안의
      로컬 state 였다 -- WORKSPACE 메뉴를 "엔진 결과" 등 다른 탭으로 옮기면
      view !== 'service' 라 ServicePreview 가 통째로 언마운트되고, 그 안의
@@ -3762,6 +4401,23 @@ export default function Home() {
   useEffect(() => { fetch(`${API_BASE}/api/health`).then((response) => response.json() as Promise<HealthResponse>).then((data) => setBackendOnline(Boolean(data.ok))).catch(() => setBackendOnline(false)); }, []);
   const resolvedActiveId = activeId || scans[0]?.id;
   const activeScan = scans.find((scan) => scan.id === resolvedActiveId); const completedScan = activeScan?.result ? activeScan : scans.find((scan) => scan.result); const hasResult = Boolean(completedScan?.result);
+  /* 관리영역 편집 상태는 스캔별로 여기 둔다. 시트·3D 화면은 관리치가 적용된 포인트(수정 편차)를 받는다. */
+  const completedScanId = completedScan?.id;
+  const setCompletedManagementEdit = useMemo(() => (updater: (current: ManagementEditState) => ManagementEditState) => {
+    if (!completedScanId) return;
+    setManagementEditByScan((current) => {
+      const previous = current[completedScanId] ?? EMPTY_MANAGEMENT_EDIT;
+      const next = updater(previous);
+      return next === previous ? current : { ...current, [completedScanId]: next };
+    });
+  }, [completedScanId]);
+  const withManagement = useCallback((scan: ScanItem): ScanItem => {
+    const regions = managementEditByScan[scan.id]?.regions;
+    if (!scan.result || !regions?.length) return scan;
+    return { ...scan, result: { ...scan.result, points: applyManagementToPoints(scan.result.points, regions, scan.result.source.width, scan.result.source.height) } };
+  }, [managementEditByScan]);
+  const sheetScan = useMemo(() => completedScan ? withManagement(completedScan) : completedScan, [completedScan, withManagement]);
+  const sheetScans = useMemo(() => scans.map(withManagement), [scans, withManagement]);
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const pointOverrides = completedScan ? pointOverridesByScan[completedScan.id] || {} : {};
   const coefficient = completedScan ? coefficientByScan[completedScan.id] ?? 1 : 1;
@@ -3825,7 +4481,7 @@ export default function Home() {
     if (rotation !== undefined) form.append('rotation', String(rotation));
     form.append('points', JSON.stringify(target.result!.points.map((point) => ({ id: point.id, xPx: point.xPx, yPx: point.yPx }))));
     const response = await fetch(`${API_BASE}/api/realign`, { method: 'POST', body: form });
-    const data = await response.json() as { alignment?: AlignmentInfo; alignmentOverlay?: string; productImage?: string; productSource?: string; points?: { id: string; xProduct: number; yProduct: number }[]; warnings?: string[]; error?: string };
+    const data = await response.json() as { alignment?: AlignmentInfo; alignmentOverlay?: string; productImage?: string; productScanImage?: string; productSource?: string; points?: { id: string; xProduct: number; yProduct: number }[]; warnings?: string[]; error?: string };
     if (!response.ok || !data.alignment) throw new Error(data.error || '정렬을 다시 계산하지 못했습니다.');
     const moved = new Map((data.points || []).map((point) => [point.id, point]));
     setScans((current) => current.map((scan) => scan.id !== target.id || !scan.result ? scan : { ...scan, result: {
@@ -3833,6 +4489,7 @@ export default function Home() {
       alignment: data.alignment!,
       alignmentOverlay: data.alignmentOverlay ?? scan.result.alignmentOverlay,
       productImage: data.productImage ?? scan.result.productImage,
+      productScanImage: data.productScanImage ?? scan.result.productScanImage,
       productSource: data.productSource ?? scan.result.productSource,
       points: scan.result.points.map((point) => { const next = moved.get(point.id); return next ? { ...point, xProduct: next.xProduct, yProduct: next.yProduct } : { ...point, xProduct: undefined, yProduct: undefined }; }),
       stats: { ...scan.result.stats, pointsTransferred: moved.size },
@@ -3932,11 +4589,11 @@ export default function Home() {
     <div className="app-main">
       {view === 'overview' && <WorkspaceHub onSelect={selectView} hasResult={hasResult} scanCount={scans.length} backendOnline={backendOnline} />}
       {view === 'workspace' && <Workspace scans={scans} selectedScan={activeScan || scans[0]} setScans={setScans} result={completedScan?.result} onOpenResults={openResults} onOpenEngine={openEngine} backendOnline={backendOnline} />}
-      {view === 'results' && completedScan?.result && <Results scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
-      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
+      {view === 'results' && completedScan?.result && <Results managementEdit={managementEditByScan[completedScan.id] ?? EMPTY_MANAGEMENT_EDIT} setManagementEdit={setCompletedManagementEdit} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
+      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={sheetScan ?? completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
       {view === 'files' && <FileOrganizerPage />}
       <div style={{ display: view === 'cad' ? 'block' : 'none' }}>
-        <CadWorkspace active={view === 'cad'} scans={scans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
+        <CadWorkspace active={view === 'cad'} scans={sheetScans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
       </div>
     </div>
   </main>;
