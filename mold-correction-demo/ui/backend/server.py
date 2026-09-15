@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time as _time
 import tempfile
 import threading
 import uuid
@@ -110,7 +111,8 @@ from cad_import.mesh_io import (  # noqa: E402
     is_mesh_file, load_any as load_any_mesh, load_mesh,
     split_symmetric_pair, to_web_mesh,
 )
-from cad_import.overlay import fit_view as fit_mesh_view  # noqa: E402
+from cad_import.overlay import fit_view as fit_mesh_view, refine_fit_by_silhouette, to_pixels as cad_to_pixels  # noqa: E402
+from cad_import.catia_management_geometry import extract_management_boundaries, management_source_key  # noqa: E402
 from cad_import.catia_capture import capture_product_image as capture_catia_product_image  # noqa: E402
 from zero_line_detection.visualize import make_overlay  # noqa: E402
 from zero_line_detection.colorbar import detect_colorbar  # noqa: E402
@@ -223,6 +225,7 @@ FILE_LOG_ROOT = UI_DIR / "backend" / "file_operation_logs"
 MAX_FILE_ORGANIZER_UPLOAD_BYTES = 500 * 1024 * 1024
 MAX_UPLOAD_BYTES = 60 * 1024 * 1024
 MAX_CAD_UPLOAD_BYTES = 300 * 1024 * 1024
+MANAGEMENT_CAD_DIR = PROJECT_DIR / "data" / "management_surface"
 
 # 분석 결과와 CAD 파싱 결과는 후속 3D 작업에서 재사용한다. STEP 재파싱과
 # Qwen 재판독을 피하고, 여러 CAD 탭을 동시에 열 수 있도록 원 브랜치와
@@ -231,6 +234,11 @@ _analysis_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _ANALYSIS_CACHE_MAX = 5
 _cad_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
 _CAD_CACHE_MAX = 6
+_management_overlay_cache: "OrderedDict[str, dict[str, Any]]" = OrderedDict()
+_MANAGEMENT_OVERLAY_CACHE_MAX = 5
+_management_overlay_lock = threading.Lock()
+# 분석·정합 CAD 조합별 자세. 관리 CATPart만 바꿔 다시 볼 때 정합을 되풀이하지 않는다.
+_management_fit_cache: "OrderedDict[str, Any]" = OrderedDict()
 
 
 def _cache_analysis(entry: dict[str, Any]) -> str:
@@ -1044,6 +1052,256 @@ def _cad_cache_dir() -> Path:
     return MESH_LIBRARY.directory / ".cache"
 
 
+def _default_management_catpart() -> Path:
+    """품번별 지정이 없을 때의 관리 CATPart. 실데이터 경로를 코드에 두지 않고 환경변수로만 받는다."""
+    configured = os.environ.get("AJIN_MANAGEMENT_CATPART")
+    if configured:
+        return Path(configured).expanduser()
+    raise FileNotFoundError("관리치 CATPart가 지정되지 않았습니다. 데이터 입력 화면에서 '관리치 CAD 지정'을 하거나 AJIN_MANAGEMENT_CATPART 환경변수를 설정하세요.")
+
+
+def _management_source_path(value: Any) -> Path:
+    path = Path(str(value).strip()).expanduser() if value else _default_management_catpart()
+    if not path.is_file() or path.suffix.lower() != ".catpart":
+        raise FileNotFoundError(f"관리면 CATPart를 찾을 수 없습니다: {path}")
+    return path.resolve()
+
+
+def _management_alignment_path(part_number: str, value: Any) -> Path:
+    if value:
+        path = Path(str(value).strip()).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"정합용 CAD를 찾을 수 없습니다: {path}")
+        return path.resolve()
+    match = MESH_LIBRARY.find(part_number)
+    path = match.path if match is not None else _find_cad_source_for_part(part_number)
+    if path is None:
+        raise FileNotFoundError(_mesh_not_found_message(part_number))
+    return path.resolve()
+
+
+def _analysis_silhouette(analysis: dict[str, Any]) -> np.ndarray:
+    """관리면 정합·라벨 배치에 쓰는 부품 실루엣. CAD 뷰어와 같은 `build_part_silhouette`를 쓴다.
+
+    제로라인 파이프라인의 `part_mask`는 히트맵 색을 기준으로 잡아서, 실측 71XX2처럼
+    상단에 빨간 제목 글자가 있으면 그 글자(214×47px)까지 부품으로 넣는다. 그 마스크로
+    정합하면 IoU 0.65에 각도 12°·배율 1.2가 틀어져 관리면이 엉뚱한 곳에 얹혔다.
+    실루엣은 분석 항목에 한 번만 만들어 둔다.
+    """
+    cached = analysis.get("part_silhouette")
+    if cached is not None:
+        return cached
+    overlay_base = np.asarray(analysis.get("overlay_base"), dtype=np.uint8)
+    silhouette = None
+    if overlay_base.ndim == 3:
+        try:
+            silhouette = np.asarray(build_part_silhouette(cv2.cvtColor(overlay_base, cv2.COLOR_RGB2BGR)), dtype=np.uint8)
+        except Exception as exc:
+            print(f"[management] silhouette FAIL, falling back to part_mask: {exc}", file=sys.stderr, flush=True)
+    if silhouette is None or silhouette.ndim != 2 or not np.any(silhouette):
+        silhouette = (np.asarray(analysis.get("part_mask")) > 0).astype(np.uint8) * 255
+    if silhouette.ndim != 2 or not silhouette.size:
+        raise ValueError("부품 영역 마스크가 없습니다.")
+    analysis["part_silhouette"] = silhouette
+    return silhouette
+
+
+def _clip_polygon_to_mask(points_px: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """투영 다각형을 부품 실루엣과 교차시켜 가장 큰 조각의 단순화된 윤곽을 돌려준다.
+
+    실루엣과 전혀 겹치지 않으면 원래 다각형을 단순화해 그대로 준다(화면에는 보여야 한다).
+    """
+    polygon = np.asarray(points_px, dtype=np.int32).reshape(-1, 1, 2)
+    raster = np.zeros(mask.shape, np.uint8)
+    cv2.fillPoly(raster, [polygon], 255)
+    raster &= mask
+    contours, _ = cv2.findContours(raster, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        largest = max(contours, key=cv2.contourArea)
+        if cv2.contourArea(largest) > 0:
+            return cv2.approxPolyDP(largest, 1.5, True).reshape(-1, 2)
+    return cv2.approxPolyDP(polygon, 1.5, True).reshape(-1, 2)
+
+
+def _management_view_status(points_3d: np.ndarray, polygon_px: np.ndarray, mm_per_px: float) -> tuple[float, str]:
+    """관리영역이 이 PNG에서 계산 가능한지. VISIBLE 자동 계산 / PARTIAL 참고값 / HIDDEN 계산 금지.
+
+    3D 넓이는 Newell 법으로 구한다(BOUNDARY는 거의 평면 폐곡선).
+    """
+    normal = np.zeros(3, dtype=np.float64)
+    closed = np.vstack([points_3d, points_3d[:1]])
+    for start, end in zip(closed[:-1], closed[1:]):
+        normal += np.cross(start, end)
+    area_3d = float(np.linalg.norm(normal)) / 2.0
+    area_px = float(cv2.contourArea(np.asarray(polygon_px, dtype=np.float32)))
+    if area_3d <= 1e-6:
+        return 0.0, "HIDDEN"
+    view_factor = max(0.0, min(1.0, area_px * mm_per_px * mm_per_px / area_3d))
+    if view_factor >= 0.5:
+        return view_factor, "VISIBLE"
+    if view_factor >= 0.1:
+        return view_factor, "PARTIAL"
+    return view_factor, "HIDDEN"
+
+
+def _product_in_scan_frame(product_image: np.ndarray, alignment: Any) -> np.ndarray | None:
+    """제품(CAD 렌더) 이미지를 정렬 행렬의 역변환으로 스캔 프레임에 맞춰 돌려 놓는다.
+
+    보정시트가 스캔과 같은 방향·크기의 제품 이미지를 쓰면 포인트·제로라인을 스캔 좌표 그대로 얹을 수 있다.
+    프레임 밖은 흰색으로 채운다.
+    """
+    try:
+        matrix = np.asarray(alignment.matrix, dtype=np.float64).reshape(2, 3)
+        inverse = cv2.invertAffineTransform(matrix)
+        width, height = int(alignment.scan_size[0]), int(alignment.scan_size[1])
+        border = (255, 255, 255, 255) if product_image.ndim == 3 and product_image.shape[2] == 4 else (255, 255, 255)
+        return cv2.warpAffine(product_image, inverse, (width, height), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
+    except Exception as exc:
+        print(f"[alignment] product-in-scan-frame FAIL: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
+def _part_mask_grid(mask: Any, max_cells: int = 160) -> dict[str, Any]:
+    """관리치 라벨이 부품을 가리지 않게 배치하도록 실루엣을 거친 격자로 줄인다.
+
+    한 칸에 부품 픽셀이 하나라도 걸리면 점유로 본다.
+    """
+    binary = (np.asarray(mask) > 0).astype(np.uint8) * 255
+    if binary.ndim != 2 or not binary.size:
+        raise ValueError("부품 영역 마스크가 없습니다.")
+    height, width = binary.shape
+    scale = max_cells / max(height, width)
+    cols = max(1, int(round(width * scale)))
+    rows = max(1, int(round(height * scale)))
+    reduced = cv2.resize(binary, (cols, rows), interpolation=cv2.INTER_AREA) > 0
+    return {"cols": cols, "rows": rows, "data": "".join(np.where(reduced.ravel(), "1", "0"))}
+
+
+def management_overlay_for(analysis_id: str, catpart_path: Any = None, alignment_cad_path: Any = None) -> dict[str, Any]:
+    """CATIA 관리 BOUNDARY를 CAD 뷰어와 같은 fit_view로 스캔 위에 투영한다."""
+    analysis = _analysis_cache.get(analysis_id)
+    if analysis is None:
+        raise ValueError("분석 결과가 만료되었습니다. 스캔 이미지를 다시 분석해 주세요.")
+    overlay_base = np.asarray(analysis.get("overlay_base"), dtype=np.uint8)
+    if overlay_base.ndim != 3:
+        raise ValueError("관리면 정합에 필요한 스캔 데이터가 없습니다.")
+    scan_mask = _analysis_silhouette(analysis)
+    part_number = str(analysis.get("part_no") or "").strip().upper()
+    if not part_number:
+        raise ValueError("스캔 파일명에서 품번을 확인하지 못했습니다.")
+
+    def _log(message: str) -> None:
+        print(f"[management] {message}", file=sys.stderr, flush=True)
+
+    management_path = _management_source_path(catpart_path)
+    alignment_path = _management_alignment_path(part_number, alignment_cad_path)
+    # 관리 CATPart는 내용 해시로 식별한다. 같은 파일을 다시 등록해 mtime만 바뀐 경우 캐시를 그대로 쓴다.
+    management_key = management_source_key(management_path)
+    alignment_key = "|".join([analysis_id, str(alignment_path), str(alignment_path.stat().st_mtime_ns)])
+    cache_key = "|".join([alignment_key, management_key])
+    cached = _management_overlay_cache.get(cache_key)
+    if cached is not None:
+        _management_overlay_cache.move_to_end(cache_key)
+        return cached
+
+    # CATIA COM 인스턴스와 같은 캐시 파일을 동시에 여는 것을 막는다.
+    with _management_overlay_lock:
+        cached = _management_overlay_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        started = _time.time()
+        # CATIA COM은 numpy/OpenCV 병렬 스레드가 생기기 전에 먼저 끝낸다(tools/render_management_overlay.py 와 같은 순서).
+        # 캐시가 있으면 CATIA를 띄우지 않으므로 이 단계는 1초 안쪽이다.
+        extracted = extract_management_boundaries(
+            management_path,
+            cache_dir=PROJECT_DIR / "data" / ".management_overlay_cache",
+            points_per_edge=16,
+            progress=_log,
+        )
+        _log(f"boundaries {_time.time() - started:.1f}s groups={len(extracted)}")
+
+        # 같은 분석·같은 정합 CAD면 관리 CATPart가 바뀌어도 자세는 같다. 정합(2~3초)을 다시 하지 않는다.
+        fit = _management_fit_cache.get(alignment_key)
+        if fit is None:
+            fit_started = _time.time()
+            mesh = load_any_mesh(alignment_path, cache_dir=_cad_cache_dir())
+            _log(f"mesh loaded {_time.time() - fit_started:.1f}s v={len(mesh.vertices)} f={len(mesh.faces)}")
+            mesh_parts = split_symmetric_pair(np.asarray(mesh.vertices, dtype=np.float64), np.asarray(mesh.faces, dtype=np.int64))
+            fit_vertices = fit_faces = None
+            for vertices, faces in mesh_parts:
+                candidate = fit_mesh_view(vertices, faces, scan_mask)
+                if fit is None or float(candidate.detail_iou or candidate.iou) > float(fit.detail_iou or fit.iou):
+                    fit, fit_vertices, fit_faces = candidate, vertices, faces
+            if fit is None:
+                raise ValueError("정합용 CAD를 스캔 이미지에 맞추지 못했습니다.")
+            # fit_view 의 배율 단계가 거칠어 가장자리에 붙은 BOUNDARY 가 몇 px 바깥으로 늘어난다.
+            # 전체 해상도 바깥 윤곽 겹침으로 배율·이동·각도를 잘게 다듬는다(2~4초).
+            coarse_iou = float(fit.iou)
+            fit = refine_fit_by_silhouette(fit, fit_vertices, fit_faces, scan_mask)
+            _log(f"refine outline iou {coarse_iou:.4f} -> {fit.iou:.4f} mm_per_px={fit.mm_per_px:.4f}")
+            _management_fit_cache[alignment_key] = fit
+            while len(_management_fit_cache) > _MANAGEMENT_OVERLAY_CACHE_MAX:
+                _management_fit_cache.popitem(last=False)
+            _log(f"fit {_time.time() - fit_started:.1f}s iou={fit.iou:.4f} detail={fit.detail_iou:.4f}")
+        else:
+            _log("fit cache-hit")
+
+        height, width = scan_mask.shape
+        silhouette_dilated = cv2.dilate((scan_mask > 0).astype(np.uint8) * 255, np.ones((3, 3), np.uint8))
+        # 관리치가 같으면 같은 색. 화면의 색 팔레트가 색↔관리치 한 쌍으로 다룬다.
+        palette = ["#f4b740", "#3f78d4", "#cf4aaa", "#e34b43", "#26a98b", "#6e5ccf"]
+        color_by_target: dict[float, str] = {}
+        regions: list[dict[str, Any]] = []
+        region_index = 0
+        for group, polylines in extracted:
+            for polyline in polylines:
+                points_3d = np.asarray(polyline, dtype=np.float64)
+                if len(points_3d) < 3:
+                    continue
+                xs, ys = cad_to_pixels(points_3d, fit)
+                points_px = np.stack([xs, ys], axis=1).astype(np.int32)
+                if points_px[:, 0].max() < 0 or points_px[:, 0].min() >= width or points_px[:, 1].max() < 0 or points_px[:, 1].min() >= height:
+                    continue
+                # 정사영과 스캔 렌더의 시선각이 조금만 달라도 옆으로 보이는 면은 부품 밖으로 삐져나온다.
+                # 관리영역은 부품 실루엣 밖으로 나갈 수 없으므로 실루엣(1px 여유)으로 잘라낸다.
+                simplified = _clip_polygon_to_mask(points_px, silhouette_dilated)
+                if len(simplified) < 3:
+                    continue
+                target = float(group.target_mm)
+                color = color_by_target.setdefault(target, palette[len(color_by_target) % len(palette)])
+                # 정면 PNG에서 얼마나 정면으로 보이는지: 투영 넓이(mm²) / 3D 넓이(mm²) ≈ cos(시선각).
+                # 실측 64XX2: 주면 0.8~1.0, 플랜지 옆면 0.35, 완전히 옆으로 보이는 띠 0.00~0.01.
+                view_factor, status = _management_view_status(points_3d, simplified, float(fit.mm_per_px))
+                regions.append({
+                    "id": f"management-{region_index + 1}",
+                    "targetMm": target,
+                    "label": f"관리치 {target:+g} mm",
+                    "color": color,
+                    "status": status,
+                    "viewFactor": round(view_factor, 3),
+                    "points": [[round(float(x) / width * 100, 4), round(float(y) / height * 100, 4)] for x, y in simplified],
+                })
+                region_index += 1
+        if not regions:
+            raise ValueError("현재 스캔 화면 안에 표시할 관리면 BOUNDARY가 없습니다.")
+        result = {
+            "image": _png_data_url(overlay_base, rgb=True),
+            "width": int(width), "height": int(height),
+            "source": str(management_path), "alignmentCad": str(alignment_path),
+            "fit": {
+                "iou": float(fit.iou), "detailIou": float(fit.detail_iou),
+                "reliable": bool(fit.reliable), "axis": int(fit.axis), "sign": int(fit.sign),
+            },
+            "regions": regions,
+            "partMask": _part_mask_grid(scan_mask),
+        }
+        _log(f"done {_time.time() - started:.1f}s regions={len(regions)}")
+        _management_overlay_cache[cache_key] = result
+        while len(_management_overlay_cache) > _MANAGEMENT_OVERLAY_CACHE_MAX:
+            _management_overlay_cache.popitem(last=False)
+        return result
+
+
 def _mesh_not_found_message(part_number: str | None) -> str:
     """CAD 파일을 못 찾았을 때 사용자에게 이유와 대안을 알려 줄 문구.
 
@@ -1682,6 +1940,12 @@ def analyze_image(
         "productImage": (
             _png_data_url(product_image) if product_image is not None else None
         ),
+        "productScanImage": (
+            _png_data_url(scan_frame_product)
+            if product_image is not None and alignment is not None
+            and (scan_frame_product := _product_in_scan_frame(product_image, alignment)) is not None
+            else None
+        ),
         "productSource": product_source,
         "alignment": alignment.to_dict() if alignment is not None else None,
         "alignmentOverlay": (
@@ -1855,9 +2119,11 @@ def realign_image(
             "전사하지 않았습니다."
         )
 
+    scan_frame_product = _product_in_scan_frame(product_image, alignment)
     return {
         "partNumber": part_number,
         "productImage": _png_data_url(product_image),
+        "productScanImage": _png_data_url(scan_frame_product) if scan_frame_product is not None else None,
         "productSource": product_source,
         "alignment": alignment.to_dict(),
         "alignmentOverlay": _png_data_url(overlay),
@@ -3768,7 +4034,7 @@ def apply_zero_edits(raw_lines: list, zero_edits: list | None) -> list:
         if edit is None:
             moved.append(line)
             continue
-        if edit.get("hidden"):
+        if edit.get("hidden") or edit.get("deleted"):
             continue
         dx = float(edit.get("dx") or 0.0)
         dy = float(edit.get("dy") or 0.0)
@@ -4686,6 +4952,67 @@ async def cad_overlay(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=422)
 
 
+async def management_overlay(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        result = await run_in_threadpool(
+            management_overlay_for, str(body.get("analysisId") or ""),
+            body.get("catpartPath"), body.get("alignmentCadPath"),
+        )
+        return JSONResponse(result)
+    except (FileNotFoundError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def part_mask(request: Request) -> JSONResponse:
+    """수동 관리영역 라벨 배치에 쓸 스캔 실루엣 격자를 돌려준다."""
+    try:
+        body = await request.json()
+        analysis = _analysis_cache.get(str(body.get("analysisId") or ""))
+        if analysis is None or analysis.get("part_mask") is None:
+            return JSONResponse({"error": "분석 결과가 만료되었습니다. 스캔 이미지를 다시 분석해 주세요."}, status_code=404)
+        return JSONResponse(_part_mask_grid(_analysis_silhouette(analysis)))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
+async def management_cad(request: Request) -> JSONResponse:
+    """관리면 트리를 읽을 원본 CATPart를 품번별로 로컬 보관한다."""
+    try:
+        form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_CAD_UPLOAD_BYTES)
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            return JSONResponse({"error": "관리치 CATPart 파일이 필요합니다."}, status_code=400)
+        filename = str(getattr(upload, "filename", ""))
+        if Path(filename).suffix.lower() != ".catpart":
+            return JSONResponse({"error": "관리치 데이터는 CATPart 파일만 선택할 수 있습니다."}, status_code=400)
+        part_number = str(form.get("partNumber") or "").strip().upper() or part_number_from_name(filename)
+        if not part_number or part_number_from_name(f"{part_number}.CATPart") != part_number:
+            return JSONResponse({"error": "스캔 또는 CATPart 파일명에서 전체 품번을 찾지 못했습니다."}, status_code=400)
+        payload = await upload.read()
+        if not payload:
+            return JSONResponse({"error": "비어 있는 CATPart 파일입니다."}, status_code=400)
+        if len(payload) > MAX_CAD_UPLOAD_BYTES:
+            return JSONResponse({"error": "CATPart 파일이 허용 크기를 초과했습니다."}, status_code=413)
+        MANAGEMENT_CAD_DIR.mkdir(parents=True, exist_ok=True)
+        destination = MANAGEMENT_CAD_DIR / f"{part_number}.CATPart"
+        temporary = destination.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(payload)
+            os.replace(temporary, destination)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+        return JSONResponse({
+            "partNumber": part_number, "path": str(destination.resolve()),
+            "name": filename, "size": len(payload),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+
+
 async def cad(request: Request) -> JSONResponse:
     try:
         form = await request.form(max_files=1, max_fields=4, max_part_size=MAX_CAD_UPLOAD_BYTES)
@@ -4742,6 +5069,9 @@ app = Starlette(
         Route("/api/sheet-excel", sheet_excel, methods=["POST"]),
         Route("/api/cad", cad, methods=["POST"]),
         Route("/api/cad-overlay", cad_overlay, methods=["POST"]),
+        Route("/api/management-overlay", management_overlay, methods=["POST"]),
+        Route("/api/management-cad", management_cad, methods=["POST"]),
+        Route("/api/part-mask", part_mask, methods=["POST"]),
         Route("/api/scan-workspace", scan_workspace, methods=["POST"]),
         Route("/api/cad-sections", cad_sections, methods=["POST"]),
         Route("/api/cad-morph", cad_morph, methods=["POST"]),
