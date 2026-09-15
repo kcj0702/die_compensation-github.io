@@ -500,10 +500,10 @@ button { cursor: pointer; }
 .management-overlay-state b{font-size:12px}.management-overlay-state span{max-width:520px;color:#777f89;font-size:10px;line-height:1.55}
 .management-overlay-state--error{color:#b24c43;background:#fff8f6}.spin{animation:management-spin 1s linear infinite}@keyframes management-spin{to{transform:rotate(360deg)}}
 .management-fit-summary--manual{color:#176d5d;border-color:#abd8cd;background:#f0faf7}
-.management-editor{position:absolute;inset:0;z-index:16;overflow:hidden;pointer-events:none}
+.management-editor{position:absolute;inset:0;z-index:16;overflow:visible;pointer-events:none}
 .management-editor__svg,.management-editor__leaders{position:absolute;inset:0;width:100%;height:100%;overflow:hidden}
 .management-editor__svg{pointer-events:auto;touch-action:none}
-.management-editor__leaders{pointer-events:none}
+.management-editor__leaders{pointer-events:none;overflow:visible;left:-25%;top:-25%;width:150%;height:150%}
 .management-editor--drawing .management-editor__svg{cursor:crosshair}
 .management-edit-region__halo{fill:none;stroke:rgba(255,255,255,.95);stroke-width:3.4;stroke-linejoin:round;stroke-linecap:round;vector-effect:non-scaling-stroke;pointer-events:none}
 .management-edit-region__area{fill:currentColor;fill-opacity:.16;stroke:currentColor;stroke-width:1.6;stroke-linejoin:round;vector-effect:non-scaling-stroke;pointer-events:fill;cursor:pointer}
@@ -2159,3 +2159,11 @@ button { cursor: pointer; }
 .cad-viewer__zone .cad-viewer__zone-tools button{padding:3px 8px;border:1px solid rgba(255,255,255,.16);border-radius:5px;background:rgba(8,14,20,.7);color:#9db0c0;font-size:9px;line-height:normal}
 .cad-viewer__zone .cad-viewer__zone-tools button:hover{border-color:#ff5fa8;color:#ffd6e8}
 .cad-viewer__zone .cad-viewer__zone-tools button.is-on{border-color:#ff5fa8;background:rgba(255,95,168,.18);color:#ffd6e8}
+.coefficient-range-labels{align-items:center}
+.coefficient-range-labels label{display:inline-flex;align-items:center;gap:4px;color:#6b7c8c;font-size:9px;font-weight:700}
+.coefficient-range-labels input{width:52px;height:24px;padding:0 5px;border:1px solid #e8c46d;border-radius:4px;color:#3d4c60;background:#fffbf1;font:inherit;font-size:10px;text-align:right}
+.coefficient-card .card-title>.coefficient-value{margin:0;padding:0 4px;border:1px solid transparent;border-radius:6px;background:transparent;color:#a36c00;font:inherit;font-size:26px;font-weight:800;line-height:1;cursor:text}
+.coefficient-card .card-title>.coefficient-value:hover{border-color:#e8c46d;background:#fffbf1}
+.coefficient-card .card-title>.coefficient-value--editing{display:inline-flex;align-items:center;gap:2px;cursor:default}
+.coefficient-value--editing input{width:84px;height:34px;padding:0 6px;border:1px solid #e8c46d;border-radius:6px;color:#3d4c60;background:#fffbf1;font:inherit;font-size:20px;font-weight:800;text-align:right}
+.coefficient-range-labels{justify-content:space-between}
