@@ -2167,3 +2167,11 @@ button { cursor: pointer; }
 .coefficient-card .card-title>.coefficient-value--editing{display:inline-flex;align-items:center;gap:2px;cursor:default}
 .coefficient-value--editing input{width:84px;height:34px;padding:0 6px;border:1px solid #e8c46d;border-radius:6px;color:#3d4c60;background:#fffbf1;font:inherit;font-size:20px;font-weight:800;text-align:right}
 .coefficient-range-labels{justify-content:space-between}
+.image-layout{position:absolute;inset:0;overflow:hidden;background:#fff}
+.image-layout img{width:100%;height:100%;object-fit:fill;display:block;pointer-events:none}
+.image-layout img{position:absolute;left:0;top:0;max-width:none}
+.crop-selector{position:absolute;inset:0;z-index:20;cursor:crosshair;background:rgba(20,30,40,.18);touch-action:none}
+.crop-selector__box{position:absolute;border:1.5px dashed #ffb51b;background:rgba(255,181,27,.18);pointer-events:none}
+.crop-selector__hint{position:absolute;left:50%;bottom:6px;transform:translateX(-50%);padding:3px 8px;border-radius:4px;color:#fff;background:rgba(35,43,54,.86);font-size:8.5px;font-weight:650;white-space:nowrap;pointer-events:none}
+.layout-size-control button{height:24px;padding:0 8px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;color:#3d4e5f;font-size:9.5px;font-weight:700;cursor:pointer}
+.layout-size-control button.active{border-color:#ffb51b;background:#fff8e6;color:#8a5a00}

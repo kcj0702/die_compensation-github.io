@@ -2424,6 +2424,33 @@ def build_sheet_bytes(
         _apply_placement(detail_view, region.get("placement"))
         detail_view.label_positions = _parse_label_positions(region.get("labels"))
         views.append(detail_view)
+    # CAD 뷰어에서 시트로 넣은 캡처 그림. 포인트 없이 그림만 화면과 같은 자리에 얹는다.
+    for index, picture in enumerate(payload.get("pictures") or [], start=1):
+        label = str(picture.get("label") or f"CAD {index}") if isinstance(picture, dict) else f"CAD {index}"
+        text = str(picture.get("url") or "") if isinstance(picture, dict) else ""
+        if "," in text:
+            text = text.split(",", 1)[1]
+        try:
+            shot = cv2.imdecode(np.frombuffer(base64.b64decode(text), dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception:
+            shot = None
+        if shot is None:
+            skipped.append(f"{label}: 그림을 읽지 못했습니다")
+            continue
+        crop = picture.get("crop")
+        if isinstance(crop, dict):
+            # 화면에서 자른 영역(원본 %)만 남긴다.
+            height, width = shot.shape[:2]
+            x0 = int(round(float(crop.get("x", 0)) / 100.0 * width))
+            y0 = int(round(float(crop.get("y", 0)) / 100.0 * height))
+            x1 = int(round((float(crop.get("x", 0)) + float(crop.get("w", 100))) / 100.0 * width))
+            y1 = int(round((float(crop.get("y", 0)) + float(crop.get("h", 100))) / 100.0 * height))
+            x0, y0 = max(0, min(width - 1, x0)), max(0, min(height - 1, y0))
+            x1, y1 = max(x0 + 1, min(width, x1)), max(y0 + 1, min(height, y1))
+            shot = shot[y0:y1, x0:x1]
+        picture_view = SheetView(image=shot, title=label)
+        _apply_placement(picture_view, picture.get("placement"))
+        views.append(picture_view)
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output = Path(temp_dir) / "correction-sheet.xlsx"

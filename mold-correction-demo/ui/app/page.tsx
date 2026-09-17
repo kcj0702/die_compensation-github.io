@@ -246,7 +246,11 @@ type AnnotationTool = 'select' | AnnotationKind;
 /* 사각형·타원·텍스트는 x,y 가 좌상단이고 w,h 가 크기다. 화살표는 x,y 가 시작점이고 w,h 가 끝점까지의 변위라 음수가 될 수 있다. */
 type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; fontFamily?: string; color?: string };
 type DetailRegion = { id: string; x: number; y: number; w: number; h: number; label: string };
-type SheetLayout = { id: string; kind: 'front' | 'detail'; x: number; y: number; w: number; h: number; regionId?: string };
+/* image: CAD 뷰어에서 캡처해 시트에 넣은 그림. imageUrl 은 data URL, aspect 는 가로/세로 비율. */
+type SheetLayout = { id: string; kind: 'front' | 'detail' | 'image'; x: number; y: number; w: number; h: number; regionId?: string; imageUrl?: string; label?: string; aspect?: number; crop?: { x: number; y: number; w: number; h: number } };
+const FULL_CROP = { x: 0, y: 0, w: 100, h: 100 };
+/* 자른 그림의 가로/세로 비율. crop 은 원본 그림의 % 이고 aspect 는 원본 비율이다. */
+const croppedAspect = (layout: SheetLayout) => (layout.aspect || 4 / 3) * (layout.crop?.w ?? 100) / (layout.crop?.h ?? 100);
 type SheetRotation = 0 | 90 | 180 | 270;
 type SheetImageTransform = { rotation: SheetRotation; flipX: boolean; flipY: boolean };
 
@@ -1372,6 +1376,28 @@ function normalizeBox<T extends { x: number; y: number; w: number; h: number }>(
   return { ...box, x, y, w, h };
 }
 
+/* 그림 창 안에서 드래그로 자를 영역을 고른다. 결과는 현재 보이는 영역의 % 다. */
+function CropSelector({ onComplete, onCancel }: { onComplete: (rect: { x: number; y: number; w: number; h: number }) => void; onCancel: () => void }) {
+  const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const startRef = useRef<[number, number] | null>(null);
+  const percent = (event: React.PointerEvent<HTMLDivElement>): [number, number] => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [clamp((event.clientX - rect.left) / rect.width * 100, 0, 100), clamp((event.clientY - rect.top) / rect.height * 100, 0, 100)];
+  };
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onCancel]);
+  return <div className="crop-selector" onPointerDown={(event) => { event.stopPropagation(); const point = percent(event); startRef.current = point; setDraft({ x: point[0], y: point[1], w: 0, h: 0 }); capturePointer(event.currentTarget, event.pointerId); }}
+    onPointerMove={(event) => { const start = startRef.current; if (!start) return; const point = percent(event); setDraft({ x: start[0], y: start[1], w: point[0] - start[0], h: point[1] - start[1] }); }}
+    onPointerUp={(event) => { const start = startRef.current; startRef.current = null; if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); if (!start || !draft) return; const box = normalizeBox(draft, 0); setDraft(null); if (box.w >= 3 && box.h >= 3) onComplete(box); }}
+    onPointerCancel={() => { startRef.current = null; setDraft(null); }}>
+    {draft && <div className="crop-selector__box" style={{ left: `${Math.min(draft.x, draft.x + draft.w)}%`, top: `${Math.min(draft.y, draft.y + draft.h)}%`, width: `${Math.abs(draft.w)}%`, height: `${Math.abs(draft.h)}%` }} />}
+    <span className="crop-selector__hint">자를 영역을 드래그 · Esc 취소</span>
+  </div>;
+}
+
 function fitAspectSize(imageAspect: number, maxW: number, maxH: number) {
   let w = maxW; let h = w * SHEET_ASPECT / imageAspect;
   if (h > maxH) { h = maxH; w = h * imageAspect / SHEET_ASPECT; }
@@ -1862,6 +1888,10 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
     if (!initialLayouts || initialLayouts.length === 0) {
       return [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }];
     }
+    /* CAD 뷰어에서 그림만 먼저 넣어 두면 정면도 창이 없이 시작한다. 그때는 정면도를 앞에 채운다. */
+    if (!initialLayouts.some((layout) => layout.kind === 'front')) {
+      return [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }, ...initialLayouts];
+    }
     /* 90도 회전은 frameWidth/frameHeight 를 맞바꿔 sourceAspect 를 뒤집는데,
        이어받은 정면도 창은 이전(회전 전) 비율로 맞춰진 w/h 라 화면에는 옛
        비율 그대로 나온다 -- 사용자가 크기조절 손잡이를 한 번 눌러야("어떤
@@ -1918,6 +1948,7 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
   const [hiddenDetailPointIds, setHiddenDetailPointIds] = useState<Record<string, Set<string>>>({});
   const [selectedLayoutId, setSelectedLayoutId] = useState('front');
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [croppingLayoutId, setCroppingLayoutId] = useState<string | null>(null);
   const updateLayout = (next: SheetLayout) => setLayouts((current) => current.map((layout) => layout.id === next.id ? next : layout));
   const createDetail = (region: DetailRegion) => {
     const detailCount = layouts.filter((layout) => layout.kind === 'detail').length;
@@ -1955,6 +1986,22 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
 
   return <div className={`sheet-canvas ${detailMode ? 'sheet-canvas--detail-mode' : ''}`} onPointerDown={(event) => { if (event.target === event.currentTarget) { setSelectedLayoutId(''); setSelectedRegionId(null); setSelectedAnnotationId(null); } }}>
     {layouts.map((layout) => {
+      if (layout.kind === 'image') {
+        /* CAD 캡처 그림: 포인트·제로라인 없이 그림만 놓는다. 이동·크기 조절·삭제는 다른 창과 같다.
+           crop 은 원본의 % 라 Detail 크롭과 같은 방식으로 img 를 키워 보이는 부분만 남긴다. */
+        const crop = layout.crop ?? FULL_CROP;
+        return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={croppedAspect(layout)} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout}
+          onDelete={() => { setLayouts((current) => current.filter((item) => item.id !== layout.id)); if (selectedLayoutId === layout.id) setSelectedLayoutId('front'); }} title={layout.label || 'CAD 화면'}>
+          <div className="image-layout"><img src={layout.imageUrl} alt={layout.label || 'CAD 화면'} draggable={false} style={{ width: `${10000 / crop.w}%`, height: `${10000 / crop.h}%`, left: `${-crop.x / crop.w * 100}%`, top: `${-crop.y / crop.h * 100}%` }} /></div>
+          {croppingLayoutId === layout.id && <CropSelector onCancel={() => setCroppingLayoutId(null)} onComplete={(rect) => {
+            /* 보이는 영역의 % 를 원본 % 로 합성한다. 창 너비는 두고 높이만 새 비율에 맞춘다. */
+            const next = { x: crop.x + rect.x * crop.w / 100, y: crop.y + rect.y * crop.h / 100, w: crop.w * rect.w / 100, h: crop.h * rect.h / 100 };
+            const aspect = (layout.aspect || 4 / 3) * next.w / next.h;
+            updateLayout({ ...layout, crop: next, h: layout.w * SHEET_ASPECT / aspect });
+            setCroppingLayoutId(null);
+          }} />}
+        </SheetLayoutFrame>;
+      }
       const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
       if (layout.kind === 'detail' && !region) return null;
       const title = layout.kind === 'front' ? '정면도 · FRONT VIEW' : region!.label;
@@ -1982,7 +2029,7 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
     {detailMode && <div className="detail-mode-guide"><ZoomIn size={14} /><span>정면도 위에서 확대할 영역을 드래그하세요.</span><button type="button" onClick={() => setDetailMode(false)}>취소</button></div>}
     {addPointMode && <div className="detail-mode-guide add-point-guide"><Crosshair size={14} /><span>{sampleError || (sampling ? '편차값을 읽는 중입니다…' : '정면도를 눌러 보정 포인트를 추가합니다. 값은 히트맵 색에서 추정하며, 추가한 포인트를 다시 누르면 지워집니다.')}</span></div>}
     {labelAreaMode && <div className={`detail-mode-guide label-area-guide label-area-guide--${labelAreaMode}`}>{labelAreaMode === 'hide' ? <EyeOff size={14} /> : <Eye size={14} />}<span>레이아웃 위에서 {labelAreaMode === 'hide' ? '숨길' : '표시할'} 라벨 영역을 드래그하세요.</span><button type="button" onClick={() => setLabelAreaMode(null)}>취소</button></div>}
-    {selectedLayout && <div className="layout-size-control" onPointerDown={(event) => event.stopPropagation()}><b>{selectedLayout.kind === 'front' ? '정면도' : regions.find((item) => item.id === selectedLayout.regionId)?.label} 크기 · 비율 고정</b><label>W <input type="range" min="5" max="100" value={selectedLayout.w} onChange={(event) => setSelectedSize('w', Number(event.target.value))} /><span>{Math.round(selectedLayout.w)}%</span></label><label>H <input type="range" min="5" max="100" value={selectedLayout.h} onChange={(event) => setSelectedSize('h', Number(event.target.value))} /><span>{Math.round(selectedLayout.h)}%</span></label></div>}
+    {selectedLayout && <div className="layout-size-control" onPointerDown={(event) => event.stopPropagation()}><b>{selectedLayout.kind === 'front' ? '정면도' : selectedLayout.kind === 'image' ? (selectedLayout.label || 'CAD 화면') : regions.find((item) => item.id === selectedLayout.regionId)?.label} 크기 · 비율 고정</b>{selectedLayout.kind === 'image' && <><button type="button" className={croppingLayoutId === selectedLayout.id ? 'active' : ''} onClick={() => setCroppingLayoutId((current) => current === selectedLayout.id ? null : selectedLayout.id)}>{croppingLayoutId === selectedLayout.id ? '자르기 취소' : '자르기'}</button>{selectedLayout.crop && <button type="button" onClick={() => { const aspect = selectedLayout.aspect || 4 / 3; updateLayout({ ...selectedLayout, crop: undefined, h: selectedLayout.w * SHEET_ASPECT / aspect }); setCroppingLayoutId(null); }}>원본으로</button>}</>}<label>W <input type="range" min="5" max="100" value={selectedLayout.w} onChange={(event) => setSelectedSize('w', Number(event.target.value))} /><span>{Math.round(selectedLayout.w)}%</span></label><label>H <input type="range" min="5" max="100" value={selectedLayout.h} onChange={(event) => setSelectedSize('h', Number(event.target.value))} /><span>{Math.round(selectedLayout.h)}%</span></label></div>}
   </div>;
 }
 
@@ -3787,6 +3834,11 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
         points: payloadPoints,
         annotations: payloadAnnotations,
         details: payloadDetails,
+        /* CAD 뷰어에서 넣은 그림. 백엔드가 같은 자리(placement)에 사진으로 얹는다. */
+        pictures: sheetLayouts.filter((layout) => layout.kind === 'image' && layout.imageUrl).map((layout) => ({
+          url: layout.imageUrl, label: layout.label || 'CAD 화면', placement: { x: layout.x, y: layout.y, w: layout.w, h: layout.h },
+          crop: layout.crop ?? null,
+        })),
         /* 정면도 picture 를 시트 캔버스 어디에 얼마 크기로 놓을지. UI 와 같은 % 좌표로 넘긴다. */
         frontPlacement: frontLayout ? { x: frontLayout.x, y: frontLayout.y, w: frontLayout.w, h: frontLayout.h } : null,
         /* frontLabels: 정면도가 실제로 화면에 그린 라벨 위치. */
@@ -3957,7 +4009,8 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
   </section>;
 }
 
-function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, zeroEditsByScan, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zonesByPart, setZonesByPart }: {
+function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, zeroEditsByScan, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zonesByPart, setZonesByPart, onSendToSheet }: {
+  onSendToSheet?: (scanId: string, url: string, label: string) => void;
   active: boolean;
   scans: ScanItem[];
   coefficientByScan: Record<string, number>;
@@ -4290,7 +4343,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
             : `형상 얹힘 ${Math.round((overlay.fit.hit_rate || 0) * 100)}%`}
         </span>}
         {overlay && <button type="button" className="tool-button" onClick={() => setShowAlign((current) => !current)}>정렬 맞추기</button>}
-        {overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
+        {onSendToSheet && overlayScanId && <button type="button" className="tool-button" disabled={!shots.length} title={shots.length ? '담은 화면을 보정 시트 작성 탭에 그림 창으로 넣습니다' : '먼저 3D 화면을 캡처해 담으세요'} onClick={() => shots.forEach((shot) => onSendToSheet(overlayScanId, shot.url, shot.label))}>보정시트에 넣기{shots.length ? ` (${shots.length}장)` : ''}</button>}{overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
         {shots.length > 0 && <button type="button" className="tool-button"
           onClick={() => setShots([])}>담은 화면 비우기</button>}
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={saveCadTable}>CAD 보정표</button>}
@@ -4381,6 +4434,22 @@ export default function Home() {
      다른 파트에는 영향이 없다. */
   const [sheetTransformByScan, setSheetTransformByScan] = useState<Record<string, SheetImageTransform>>({});
   const [sheetLayoutsByScan, setSheetLayoutsByScan] = useState<Record<string, SheetLayout[]>>({});
+  /* CAD 뷰어 캡처를 보정시트의 새 그림 창으로 넣는다. 정면도 창이 아직 없으면 SheetCanvas 가 마운트할 때 채운다.
+     자리는 Detail 창과 같은 규칙(오른쪽 열, 3개씩 내려가며). */
+  const addSheetImage = useCallback((scanId: string, url: string, label: string) => {
+    const image = new window.Image();
+    image.onload = () => {
+      const aspect = image.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : 4 / 3;
+      setSheetLayoutsByScan((current) => {
+        const existing = current[scanId] ?? [];
+        const count = existing.filter((layout) => layout.kind !== 'front').length;
+        const next: SheetLayout = { id: `image-${Date.now().toString(36)}-${existing.length}`, kind: 'image', imageUrl: url, label, aspect, x: 68, y: 7 + (count % 3) * 29, ...fitAspectSize(aspect, 28, 25) };
+        return { ...current, [scanId]: [...existing, next] };
+      });
+      setView('service');
+    };
+    image.src = url;
+  }, []);
   const [detailRegionsByScan, setDetailRegionsByScan] = useState<Record<string, DetailRegion[]>>({});
   const [frontLabelPositionsByScan, setFrontLabelPositionsByScan] = useState<Record<string, Record<string, { x: number; y: number }>>>({});
   const [detailLabelPositionsByScan, setDetailLabelPositionsByScan] = useState<Record<string, Record<string, Record<string, { x: number; y: number }>>>>({});
@@ -4617,7 +4686,7 @@ export default function Home() {
       {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={sheetScan ?? completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
       {view === 'files' && <FileOrganizerPage />}
       <div style={{ display: view === 'cad' ? 'block' : 'none' }}>
-        <CadWorkspace active={view === 'cad'} scans={sheetScans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
+        <CadWorkspace onSendToSheet={addSheetImage} active={view === 'cad'} scans={sheetScans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
       </div>
     </div>
   </main>;
