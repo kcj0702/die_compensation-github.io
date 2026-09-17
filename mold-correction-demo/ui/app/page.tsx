@@ -33,7 +33,10 @@ type ScanStatus = 'ready' | 'analyzing' | 'done' | 'error';
 /* xProduct/yProduct 는 같은 포인트를 제품데이터 이미지 기준 %로 다시 적은 값이다.
    정렬에 실패했거나 제품데이터가 없으면 비어 있다. */
 /* rawValue/managementTargetMm 은 관리영역 안 포인트에만 붙는다. 그때 value 는 `원래 편차 − 관리치`(수정 편차)다. */
-type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[]; rawValue?: number; managementTargetMm?: number };
+/* edgeDistNorm/holeDistNorm/zeroDistNorm 은 모서리·홀·제로라인까지 거리(부품
+   대각선으로 정규화, 0~1). "추천 보정량" 모델의 입력 특징이며, zero_line_evaluation
+   쪽 학습 데이터와 같은 정의로 백엔드에서 계산해 내려온다. */
+type PointResult = { id: string; xPx: number; yPx: number; x: number; y: number; value: number; labelColor: string; confidence: string; source?: 'colormap'; xProduct?: number; yProduct?: number; keyReasons?: string[]; rawValue?: number; managementTargetMm?: number; edgeDistNorm?: number; holeDistNorm?: number; zeroDistNorm?: number };
 type KeySelection = { ids: string[]; total: number; selected: number; peaks: number; signChanges: number; extremes: number };
 type ZeroAnchor = { anchor_id: number; x: number; y: number; boundary_arclen: number; source?: string; kind?: 'point' | 'zone'; strength?: number };
 type AdvanceLine = { points: [number, number][]; warnings: string[]; confidence: 'high' | 'low' };
@@ -60,6 +63,31 @@ type ReferenceLine = { kind: 'line' | 'areas'; points: [number, number][]; conto
 /* 스캔을 제품데이터 위로 옮기는 변환. margin 은 1위와 2위 방향의 점수 차이고,
    대칭 부품은 이 값이 0에 가까워 사람이 방향을 정해 줘야 한다. */
 type AlignmentInfo = { matrix: number[]; flipX: boolean; flipY: boolean; rotation?: number; outlineIou: number; holeIou: number; bandIou: number; score: number; margin: number; confident: boolean; overridden: boolean; scanSize: number[]; productSize: number[]; candidates?: { flipX: boolean; flipY: boolean; rotation?: number; score: number }[]; warnings: string[] };
+/* "추천 보정량" — 실제 보정시트 6개 회차 중 OP10 계열(3회차 OP40 RE 제외)
+ * 275개 포인트로 학습한 선형회귀 계수(R²=0.714 자체적합, 5-Fold CV 평균 0.685).
+ * 편차값 부호만 뒤집는 기존 방식과 달리, 위치·모서리/홀/제로라인 거리까지 반영한다.
+ * 계수 자체를 바꿀 땐 이 배열만 갱신하면 된다(모델 재학습 시). */
+const CORRECTION_MODEL = {
+  features: ['value', 'xNorm', 'yNorm', 'edgeDistNorm', 'holeDistNorm', 'zeroDistNorm'] as const,
+  coefficients: [-0.73823, 0.06197, -0.28786, 44.64644, 3.64225, -0.14572],
+  intercept: 0.04729,
+};
+/* 학습 데이터가 전부 JG 67116(67XX6 계열) SUNROOF REINF 실측치라, 다른
+ * 품번엔 이 모델의 예측이 검증되지 않는다 — "추천 보정량" 토글 자체를
+ * 67XX6 계열 품번일 때만 노출한다. 앱 화면의 품번은 "67XX6-DR000"처럼
+ * 가운데 두 자리가 마스킹용 문자 X로 표시되므로(실제 관리번호는 67116),
+ * 숫자든 X든 둘 다 매칭해야 한다. */
+const isModelTrainedPart = (partNo: string): boolean => /^67[0-9x]{2}6(?:-|$)/i.test(partNo);
+/* 거리 특징이 없는 포인트(구버전 캐시·계산 실패)는 모델을 못 쓴다 — 이럴 땐
+ * null 을 돌려주고, 호출부가 기존 부호반전 값으로 자연스럽게 대체하게 한다. */
+const modelSuggestedCorrection = (point: PointResult): number | null => {
+  if (point.edgeDistNorm === undefined || point.holeDistNorm === undefined || point.zeroDistNorm === undefined) {
+    return null;
+  }
+  const inputs = [point.value, point.x / 100, point.y / 100, point.edgeDistNorm, point.holeDistNorm, point.zeroDistNorm];
+  const sum = inputs.reduce((total, value, index) => total + value * CORRECTION_MODEL.coefficients[index], 0);
+  return sum + CORRECTION_MODEL.intercept;
+};
 const mapAffinePoint = (matrix: number[], x: number, y: number): [number, number] => {
   const [a, b, tx, c, d, ty] = matrix;
   return [a * x + b * y + tx, c * x + d * y + ty];
@@ -246,7 +274,11 @@ type AnnotationTool = 'select' | AnnotationKind;
 /* 사각형·타원·텍스트는 x,y 가 좌상단이고 w,h 가 크기다. 화살표는 x,y 가 시작점이고 w,h 가 끝점까지의 변위라 음수가 될 수 있다. */
 type Annotation = { id: string; kind: AnnotationKind; x: number; y: number; w: number; h: number; text?: string; fontSize?: number; fontFamily?: string; color?: string };
 type DetailRegion = { id: string; x: number; y: number; w: number; h: number; label: string };
-type SheetLayout = { id: string; kind: 'front' | 'detail'; x: number; y: number; w: number; h: number; regionId?: string };
+/* image: CAD 뷰어에서 캡처해 시트에 넣은 그림. imageUrl 은 data URL, aspect 는 가로/세로 비율. */
+type SheetLayout = { id: string; kind: 'front' | 'detail' | 'image'; x: number; y: number; w: number; h: number; regionId?: string; imageUrl?: string; label?: string; aspect?: number; crop?: { x: number; y: number; w: number; h: number } };
+const FULL_CROP = { x: 0, y: 0, w: 100, h: 100 };
+/* 자른 그림의 가로/세로 비율. crop 은 원본 그림의 % 이고 aspect 는 원본 비율이다. */
+const croppedAspect = (layout: SheetLayout) => (layout.aspect || 4 / 3) * (layout.crop?.w ?? 100) / (layout.crop?.h ?? 100);
 type SheetRotation = 0 | 90 | 180 | 270;
 type SheetImageTransform = { rotation: SheetRotation; flipX: boolean; flipY: boolean };
 
@@ -1372,6 +1404,28 @@ function normalizeBox<T extends { x: number; y: number; w: number; h: number }>(
   return { ...box, x, y, w, h };
 }
 
+/* 그림 창 안에서 드래그로 자를 영역을 고른다. 결과는 현재 보이는 영역의 % 다. */
+function CropSelector({ onComplete, onCancel }: { onComplete: (rect: { x: number; y: number; w: number; h: number }) => void; onCancel: () => void }) {
+  const [draft, setDraft] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const startRef = useRef<[number, number] | null>(null);
+  const percent = (event: React.PointerEvent<HTMLDivElement>): [number, number] => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return [clamp((event.clientX - rect.left) / rect.width * 100, 0, 100), clamp((event.clientY - rect.top) / rect.height * 100, 0, 100)];
+  };
+  useEffect(() => {
+    const handleKey = (event: KeyboardEvent) => { if (event.key === 'Escape') onCancel(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onCancel]);
+  return <div className="crop-selector" onPointerDown={(event) => { event.stopPropagation(); const point = percent(event); startRef.current = point; setDraft({ x: point[0], y: point[1], w: 0, h: 0 }); capturePointer(event.currentTarget, event.pointerId); }}
+    onPointerMove={(event) => { const start = startRef.current; if (!start) return; const point = percent(event); setDraft({ x: start[0], y: start[1], w: point[0] - start[0], h: point[1] - start[1] }); }}
+    onPointerUp={(event) => { const start = startRef.current; startRef.current = null; if (event.currentTarget.hasPointerCapture?.(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); if (!start || !draft) return; const box = normalizeBox(draft, 0); setDraft(null); if (box.w >= 3 && box.h >= 3) onComplete(box); }}
+    onPointerCancel={() => { startRef.current = null; setDraft(null); }}>
+    {draft && <div className="crop-selector__box" style={{ left: `${Math.min(draft.x, draft.x + draft.w)}%`, top: `${Math.min(draft.y, draft.y + draft.h)}%`, width: `${Math.abs(draft.w)}%`, height: `${Math.abs(draft.h)}%` }} />}
+    <span className="crop-selector__hint">자를 영역을 드래그 · Esc 취소</span>
+  </div>;
+}
+
 function fitAspectSize(imageAspect: number, maxW: number, maxH: number) {
   let w = maxW; let h = w * SHEET_ASPECT / imageAspect;
   if (h > maxH) { h = maxH; w = h * imageAspect / SHEET_ASPECT; }
@@ -1514,9 +1568,16 @@ function SheetLayoutFrame({ layout, imageAspect, selected, onSelect, onChange, o
   </article>;
 }
 
-function CorrectionPoints({ coefficient, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange, labelFontFamily, initialLabelPositions, rotationSeed, onLabelPositionsChange, onLayerSizeChange }: { coefficient: number; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void; labelFontFamily?: string; initialLabelPositions?: Record<string, { x: number; y: number }>; rotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onLabelPositionsChange?: (positions: Record<string, { x: number; y: number }>, layerSize?: { width: number; height: number }) => void; onLayerSizeChange?: (size: { width: number; height: number }) => void }) {
+function CorrectionPoints({ coefficient, useModel = false, points, labels = true, visibleLabelIds, onLabelToggle, overrides, onOverrideChange, labelFontFamily, initialLabelPositions, rotationSeed, onLabelPositionsChange, onLayerSizeChange }: { coefficient: number; useModel?: boolean; points: PointResult[]; labels?: boolean; visibleLabelIds?: Set<string>; onLabelToggle?: (id: string) => void; overrides?: Record<string, number>; onOverrideChange?: (id: string, value: number | null) => void; labelFontFamily?: string; initialLabelPositions?: Record<string, { x: number; y: number }>; rotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onLabelPositionsChange?: (positions: Record<string, { x: number; y: number }>, layerSize?: { width: number; height: number }) => void; onLayerSizeChange?: (size: { width: number; height: number }) => void }) {
   const labelHeight = 17;
-  const displayFor = useCallback((point: PointResult) => overrides?.[point.id] !== undefined ? overrides[point.id]! : -(point.value * coefficient), [coefficient, overrides]);
+  const displayFor = useCallback((point: PointResult) => {
+    if (overrides?.[point.id] !== undefined) return overrides[point.id]!;
+    if (useModel) {
+      const suggested = modelSuggestedCorrection(point);
+      if (suggested !== null) return suggested;
+    }
+    return -(point.value * coefficient);
+  }, [coefficient, useModel, overrides]);
   const formatCorrection = useCallback((value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`, []);
   const getLabelWidth = useCallback((point: PointResult) => Math.max(24, formatCorrection(displayFor(point)).length * 5.2 + 8), [displayFor, formatCorrection]);
   const layerRef = useRef<HTMLDivElement>(null);
@@ -1842,7 +1903,7 @@ function ZeroLineOverlay({ lines, splineSegments = [], region, editable = false,
   </div>;
 }
 
-function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, initialLayouts, initialLabelPositionsByLayout, frontRotationSeed, onRegionsChange, onLayoutsChange, onLabelPositionsChange, onLayerSizeChange, points, coefficient, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], zeroSplineSegments = [], showZero = false, zeroEditable = false, zeroPointAddMode = false, zeroPointDeleteMode = false, onZeroPointMove, onZeroSegmentDoubleClick, onZeroPointAdd, onZeroPointDelete }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; initialRegions?: DetailRegion[]; initialLayouts?: SheetLayout[]; initialLabelPositionsByLayout?: Record<string, Record<string, { x: number; y: number }>>; frontRotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; onLabelPositionsChange?: (layoutId: string, positions: Record<string, { x: number; y: number }>, layerSize?: { width: number; height: number }) => void; onLayerSizeChange?: (layoutId: string, size: { width: number; height: number }) => void; points: PointResult[]; coefficient: number; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; zeroSplineSegments?: number[][]; showZero?: boolean; zeroEditable?: boolean; zeroPointAddMode?: boolean; zeroPointDeleteMode?: boolean; onZeroPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onZeroSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onZeroPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onZeroPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
+function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, initialLayouts, initialLabelPositionsByLayout, frontRotationSeed, onRegionsChange, onLayoutsChange, onLabelPositionsChange, onLayerSizeChange, points, coefficient, useModel = false, showPoints, visiblePointIds, onPointToggle, pointOverrides, onOverrideChange, labelFontFamily, annotations, showAnnotations, annotationTool, setAnnotationTool, selectedAnnotationId, setSelectedAnnotationId, onAnnotationCommit, onAnnotationCreate, onAnnotationDelete, detailMode, setDetailMode, labelAreaMode, setLabelAreaMode, addPointMode, onAddPointAt, sampling, sampleError, addedPoints, onRemoveAddedPoint, zeroLines = [], zeroSplineSegments = [], showZero = false, zeroEditable = false, zeroPointAddMode = false, zeroPointDeleteMode = false, onZeroPointMove, onZeroSegmentDoubleClick, onZeroPointAdd, onZeroPointDelete }: { scan: ScanItem; imageUrl: string; frameWidth: number; frameHeight: number; initialRegions?: DetailRegion[]; initialLayouts?: SheetLayout[]; initialLabelPositionsByLayout?: Record<string, Record<string, { x: number; y: number }>>; frontRotationSeed?: { transform: SheetImageTransform; canonicalOffsets: Record<string, { x: number; y: number }> }; onRegionsChange?: (regions: DetailRegion[]) => void; onLayoutsChange?: (layouts: SheetLayout[]) => void; onLabelPositionsChange?: (layoutId: string, positions: Record<string, { x: number; y: number }>, layerSize?: { width: number; height: number }) => void; onLayerSizeChange?: (layoutId: string, size: { width: number; height: number }) => void; points: PointResult[]; coefficient: number; useModel?: boolean; showPoints: boolean; visiblePointIds: Set<string>; onPointToggle: (id: string) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; labelFontFamily?: string; annotations: Annotation[]; showAnnotations: boolean; annotationTool: AnnotationTool; setAnnotationTool: (tool: AnnotationTool) => void; selectedAnnotationId: string | null; setSelectedAnnotationId: (id: string | null) => void; onAnnotationCommit: (annotation: Annotation) => void; onAnnotationCreate: (annotation: Annotation) => void; onAnnotationDelete: (id: string) => void; detailMode: boolean; setDetailMode: (value: boolean) => void; labelAreaMode: 'hide' | 'show' | null; setLabelAreaMode: (value: 'hide' | 'show' | null) => void; addPointMode: boolean; onAddPointAt: (x: number, y: number) => void; sampling: boolean; sampleError: string | null; addedPoints: PointResult[]; onRemoveAddedPoint: (id: string) => void; zeroLines?: [number, number][][]; zeroSplineSegments?: number[][]; showZero?: boolean; zeroEditable?: boolean; zeroPointAddMode?: boolean; zeroPointDeleteMode?: boolean; onZeroPointMove?: (lineIndex: number, pointIndex: number, dxPercent: number, dyPercent: number) => void; onZeroSegmentDoubleClick?: (lineIndex: number, segmentIndex: number) => void; onZeroPointAdd?: (lineIndex: number, segmentIndex: number, xPercent: number, yPercent: number) => void; onZeroPointDelete?: (lineIndex: number, pointIndex: number) => void }) {
   /* 정렬 합성 이미지는 스캔 원본과 크기가 다를 수 있어 프레임 치수를 직접 받는다. */
   const sourceAspect = frameWidth / frameHeight;
   /* 시트 폭·높이 상한. 한 번은 62/64 -> 42/44 로 줄였다가, 이번엔 그
@@ -1861,6 +1922,10 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
   const [layouts, setLayouts] = useState<SheetLayout[]>(() => {
     if (!initialLayouts || initialLayouts.length === 0) {
       return [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }];
+    }
+    /* CAD 뷰어에서 그림만 먼저 넣어 두면 정면도 창이 없이 시작한다. 그때는 정면도를 앞에 채운다. */
+    if (!initialLayouts.some((layout) => layout.kind === 'front')) {
+      return [{ id: 'front', kind: 'front', x: 4, y: 7, ...initialFrontSize }, ...initialLayouts];
     }
     /* 90도 회전은 frameWidth/frameHeight 를 맞바꿔 sourceAspect 를 뒤집는데,
        이어받은 정면도 창은 이전(회전 전) 비율로 맞춰진 w/h 라 화면에는 옛
@@ -1918,6 +1983,7 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
   const [hiddenDetailPointIds, setHiddenDetailPointIds] = useState<Record<string, Set<string>>>({});
   const [selectedLayoutId, setSelectedLayoutId] = useState('front');
   const [selectedRegionId, setSelectedRegionId] = useState<string | null>(null);
+  const [croppingLayoutId, setCroppingLayoutId] = useState<string | null>(null);
   const updateLayout = (next: SheetLayout) => setLayouts((current) => current.map((layout) => layout.id === next.id ? next : layout));
   const createDetail = (region: DetailRegion) => {
     const detailCount = layouts.filter((layout) => layout.kind === 'detail').length;
@@ -1955,6 +2021,22 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
 
   return <div className={`sheet-canvas ${detailMode ? 'sheet-canvas--detail-mode' : ''}`} onPointerDown={(event) => { if (event.target === event.currentTarget) { setSelectedLayoutId(''); setSelectedRegionId(null); setSelectedAnnotationId(null); } }}>
     {layouts.map((layout) => {
+      if (layout.kind === 'image') {
+        /* CAD 캡처 그림: 포인트·제로라인 없이 그림만 놓는다. 이동·크기 조절·삭제는 다른 창과 같다.
+           crop 은 원본의 % 라 Detail 크롭과 같은 방식으로 img 를 키워 보이는 부분만 남긴다. */
+        const crop = layout.crop ?? FULL_CROP;
+        return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={croppedAspect(layout)} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout}
+          onDelete={() => { setLayouts((current) => current.filter((item) => item.id !== layout.id)); if (selectedLayoutId === layout.id) setSelectedLayoutId('front'); }} title={layout.label || 'CAD 화면'}>
+          <div className="image-layout"><img src={layout.imageUrl} alt={layout.label || 'CAD 화면'} draggable={false} style={{ width: `${10000 / crop.w}%`, height: `${10000 / crop.h}%`, left: `${-crop.x / crop.w * 100}%`, top: `${-crop.y / crop.h * 100}%` }} /></div>
+          {croppingLayoutId === layout.id && <CropSelector onCancel={() => setCroppingLayoutId(null)} onComplete={(rect) => {
+            /* 보이는 영역의 % 를 원본 % 로 합성한다. 창 너비는 두고 높이만 새 비율에 맞춘다. */
+            const next = { x: crop.x + rect.x * crop.w / 100, y: crop.y + rect.y * crop.h / 100, w: crop.w * rect.w / 100, h: crop.h * rect.h / 100 };
+            const aspect = (layout.aspect || 4 / 3) * next.w / next.h;
+            updateLayout({ ...layout, crop: next, h: layout.w * SHEET_ASPECT / aspect });
+            setCroppingLayoutId(null);
+          }} />}
+        </SheetLayoutFrame>;
+      }
       const region = layout.regionId ? regions.find((item) => item.id === layout.regionId) : undefined;
       if (layout.kind === 'detail' && !region) return null;
       const title = layout.kind === 'front' ? '정면도 · FRONT VIEW' : region!.label;
@@ -1969,12 +2051,12 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
         else setHiddenDetailPointIds((current) => { const hidden = new Set(current[layout.id] || []); ids.forEach((id) => mode === 'hide' ? hidden.add(id) : hidden.delete(id)); return { ...current, [layout.id]: hidden }; });
       };
       return <SheetLayoutFrame key={layout.id} layout={layout} imageAspect={imageAspect} selected={selectedLayoutId === layout.id} onSelect={() => setSelectedLayoutId(layout.id)} onChange={updateLayout} onDelete={region ? () => deleteDetail(region.id) : undefined} title={title}>
-        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}</div>
+        {region ? <div className="detail-crop"><div className="layout-image-clip"><img src={imageUrl} alt={`${region.label} 확대 정면도`} style={{ width: `${10000 / region.w}%`, height: `${10000 / region.h}%`, left: `${-region.x / region.w * 100}%`, top: `${-region.y / region.h * 100}%` }} />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} region={region} />}</div>{showPoints && <CorrectionPoints coefficient={coefficient} useModel={useModel} points={detailPoints} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}</div>
           : <div className="front-view-layout"><img src={imageUrl} alt="스캔 데이터에서 추출한 정면도" />{showZero && zeroLines.length > 0 && <ZeroLineOverlay lines={zeroLines} splineSegments={zeroSplineSegments} editable={zeroEditable} addPointMode={zeroPointAddMode} deletePointMode={zeroPointDeleteMode} onPointMove={onZeroPointMove} onSegmentDoubleClick={onZeroSegmentDoubleClick} onPointAdd={onZeroPointAdd} onPointDelete={onZeroPointDelete} />}{addPointMode && layout.kind === 'front' && <><div className="add-point-catcher" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); if (!rect.width || !rect.height) return; onAddPointAt((event.clientX - rect.left) / rect.width * 100, (event.clientY - rect.top) / rect.height * 100); }} />
           {/* 지우기는 거리 판정 대신 포인트 위 전용 버튼으로 받는다. 점이 작아 손으로 정확히 겨누기 어렵다. */}
           {addedPoints.map((added) => <button key={added.id} type="button" className="add-point-remove" style={{ left: `${added.x}%`, top: `${added.y}%` }}
             onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); onRemoveAddedPoint(added.id); }}
-            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} rotationSeed={layout.kind === 'front' ? frontRotationSeed : undefined} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
+            aria-label={`${added.id} 추가 포인트 삭제`} title="이 추가 포인트 삭제"><X size={9} /></button>)}</>}{showPoints && <CorrectionPoints coefficient={coefficient} useModel={useModel} points={points} visibleLabelIds={layoutVisiblePointIds} onLabelToggle={toggleLayoutPoint} overrides={pointOverrides} onOverrideChange={onOverrideChange} labelFontFamily={labelFontFamily} initialLabelPositions={initialLabelPositionsByLayout?.[layout.id]} rotationSeed={layout.kind === 'front' ? frontRotationSeed : undefined} onLabelPositionsChange={getLabelPositionsHandler(layout.id)} onLayerSizeChange={getLayerSizeHandler(layout.id)} />}<DetailRegionLayer regions={regions} active={detailMode} selectedId={selectedRegionId} onSelect={setSelectedRegionId} onCreate={createDetail} onChange={updateDetailRegion} onDelete={deleteDetail} /></div>}
         <LabelAreaSelector mode={labelAreaMode} points={detailPoints} onApply={applyAreaPoints} onComplete={() => setLabelAreaMode(null)} />
       </SheetLayoutFrame>;
     })}
@@ -1982,7 +2064,7 @@ function SheetCanvas({ scan, imageUrl, frameWidth, frameHeight, initialRegions, 
     {detailMode && <div className="detail-mode-guide"><ZoomIn size={14} /><span>정면도 위에서 확대할 영역을 드래그하세요.</span><button type="button" onClick={() => setDetailMode(false)}>취소</button></div>}
     {addPointMode && <div className="detail-mode-guide add-point-guide"><Crosshair size={14} /><span>{sampleError || (sampling ? '편차값을 읽는 중입니다…' : '정면도를 눌러 보정 포인트를 추가합니다. 값은 히트맵 색에서 추정하며, 추가한 포인트를 다시 누르면 지워집니다.')}</span></div>}
     {labelAreaMode && <div className={`detail-mode-guide label-area-guide label-area-guide--${labelAreaMode}`}>{labelAreaMode === 'hide' ? <EyeOff size={14} /> : <Eye size={14} />}<span>레이아웃 위에서 {labelAreaMode === 'hide' ? '숨길' : '표시할'} 라벨 영역을 드래그하세요.</span><button type="button" onClick={() => setLabelAreaMode(null)}>취소</button></div>}
-    {selectedLayout && <div className="layout-size-control" onPointerDown={(event) => event.stopPropagation()}><b>{selectedLayout.kind === 'front' ? '정면도' : regions.find((item) => item.id === selectedLayout.regionId)?.label} 크기 · 비율 고정</b><label>W <input type="range" min="5" max="100" value={selectedLayout.w} onChange={(event) => setSelectedSize('w', Number(event.target.value))} /><span>{Math.round(selectedLayout.w)}%</span></label><label>H <input type="range" min="5" max="100" value={selectedLayout.h} onChange={(event) => setSelectedSize('h', Number(event.target.value))} /><span>{Math.round(selectedLayout.h)}%</span></label></div>}
+    {selectedLayout && <div className="layout-size-control" onPointerDown={(event) => event.stopPropagation()}><b>{selectedLayout.kind === 'front' ? '정면도' : selectedLayout.kind === 'image' ? (selectedLayout.label || 'CAD 화면') : regions.find((item) => item.id === selectedLayout.regionId)?.label} 크기 · 비율 고정</b>{selectedLayout.kind === 'image' && <><button type="button" className={croppingLayoutId === selectedLayout.id ? 'active' : ''} onClick={() => setCroppingLayoutId((current) => current === selectedLayout.id ? null : selectedLayout.id)}>{croppingLayoutId === selectedLayout.id ? '자르기 취소' : '자르기'}</button>{selectedLayout.crop && <button type="button" onClick={() => { const aspect = selectedLayout.aspect || 4 / 3; updateLayout({ ...selectedLayout, crop: undefined, h: selectedLayout.w * SHEET_ASPECT / aspect }); setCroppingLayoutId(null); }}>원본으로</button>}</>}<label>W <input type="range" min="5" max="100" value={selectedLayout.w} onChange={(event) => setSelectedSize('w', Number(event.target.value))} /><span>{Math.round(selectedLayout.w)}%</span></label><label>H <input type="range" min="5" max="100" value={selectedLayout.h} onChange={(event) => setSelectedSize('h', Number(event.target.value))} /><span>{Math.round(selectedLayout.h)}%</span></label></div>}
   </div>;
 }
 
@@ -3037,7 +3119,7 @@ function CorrectionHistoryPanel({ partNo, entries, loading, pendingPointIds, del
   </div>;
 }
 
-function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, zeroEdits, onZeroEditsChange, sheetTransformByScan, setSheetTransformByScan, sheetLayoutsByScan, setSheetLayoutsByScan, detailRegionsByScan, setDetailRegionsByScan, frontLabelPositionsByScan, setFrontLabelPositionsByScan, detailLabelPositionsByScan, setDetailLabelPositionsByScan, addedPointsByScan, setAddedPointsByScan }: { scan: ScanItem; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void; sheetTransformByScan: Record<string, SheetImageTransform>; setSheetTransformByScan: React.Dispatch<React.SetStateAction<Record<string, SheetImageTransform>>>; sheetLayoutsByScan: Record<string, SheetLayout[]>; setSheetLayoutsByScan: React.Dispatch<React.SetStateAction<Record<string, SheetLayout[]>>>; detailRegionsByScan: Record<string, DetailRegion[]>; setDetailRegionsByScan: React.Dispatch<React.SetStateAction<Record<string, DetailRegion[]>>>; frontLabelPositionsByScan: Record<string, Record<string, { x: number; y: number }>>; setFrontLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, { x: number; y: number }>>>>; detailLabelPositionsByScan: Record<string, Record<string, Record<string, { x: number; y: number }>>>; setDetailLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, Record<string, { x: number; y: number }>>>>>; addedPointsByScan: Record<string, PointResult[]>; setAddedPointsByScan: React.Dispatch<React.SetStateAction<Record<string, PointResult[]>>> }) {
+function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, onKeyPointsOnlyChange, pointOverrides, onOverrideChange, onClearAllOverrides, annotations = [], setAnnotations, sheetTitle, onSheetTitleChange, sheetTitleFonts, onSheetTitleFontChange, sheetTitleFontSizes, onSheetTitleFontSizeChange, worker, onWorkerChange, coefficient, onCoefficientChange, useModel, onUseModelChange, zeroEdits, onZeroEditsChange, sheetTransformByScan, setSheetTransformByScan, sheetLayoutsByScan, setSheetLayoutsByScan, detailRegionsByScan, setDetailRegionsByScan, frontLabelPositionsByScan, setFrontLabelPositionsByScan, detailLabelPositionsByScan, setDetailLabelPositionsByScan, addedPointsByScan, setAddedPointsByScan }: { scan: ScanItem; hiddenPointIds: Set<string>; onPointToggle: (id: string) => void; keyPointsOnly: boolean; onKeyPointsOnlyChange: (value: boolean) => void; pointOverrides: Record<string, number>; onOverrideChange: (id: string, value: number | null) => void; onClearAllOverrides: () => void; annotations: Annotation[]; setAnnotations: (updater: (current: Annotation[]) => Annotation[]) => void; sheetTitle: SheetTitleValues; onSheetTitleChange: (field: SheetTitleField, value: string) => void; sheetTitleFonts: SheetTitleFonts; onSheetTitleFontChange: (field: SheetTitleField, fontFamily: string) => void; sheetTitleFontSizes: SheetTitleFontSizes; onSheetTitleFontSizeChange: (field: SheetTitleField, size: number) => void; worker: string; onWorkerChange: (value: string) => void; coefficient: number; onCoefficientChange: (value: number) => void; useModel: boolean; onUseModelChange: (value: boolean) => void; zeroEdits: ZeroEdit[]; onZeroEditsChange: (edits: ZeroEdit[]) => void; sheetTransformByScan: Record<string, SheetImageTransform>; setSheetTransformByScan: React.Dispatch<React.SetStateAction<Record<string, SheetImageTransform>>>; sheetLayoutsByScan: Record<string, SheetLayout[]>; setSheetLayoutsByScan: React.Dispatch<React.SetStateAction<Record<string, SheetLayout[]>>>; detailRegionsByScan: Record<string, DetailRegion[]>; setDetailRegionsByScan: React.Dispatch<React.SetStateAction<Record<string, DetailRegion[]>>>; frontLabelPositionsByScan: Record<string, Record<string, { x: number; y: number }>>; setFrontLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, { x: number; y: number }>>>>; detailLabelPositionsByScan: Record<string, Record<string, Record<string, { x: number; y: number }>>>; setDetailLabelPositionsByScan: React.Dispatch<React.SetStateAction<Record<string, Record<string, Record<string, { x: number; y: number }>>>>>; addedPointsByScan: Record<string, PointResult[]>; setAddedPointsByScan: React.Dispatch<React.SetStateAction<Record<string, PointResult[]>>> }) {
   const result = scan.result!; const points = result.points; const [showPoints, setShowPoints] = useState(true); const [showZero, setShowZero] = useState(true);
   const [zeroPanel, setZeroPanel] = useState(false);
   const [zeroPointAddMode, setZeroPointAddMode] = useState(false);
@@ -3248,10 +3330,12 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
      라벨 크기(라벨은 안 돌아가므로)를 그대로 빼준다. 라벨 크기 계산은
      CorrectionPoints 의 getLabelWidth/labelHeight 와 반드시 같아야 한다. */
   const getFrontLabelWidthPx = useCallback((point: PointResult) => {
-    const display = pointOverrides[point.id] !== undefined ? pointOverrides[point.id]! : -(point.value * coefficient);
+    const modelValue = useModel ? modelSuggestedCorrection(point) : null;
+    const display = pointOverrides[point.id] !== undefined ? pointOverrides[point.id]!
+      : modelValue !== null ? modelValue : -(point.value * coefficient);
     const text = `${display > 0 ? '+' : ''}${display.toFixed(1)}`;
     return Math.max(24, text.length * 5.2 + 8);
-  }, [pointOverrides, coefficient]);
+  }, [pointOverrides, coefficient, useModel]);
   const FRONT_LABEL_HEIGHT_PX = 17;
   /* 정면도 창은 회전마다(위 넓이-보존 리핏) 가로/세로 폭이 서로 다른 비율로
      바뀐다 -- 넓이(w*h)는 보존되지만 가로:세로 비율 자체는 방향마다 다르다.
@@ -3787,6 +3871,11 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
         points: payloadPoints,
         annotations: payloadAnnotations,
         details: payloadDetails,
+        /* CAD 뷰어에서 넣은 그림. 백엔드가 같은 자리(placement)에 사진으로 얹는다. */
+        pictures: sheetLayouts.filter((layout) => layout.kind === 'image' && layout.imageUrl).map((layout) => ({
+          url: layout.imageUrl, label: layout.label || 'CAD 화면', placement: { x: layout.x, y: layout.y, w: layout.w, h: layout.h },
+          crop: layout.crop ?? null,
+        })),
         /* 정면도 picture 를 시트 캔버스 어디에 얼마 크기로 놓을지. UI 와 같은 % 좌표로 넘긴다. */
         frontPlacement: frontLayout ? { x: frontLayout.x, y: frontLayout.y, w: frontLayout.w, h: frontLayout.h } : null,
         /* frontLabels: 정면도가 실제로 화면에 그린 라벨 위치. */
@@ -3830,7 +3919,14 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
     if (!selectedAnnotationId) return;
     setAnnotations((current) => current.map((item) => item.id === selectedAnnotationId ? { ...item, color: hex } : item));
   };
-  const displayFor = useCallback((point: PointResult) => pointOverrides[point.id] !== undefined ? pointOverrides[point.id] : -(point.value * coefficient), [coefficient, pointOverrides]);
+  const displayFor = useCallback((point: PointResult) => {
+    if (pointOverrides[point.id] !== undefined) return pointOverrides[point.id];
+    if (useModel) {
+      const suggested = modelSuggestedCorrection(point);
+      if (suggested !== null) return suggested;
+    }
+    return -(point.value * coefficient);
+  }, [coefficient, useModel, pointOverrides]);
   const formatCorrection = useCallback((value: number) => `${value > 0 ? '+' : ''}${value.toFixed(1)}`, []);
   const maxCorrection = useMemo(() => points.length ? Math.max(...points.map((point) => Math.abs(displayFor(point)))) : 0, [displayFor, points]);
   const overrideCount = useMemo(() => points.filter((point) => pointOverrides[point.id] !== undefined).length, [points, pointOverrides]);
@@ -3844,7 +3940,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
     const oldMode: CorrectionMode = pointOverrides[id] === undefined ? 'auto' : 'manual';
     const newMode: CorrectionMode = targetOverride === null ? 'auto' : 'manual';
     const oldValue = displayFor(point);
-    const newValue = targetOverride ?? -(point.value * coefficient);
+    const newValue = targetOverride ?? (useModel ? modelSuggestedCorrection(point) ?? -(point.value * coefficient) : -(point.value * coefficient));
     if (oldMode === newMode && Math.abs(oldValue - newValue) < 0.0001) {
       setHistoryError(null);
       return true;
@@ -3940,7 +4036,7 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
         })}</div><div className="zero-edit__tools"><button type="button" className={zeroPointAddMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointAddMode((current) => { const next = !current; if (next) setZeroPointDeleteMode(false); return next; })}>{zeroPointAddMode ? '점 추가 종료' : '점 추가'}</button><button type="button" className={zeroPointDeleteMode ? 'zero-edit__mode is-active' : 'zero-edit__mode'} onClick={() => setZeroPointDeleteMode((current) => { const next = !current; if (next) setZeroPointAddMode(false); return next; })}>{zeroPointDeleteMode ? '점 삭제 종료' : '점 삭제'}</button><button type="button" className="zero-edit__icon" disabled={!zeroDraft.past.length} onClick={undoZeroDraft} aria-label="되돌리기" title="되돌리기 (Ctrl+Z)"><Undo2 size={13} /></button><button type="button" className="zero-edit__icon" disabled={!zeroDraft.future.length} onClick={redoZeroDraft} aria-label="다시 실행" title="다시 실행 (Ctrl+Shift+Z)"><Redo2 size={13} /></button><button type="button" className="zero-edit__apply" onClick={() => onZeroEditsChange(draftZeroEdits)}>3D에 적용</button><button type="button" onClick={() => { setDraftZeroEdits([]); onZeroEditsChange([]); }}>초기화</button></div></div>
         <div className="zero-edit__status"><span>{zeroPointDeleteMode ? '삭제할 꼭짓점을 클릭하세요. 열린 선은 2점, 닫힌 선은 3점을 유지합니다.' : zeroPointAddMode ? '분할할 구간을 한 번 클릭하세요.' : '곡선으로 만들 구간만 더블클릭하세요. 인접 구간은 그대로 유지됩니다.'}</span>{JSON.stringify(draftZeroEdits) !== JSON.stringify(zeroEdits) && <em>3D 미적용 변경 있음</em>}</div>
       </div>}
-      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} initialRegions={detailRegions} initialLayouts={sheetLayouts} initialLabelPositionsByLayout={labelPositionsByLayout} frontRotationSeed={{ transform: activeSheetTransform, canonicalOffsets: storedFrontLabelOffsets }} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} onLabelPositionsChange={handleLabelPositionsChange} onLayerSizeChange={handleLayerSizeChange} points={sheetPoints} coefficient={coefficient} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
+      <div className="sheet-page" ref={sheetRef}><SheetTitleBlock values={sheetTitle} onChange={onSheetTitleChange} fonts={sheetTitleFonts} onFontChange={onSheetTitleFontChange} fontSizes={sheetTitleFontSizes} onFontSizeChange={onSheetTitleFontSizeChange} /><div className="sheet-stage sheet-stage--light" ref={stageRef}><SheetCanvas key={`${scan.id}-${onProduct ? 'product' : 'scan'}-${sheetTransformKey(activeSheetTransform)}`} scan={scan} imageUrl={baseImage} frameWidth={sheetFrameWidth} frameHeight={sheetFrameHeight} initialRegions={detailRegions} initialLayouts={sheetLayouts} initialLabelPositionsByLayout={labelPositionsByLayout} frontRotationSeed={{ transform: activeSheetTransform, canonicalOffsets: storedFrontLabelOffsets }} onRegionsChange={setDetailRegions} onLayoutsChange={setSheetLayouts} onLabelPositionsChange={handleLabelPositionsChange} onLayerSizeChange={handleLayerSizeChange} points={sheetPoints} coefficient={coefficient} useModel={useModel} showPoints={showPoints} visiblePointIds={visiblePointIds} onPointToggle={onPointToggle} pointOverrides={pointOverrides} onOverrideChange={handleOverrideChange} labelFontFamily={pointLabelFont} annotations={annotations} showAnnotations={showAnnotations} annotationTool={tool} setAnnotationTool={setTool} selectedAnnotationId={selectedAnnotationId} setSelectedAnnotationId={setSelectedAnnotationId} onAnnotationCommit={commitAnnotation} onAnnotationCreate={createAnnotation} onAnnotationDelete={deleteAnnotation} detailMode={detailMode} setDetailMode={setDetailMode} labelAreaMode={labelAreaMode} setLabelAreaMode={setLabelAreaMode} addPointMode={addPointMode} onAddPointAt={addPointAt} sampling={sampling} sampleError={sampleError} addedPoints={sheetAddedPoints} onRemoveAddedPoint={removeAddedPoint} zeroLines={sheetZeroLines} zeroSplineSegments={zeroLineSplineSegments} showZero={showZero} zeroEditable={zeroPanel} zeroPointAddMode={zeroPointAddMode} zeroPointDeleteMode={zeroPointDeleteMode} onZeroPointMove={moveZeroPoint} onZeroSegmentDoubleClick={toggleZeroSplineSegment} onZeroPointAdd={addZeroPoint} onZeroPointDelete={deleteZeroPoint} /></div></div>
       <div className="sheet-note"><ShieldCheck size={17} /><span><b>상단 표의 모든 글자를 클릭해 수정할 수 있습니다. 레이아웃은 제목 막대와 선택 핸들로 이동·조절합니다.</b>{excelError && <><br /><b className="sheet-note__error">{excelError}</b></>}</span>
         <input ref={excelInputRef} type="file" accept=".xlsx" className="visually-hidden" onChange={(e) => { setExcelFile(e.target.files?.[0] || null); setExcelError(null); }} aria-label="이어붙일 기존 보정 시트 엑셀 파일" />
         <button type="button" className="sheet-print sheet-print--ghost" onClick={() => excelInputRef.current?.click()} title="기존 보정 시트 엑셀 파일을 골라두면 그 아래에 이어붙입니다"><UploadCloud size={14} /> {excelFile ? excelFile.name : '기존 엑셀 불러오기'}</button>
@@ -3953,14 +4049,16 @@ function ServicePreview({ scan, hiddenPointIds, onPointToggle, keyPointsOnly, on
       : <span className="coefficient-value coefficient-value--editing"><input type="number" step="0.01" aria-label="보정 계수 직접 입력" value={coefficientText} autoFocus onFocus={(e) => e.currentTarget.select()}
           onChange={(e) => setCoefficientText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commitCoefficientText(); } else if (e.key === 'Escape') { e.preventDefault(); setCoefficientText(null); } }}
-          onBlur={commitCoefficientText} />×</span>}</div><input aria-label="보정 계수" type="range" min={coefficientRange.min} max={coefficientRange.max} step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels coefficient-range-labels"><label>최소 <input aria-label="보정 계수 최소값" type="number" step="0.1" value={coefficientRange.min} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: Math.min(value, current.max - 0.05), max: current.max })); }} /></label><label>최대<input aria-label="보정 계수 최대값" type="number" step="0.1" value={coefficientRange.max} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: current.min, max: Math.max(value, current.min + 0.05) })); }} /></label></div><div className="formula"><span>보정치</span><b>= 편차 × {coefficient.toFixed(2)} × (−1)</b></div>{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
+          onBlur={commitCoefficientText} />×</span>}</div><input aria-label="보정 계수" type="range" min={coefficientRange.min} max={coefficientRange.max} step="0.05" value={coefficient} onChange={(e) => onCoefficientChange(Number(e.target.value))} /><div className="range-labels coefficient-range-labels"><label>최소 <input aria-label="보정 계수 최소값" type="number" step="0.1" value={coefficientRange.min} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: Math.min(value, current.max - 0.05), max: current.max })); }} /></label><label>최대<input aria-label="보정 계수 최대값" type="number" step="0.1" value={coefficientRange.max} onChange={(e) => { const value = e.target.valueAsNumber; if (!Number.isNaN(value)) setCoefficientRange((current) => ({ min: current.min, max: Math.max(value, current.min + 0.05) })); }} /></label></div><div className="formula"><span>보정치</span><b>{useModel ? '= 추천 보정량 모델' : `= 편차 × ${coefficient.toFixed(2)} × (−1)`}</b></div>{isModelTrainedPart(scan.partNo) && <button type="button" role="switch" className={`model-recommend-toggle ${useModel ? 'active' : ''}`} aria-checked={useModel} onClick={() => onUseModelChange(!useModel)} title="편차·위치·모서리/홀/제로라인 거리로 학습한 회귀모델 추천값을 씁니다"><i /><span>추천 보정량</span></button>}{overrideCount > 0 && <p className="coefficient-note">수정된 {overrideCount}개 포인트는 계수/모델 영향을 받지 않습니다.</p>}</div><div className="card correction-summary"><h3>실제 엔진 요약</h3><div><span>보정 포인트</span><b>{visiblePointIds.size}개</b></div>{overrideCount > 0 && <div><span>수정된 포인트</span><b className="blue">{overrideCount}개</b></div>}<div><span>최대 보정량</span><b className="orange">{maxCorrection.toFixed(3)} mm</b></div><div><span>제로라인</span><b className="green">{result.stats.zeroRegions}개 영역</b></div><div><span>처리 품번</span><b>{scan.partNo}</b></div><div><span>작업자</span><input type="text" className="worker-input" value={worker} onChange={(e) => onWorkerChange(e.target.value)} placeholder="이름 입력" aria-label="작업자 이름" /></div><div><span>보정치 글꼴</span><select className="worker-input" value={pointLabelFont} onChange={(e) => setPointLabelFont(e.target.value)} aria-label="보정치 수치 글꼴 선택">{FONT_FAMILY_OPTIONS.map((option) => <option key={option.label} value={option.value} style={{ fontFamily: option.value || undefined }}>{option.label}</option>)}</select></div>{overrideCount > 0 && <button type="button" className="reset-all-overrides" onClick={() => void handleClearAllOverrides()}>모든 수정 취소</button>}</div><CorrectionHistoryPanel partNo={scan.partNo} entries={history} loading={historyLoading} pendingPointIds={pendingPointIds} deletingEntryIds={deletingEntryIds} error={historyError} onReload={loadHistory} onRestore={restoreHistoryEntry} onDelete={(entry) => void deleteHistoryEntry(entry)} /></aside></div>
   </section>;
 }
 
-function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, zeroEditsByScan, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zonesByPart, setZonesByPart }: {
+function CadWorkspace({ active, scans, coefficientByScan, useModelByScan, hiddenPointIdsByScan, pointOverridesByScan, onOverrideChange, zeroEditsByScan, notesByCad, setNotesByCad, regionsByCad, setRegionsByCad, zonesByPart, setZonesByPart, onSendToSheet }: {
+  onSendToSheet?: (scanId: string, url: string, label: string) => void;
   active: boolean;
   scans: ScanItem[];
   coefficientByScan: Record<string, number>;
+  useModelByScan: Record<string, boolean>;
   hiddenPointIdsByScan: Record<string, Set<string>>;
   pointOverridesByScan: Record<string, Record<string, number>>;
   onOverrideChange: (scanId: string, pointId: string, value: number | null) => void;
@@ -4077,17 +4175,19 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
   const sheetValues = useMemo(() => {
     if (!overlayScan?.result) return null;
     const coefficient = coefficientByScan[overlayScan.id] ?? 1;
+    const useModel = isModelTrainedPart(overlayScan.partNo) ? useModelByScan[overlayScan.id] ?? false : false;
     const overrides = pointOverridesByScan[overlayScan.id] || {};
     const hidden = hiddenPointIdsByScan[overlayScan.id] || new Set<string>();
     const values: Record<string, number> = {};
     for (const point of overlayScan.result.points) {
       if (hidden.has(point.id)) continue;
+      const modelValue = useModel ? modelSuggestedCorrection(point) : null;
       values[point.id] = overrides[point.id] !== undefined
         ? overrides[point.id]
-        : -(point.value * coefficient);
+        : modelValue !== null ? modelValue : -(point.value * coefficient);
     }
     return values;
-  }, [overlayScan, coefficientByScan, pointOverridesByScan, hiddenPointIdsByScan]);
+  }, [overlayScan, coefficientByScan, useModelByScan, pointOverridesByScan, hiddenPointIdsByScan]);
 
   const reopenCad = useCallback(async (name: string): Promise<CadMesh | null> => {
     const file = fileStore.current[name];
@@ -4290,7 +4390,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
             : `형상 얹힘 ${Math.round((overlay.fit.hit_rate || 0) * 100)}%`}
         </span>}
         {overlay && <button type="button" className="tool-button" onClick={() => setShowAlign((current) => !current)}>정렬 맞추기</button>}
-        {overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
+        {onSendToSheet && overlayScanId && <button type="button" className="tool-button" disabled={!shots.length} title={shots.length ? '담은 화면을 보정 시트 작성 탭에 그림 창으로 넣습니다' : '먼저 3D 화면을 캡처해 담으세요'} onClick={() => shots.forEach((shot) => onSendToSheet(overlayScanId, shot.url, shot.label))}>보정시트에 넣기{shots.length ? ` (${shots.length}장)` : ''}</button>}{overlay && sheetValues && <button type="button" className="tool-button" onClick={() => void makeCadSheet()} disabled={sheetBusy}>{sheetBusy ? '시트 만드는 중…' : `보정시트 만들기${shots.length ? ` (${shots.length}장)` : ''}`}</button>}
         {shots.length > 0 && <button type="button" className="tool-button"
           onClick={() => setShots([])}>담은 화면 비우기</button>}
         {overlay && sheetValues && <button type="button" className="tool-button" onClick={saveCadTable}>CAD 보정표</button>}
@@ -4362,7 +4462,7 @@ function CadWorkspace({ active, scans, coefficientByScan, hiddenPointIdsByScan, 
 }
 
 export default function Home() {
-  const [view, setView] = useState<View>('overview'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
+  const [view, setView] = useState<View>('overview'); const [scans, setScans] = useState<ScanItem[]>([]); const [activeId, setActiveId] = useState<string>(); const [backendOnline, setBackendOnline] = useState<boolean | null>(null); const [hiddenPointIdsByScan, setHiddenPointIdsByScan] = useState<Record<string, Set<string>>>({}); const [pointOverridesByScan, setPointOverridesByScan] = useState<Record<string, Record<string, number>>>({}); const [coefficientByScan, setCoefficientByScan] = useState<Record<string, number>>({}); const [useModelByScan, setUseModelByScan] = useState<Record<string, boolean>>({}); const [annotationsByScan, setAnnotationsByScan] = useState<Record<string, Annotation[]>>({}); const [sheetTitlesByScan, setSheetTitlesByScan] = useState<Record<string, SheetTitleValues>>({});
   const [keyPointsOnlyByScan, setKeyPointsOnlyByScan] = useState<Record<string, boolean>>({});
   const [resultEngine, setResultEngine] = useState<Engine>('label');
   const [sheetTitleFontsByScan, setSheetTitleFontsByScan] = useState<Record<string, SheetTitleFonts>>({});
@@ -4381,6 +4481,22 @@ export default function Home() {
      다른 파트에는 영향이 없다. */
   const [sheetTransformByScan, setSheetTransformByScan] = useState<Record<string, SheetImageTransform>>({});
   const [sheetLayoutsByScan, setSheetLayoutsByScan] = useState<Record<string, SheetLayout[]>>({});
+  /* CAD 뷰어 캡처를 보정시트의 새 그림 창으로 넣는다. 정면도 창이 아직 없으면 SheetCanvas 가 마운트할 때 채운다.
+     자리는 Detail 창과 같은 규칙(오른쪽 열, 3개씩 내려가며). */
+  const addSheetImage = useCallback((scanId: string, url: string, label: string) => {
+    const image = new window.Image();
+    image.onload = () => {
+      const aspect = image.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : 4 / 3;
+      setSheetLayoutsByScan((current) => {
+        const existing = current[scanId] ?? [];
+        const count = existing.filter((layout) => layout.kind !== 'front').length;
+        const next: SheetLayout = { id: `image-${Date.now().toString(36)}-${existing.length}`, kind: 'image', imageUrl: url, label, aspect, x: 68, y: 7 + (count % 3) * 29, ...fitAspectSize(aspect, 28, 25) };
+        return { ...current, [scanId]: [...existing, next] };
+      });
+      setView('service');
+    };
+    image.src = url;
+  }, []);
   const [detailRegionsByScan, setDetailRegionsByScan] = useState<Record<string, DetailRegion[]>>({});
   const [frontLabelPositionsByScan, setFrontLabelPositionsByScan] = useState<Record<string, Record<string, { x: number; y: number }>>>({});
   const [detailLabelPositionsByScan, setDetailLabelPositionsByScan] = useState<Record<string, Record<string, Record<string, { x: number; y: number }>>>>({});
@@ -4445,6 +4561,7 @@ export default function Home() {
   const hiddenPointIds = completedScan ? hiddenPointIdsByScan[completedScan.id] || new Set<string>() : new Set<string>();
   const pointOverrides = completedScan ? pointOverridesByScan[completedScan.id] || {} : {};
   const coefficient = completedScan ? coefficientByScan[completedScan.id] ?? 1 : 1;
+  const useModel = completedScan && isModelTrainedPart(completedScan.partNo) ? useModelByScan[completedScan.id] ?? false : false;
   const keyPointsOnly = completedScan ? keyPointsOnlyByScan[completedScan.id] ?? false : false;
   const sheetTitle = completedScan ? sheetTitlesByScan[completedScan.id] || createDefaultSheetTitleValues(completedScan) : undefined;
   const sheetTitleFonts = completedScan ? sheetTitleFontsByScan[completedScan.id] || DEFAULT_TITLE_FONTS : DEFAULT_TITLE_FONTS;
@@ -4453,6 +4570,7 @@ export default function Home() {
   const setPointOverride = (id: string, value: number | null) => completedScan && setPointOverridesByScan((current) => { const next = { ...(current[completedScan.id] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [completedScan.id]: next }; });
   const setPointOverrideFor = (scanId: string, id: string, value: number | null) => setPointOverridesByScan((current) => { const next = { ...(current[scanId] || {}) }; if (value === null) delete next[id]; else next[id] = value; return { ...current, [scanId]: next }; });
   const setCoefficient = (value: number) => completedScan && setCoefficientByScan((current) => ({ ...current, [completedScan.id]: value }));
+  const setUseModel = (value: boolean) => completedScan && setUseModelByScan((current) => ({ ...current, [completedScan.id]: value }));
   const clearAllOverrides = () => completedScan && setPointOverridesByScan((current) => ({ ...current, [completedScan.id]: {} }));
   const annotations = completedScan ? annotationsByScan[completedScan.id] || [] : [];
   const setAnnotations = (updater: (current: Annotation[]) => Annotation[]) => completedScan && setAnnotationsByScan((current) => ({ ...current, [completedScan.id]: updater(current[completedScan.id] || []) }));
@@ -4614,10 +4732,10 @@ export default function Home() {
       {view === 'overview' && <WorkspaceHub onSelect={selectView} hasResult={hasResult} scanCount={scans.length} backendOnline={backendOnline} />}
       {view === 'workspace' && <Workspace scans={scans} selectedScan={activeScan || scans[0]} setScans={setScans} result={completedScan?.result} onOpenResults={openResults} onOpenEngine={openEngine} backendOnline={backendOnline} />}
       {view === 'results' && completedScan?.result && <Results managementEdit={managementEditByScan[completedScan.id] ?? EMPTY_MANAGEMENT_EDIT} setManagementEdit={setCompletedManagementEdit} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} scan={completedScan} engine={resultEngine} setEngine={setResultEngine} onScanData={() => setView('workspace')} onService={() => setView('service')} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} onRealign={realign} onConfirmAlignment={confirmAlignment} />}
-      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={sheetScan ?? completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
+      {view === 'service' && completedScan?.result && sheetTitle && <ServicePreview scan={sheetScan ?? completedScan} hiddenPointIds={hiddenPointIds} onPointToggle={togglePoint} keyPointsOnly={keyPointsOnly} onKeyPointsOnlyChange={(value) => setKeyPointsOnlyByScan((current) => ({ ...current, [completedScan.id]: value }))} pointOverrides={pointOverrides} onOverrideChange={setPointOverride} onClearAllOverrides={clearAllOverrides} annotations={annotations} setAnnotations={setAnnotations} sheetTitle={sheetTitle} onSheetTitleChange={setSheetTitleField} sheetTitleFonts={sheetTitleFonts} onSheetTitleFontChange={setSheetTitleFontField} sheetTitleFontSizes={sheetTitleFontSizes} onSheetTitleFontSizeChange={setSheetTitleFontSizeField} worker={worker} onWorkerChange={setWorker} coefficient={coefficient} onCoefficientChange={setCoefficient} useModel={useModel} onUseModelChange={setUseModel} zeroEdits={zeroEditsByScan[completedScan.id] || EMPTY_ZERO_EDITS} onZeroEditsChange={(edits) => setZeroEditsByScan((current) => ({ ...current, [completedScan.id]: edits }))} sheetTransformByScan={sheetTransformByScan} setSheetTransformByScan={setSheetTransformByScan} sheetLayoutsByScan={sheetLayoutsByScan} setSheetLayoutsByScan={setSheetLayoutsByScan} detailRegionsByScan={detailRegionsByScan} setDetailRegionsByScan={setDetailRegionsByScan} frontLabelPositionsByScan={frontLabelPositionsByScan} setFrontLabelPositionsByScan={setFrontLabelPositionsByScan} detailLabelPositionsByScan={detailLabelPositionsByScan} setDetailLabelPositionsByScan={setDetailLabelPositionsByScan} addedPointsByScan={addedPointsByScan} setAddedPointsByScan={setAddedPointsByScan} />}
       {view === 'files' && <FileOrganizerPage />}
       <div style={{ display: view === 'cad' ? 'block' : 'none' }}>
-        <CadWorkspace active={view === 'cad'} scans={sheetScans} coefficientByScan={coefficientByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
+        <CadWorkspace onSendToSheet={addSheetImage} active={view === 'cad'} scans={sheetScans} coefficientByScan={coefficientByScan} useModelByScan={useModelByScan} hiddenPointIdsByScan={hiddenPointIdsByScan} pointOverridesByScan={pointOverridesByScan} onOverrideChange={setPointOverrideFor} zeroEditsByScan={zeroEditsByScan} notesByCad={notesByCad} setNotesByCad={setNotesByCad} regionsByCad={regionsByCad} setRegionsByCad={setRegionsByCad} zonesByPart={zonesByPart} setZonesByPart={setZonesByPart} />
       </div>
     </div>
   </main>;
