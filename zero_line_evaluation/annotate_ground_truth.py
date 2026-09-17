@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scan", type=Path, required=True)
     parser.add_argument("--sheet", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--kind", choices=["line", "points"], default="line")
+    parser.add_argument("--kind", choices=["line", "points", "area"], default="line")
     return parser.parse_args()
 
 
@@ -59,12 +59,20 @@ def main() -> int:
         x0 = left_width + divider
         canvas[:scan_view.shape[0], x0:x0 + scan_view.shape[1]] = scan_view
         cv2.rectangle(canvas, (left_width, 0), (left_width + divider - 1, height), (40, 40, 40), -1)
+        if kind == "area":
+            overlay = canvas.copy()
+            for line in lines:
+                points = np.asarray([[x0 + x * scan_scale, y * scan_scale] for x, y in line], np.int32)
+                if len(points) >= 3:
+                    cv2.fillPoly(overlay, [points.reshape(-1, 1, 2)], (0, 0, 255))
+            canvas[:] = cv2.addWeighted(overlay, 0.35, canvas, 0.65, 0)
         for line in lines + ([current] if current else []):
             points = np.asarray([[x0 + x * scan_scale, y * scan_scale] for x, y in line], np.int32)
             if len(points) == 1:
                 cv2.circle(canvas, tuple(points[0]), 6, (0, 0, 255), -1, cv2.LINE_AA)
             elif len(points) > 1:
-                cv2.polylines(canvas, [points.reshape(-1, 1, 2)], False, (0, 0, 255), 3, cv2.LINE_AA)
+                closed = kind == "area" and line is not current
+                cv2.polylines(canvas, [points.reshape(-1, 1, 2)], closed, (0, 0, 255), 3, cv2.LINE_AA)
                 for point in points:
                     cv2.circle(canvas, tuple(point), 4, (0, 255, 255), -1, cv2.LINE_AA)
         message = f"mode={kind} | left=add right=delete-nearest N=finish U=undo C=clear M=mode S=save Q=quit"
@@ -124,7 +132,7 @@ def main() -> int:
             lines.clear()
         elif key == ord("m"):
             finish_current()
-            kind = "points" if kind == "line" else "line"
+            kind = {"line": "points", "points": "area", "area": "line"}[kind]
         elif key == ord("s"):
             finish_current()
             output_path.parent.mkdir(parents=True, exist_ok=True)
