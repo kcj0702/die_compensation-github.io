@@ -69,6 +69,24 @@ def rasterize_lines(shape: tuple[int, int], lines: list[Any], thickness: int = 1
     return mask > 0
 
 
+def rasterize_area(shape: tuple[int, int], lines: list[Any]) -> np.ndarray:
+    """Fill each annotated polygon — ground truth is a region, not a stroke.
+
+    Case 1(면적/윤곽 다각형) 결과와 비교하려면 정답도 "선"이 아니라 "면"으로
+    받아야 한다. 점 3개 미만은 다각형을 못 채우므로 그냥 건너뛴다.
+    """
+    mask = np.zeros(shape, dtype=np.uint8)
+    for entry in lines:
+        points = entry.get("points", []) if isinstance(entry, dict) else entry
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 2) if points else np.empty((0, 2))
+        if len(pts) < 3:
+            continue
+        pts[:, 0] = np.clip(np.rint(pts[:, 0]), 0, shape[1] - 1)
+        pts[:, 1] = np.clip(np.rint(pts[:, 1]), 0, shape[0] - 1)
+        cv2.fillPoly(mask, [pts.astype(np.int32).reshape(-1, 1, 2)], 255)
+    return mask > 0
+
+
 def skeletonize(mask: np.ndarray) -> np.ndarray:
     """Morphological skeleton fallback when a predictor exposes only an area mask."""
     source = (mask.astype(np.uint8) * 255).copy()
@@ -91,12 +109,36 @@ class Prediction:
     warnings: list[str]
 
 
+# 이 평가 도구는 컬러바 숫자를 직접 읽는 Qwen 리더(무거운 torch/transformers
+# 의존성)를 두지 않는다 — 세 기준 부품은 이미 확인된 물리 범위가 있으므로
+# 그 값을 그대로 쓴다. 새 부품을 추가하려면 실제 시트에 인쇄된 컬러바 숫자를
+# 확인해서 여기 추가한다.
+KNOWN_COLORBAR_RANGES_MM: dict[str, tuple[float, float]] = {
+    "64XX2": (-1.5, 2.0),
+    "67XX6": (-3.0, 3.0),
+    "71XX2": (-2.0, 2.0),
+}
+
+
+def _colorbar_range_for(filename: str) -> tuple[float, float]:
+    name = filename.upper()
+    for key, value in KNOWN_COLORBAR_RANGES_MM.items():
+        if key in name:
+            return value
+    raise ValueError(
+        f"{filename}의 컬러바 물리 범위를 모릅니다 — "
+        "KNOWN_COLORBAR_RANGES_MM에 등록하세요."
+    )
+
+
 def current_prediction(scan_bgr: np.ndarray, filename: str) -> Prediction:
     if str(DEMO_ROOT) not in sys.path:
         sys.path.insert(0, str(DEMO_ROOT))
     from zero_line_detection.hybrid_ui import detect_hybrid_zero_line
 
-    output = detect_hybrid_zero_line(scan_bgr, filename)
+    output = detect_hybrid_zero_line(
+        scan_bgr, filename, colorbar_range_mm=_colorbar_range_for(filename)
+    )
     lines = list(output.lines or [])
     line_mask = rasterize_lines(scan_bgr.shape[:2], lines, thickness=1)
     if not line_mask.any():
@@ -182,6 +224,41 @@ def evaluate_points(pred: np.ndarray, points: np.ndarray, tolerance_px: float) -
     }
 
 
+def evaluate_area(pred: np.ndarray, gt: np.ndarray) -> dict[str, Any]:
+    """Direct pixel overlap — no distance tolerance, a region either covers or doesn't."""
+    intersection = int(np.logical_and(pred, gt).sum())
+    union = int(np.logical_or(pred, gt).sum())
+    pred_px = int(pred.sum())
+    gt_px = int(gt.sum())
+    precision = intersection / pred_px if pred_px else 0.0
+    recall = intersection / gt_px if gt_px else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return {
+        "iou": intersection / union if union else 0.0,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "prediction_area_pixels": pred_px,
+        "ground_truth_area_pixels": gt_px,
+        "intersection_pixels": intersection,
+        "union_pixels": union,
+    }
+
+
+def area_comparison_image(scan: np.ndarray, pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    canvas = cv2.addWeighted(scan, 0.58, np.full_like(scan, 245), 0.42, 0)
+    matched = pred & gt
+    pred_only = pred & ~gt
+    gt_only = gt & ~pred
+    canvas[pred_only] = (40, 40, 235)   # red: detector-only area
+    canvas[gt_only] = (40, 200, 40)     # green: ground-truth-only area
+    canvas[matched] = (0, 220, 255)     # yellow: overlap
+    cv2.rectangle(canvas, (0, 0), (min(canvas.shape[1], 760), 43), (255, 255, 255), -1)
+    cv2.putText(canvas, "YELLOW overlap   RED detector-only   GREEN ground-truth-only",
+                (12, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (20, 20, 20), 1, cv2.LINE_AA)
+    return canvas
+
+
 def add_units(metrics: dict[str, Any], mm_per_pixel: float | None) -> None:
     if mm_per_pixel is None:
         return
@@ -231,12 +308,21 @@ def build_html(report_path: Path, result: dict[str, Any], image_paths: dict[str,
             ("평균 거리", f"{metrics['mean_symmetric_distance_px']:.2f} px"),
             ("95% 거리", f"{metrics['p95_symmetric_distance_px']:.2f} px"),
         ]
-    else:
+    elif mode == "points":
         cards = [
             ("제로 포인트 적중률", safe_percent(metrics["point_hit_rate"])),
             ("일치 포인트", f"{metrics['matched_point_count']} / {metrics['ground_truth_point_count']}"),
             ("평균 거리", f"{metrics['mean_point_distance_px']:.2f} px"),
             ("95% 거리", f"{metrics['p95_point_distance_px']:.2f} px"),
+        ]
+    else:
+        cards = [
+            ("Area IoU", safe_percent(metrics["iou"])),
+            ("면적 정확도", safe_percent(metrics["precision"])),
+            ("면적 재현율", safe_percent(metrics["recall"])),
+            ("Area F1", safe_percent(metrics["f1"])),
+            ("검출 면적", f"{metrics['prediction_area_pixels']:,} px²"),
+            ("정답 면적", f"{metrics['ground_truth_area_pixels']:,} px²"),
         ]
     if result.get("mm_per_pixel"):
         distance_keys = [key for key in metrics if key.endswith("_distance_mm")]
@@ -250,6 +336,7 @@ def build_html(report_path: Path, result: dict[str, Any], image_paths: dict[str,
         f"<section><h2>{html.escape(label)}</h2><img src='{image_data_uri(path)}' alt='{html.escape(label)}'></section>"
         for label, path in image_paths.items()
     )
+    tolerance_meta = "" if mode == "area" else f" · 허용거리 {result['tolerance_px']:g}px"
     report_path.write_text(f"""<!doctype html>
 <html lang='ko'><head><meta charset='utf-8'><title>제로라인 평가 결과</title>
 <style>
@@ -261,7 +348,7 @@ h1{{margin-bottom:6px}} .meta{{color:#52606d;margin-bottom:20px}}
 img{{max-width:100%;height:auto;border:1px solid #d8dee4}} code{{background:#eaeef2;padding:2px 5px}}
 </style></head><body>
 <h1>제로라인 평가 결과</h1>
-<div class='meta'>{html.escape(result['scan'])} · 정답 방식 <code>{mode}</code> · 허용거리 {result['tolerance_px']:g}px</div>
+<div class='meta'>{html.escape(result['scan'])} · 정답 방식 <code>{mode}</code>{tolerance_meta}</div>
 <div class='cards'>{card_html}</div>
 <section><h2>주의사항</h2><ul>{warning_html or '<li>없음</li>'}</ul></section>
 {images}
@@ -290,8 +377,8 @@ def main() -> int:
     scan = read_image(scan_path)
     lines = list(annotation.get("lines", []))
     kind = str(annotation.get("kind", "line")).lower()
-    if kind not in {"line", "points"}:
-        raise ValueError("정답 kind는 line 또는 points여야 합니다.")
+    if kind not in {"line", "points", "area"}:
+        raise ValueError("정답 kind는 line, points 또는 area여야 합니다.")
     mm_per_pixel = args.mm_per_pixel
     if args.tolerance_mm is not None:
         if not mm_per_pixel or mm_per_pixel <= 0:
@@ -302,19 +389,26 @@ def main() -> int:
     if tolerance_px <= 0:
         raise ValueError("허용거리는 0보다 커야 합니다.")
     prediction = mask_prediction(args.prediction_mask.resolve(), scan) if args.prediction_mask else current_prediction(scan, scan_path.name)
-    gt_mask = rasterize_lines(scan.shape[:2], lines, thickness=1)
+    gt_mask = rasterize_area(scan.shape[:2], lines) if kind == "area" else rasterize_lines(scan.shape[:2], lines, thickness=1)
     if not gt_mask.any():
-        raise ValueError("정답 선/점이 비어 있습니다.")
-    metrics = evaluate_line(prediction.line_mask, gt_mask, tolerance_px) if kind == "line" else evaluate_points(
-        prediction.line_mask, annotation_points(lines), tolerance_px
-    )
+        raise ValueError("정답 선/점/면이 비어 있습니다.")
+    if kind == "line":
+        metrics = evaluate_line(prediction.line_mask, gt_mask, tolerance_px)
+    elif kind == "points":
+        metrics = evaluate_points(prediction.line_mask, annotation_points(lines), tolerance_px)
+    else:
+        metrics = evaluate_area(prediction.area_mask, gt_mask)
     add_units(metrics, mm_per_pixel)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     comparison_path = output / "comparison.png"
     prediction_path = output / "prediction_overlay.png"
     sheet_copy_path = output / "reference_sheet.png"
-    write_image(comparison_path, comparison_image(scan, prediction.line_mask, gt_mask, tolerance_px))
+    comparison = (
+        area_comparison_image(scan, prediction.area_mask, gt_mask) if kind == "area"
+        else comparison_image(scan, prediction.line_mask, gt_mask, tolerance_px)
+    )
+    write_image(comparison_path, comparison)
     write_image(prediction_path, prediction.overlay_bgr)
     write_image(sheet_copy_path, read_image(sheet_path))
     warnings = list(prediction.warnings)
@@ -324,10 +418,12 @@ def main() -> int:
             "정답선은 작업자 확정본이 아니라 초기 시각 판독본입니다. 최종 정확도로 사용하기 전에 주석 도구에서 확인하세요."
         )
     warnings.extend(str(item) for item in annotation.get("notes", []))
-    if mm_per_pixel is None:
+    if mm_per_pixel is None and kind != "area":
         warnings.append("실제 축척이 없어 거리는 px 단위입니다. 서로 다른 해상도끼리 수치를 직접 비교하지 마세요.")
     if kind == "points":
         warnings.append("실제 시트가 점 위치만 제공하므로 Line F1 대신 제로 포인트 적중률을 사용했습니다.")
+    if kind == "area":
+        warnings.append("면적 비교는 허용거리를 쓰지 않고 겹치는 픽셀만 그대로 셉니다(Case 1 면적/윤곽 결과와 비교할 때 사용).")
     result = {
         "scan": str(scan_path),
         "sheet": str(sheet_path),

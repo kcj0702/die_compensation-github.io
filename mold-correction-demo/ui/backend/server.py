@@ -1626,6 +1626,44 @@ def _align_to_product(
     return alignment, overlay, warnings + list(alignment.warnings)
 
 
+def _panel_geometry_distance_maps(
+    part_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """부품 마스크 하나로 (모서리거리맵, 홀거리맵, 정규화 스케일)을 만든다.
+
+    '모서리'=바깥 테두리+선루프 같은 큰 중앙 구멍, '홀'=볼트홀 같은 작은
+    구멍 — 이 구분은 학습에 쓴 zero_line_evaluation/geometry_features.py 의
+    분류 기준(연결영역 면적 0.3%)과 동일하게 맞춘 것으로, 모델 계수가
+    학습 때와 같은 의미의 특징을 입력받도록 하기 위함이다.
+    """
+    mask_u8 = (part_mask > 0).astype(np.uint8) * 255
+    void = 255 - mask_u8
+    h, w = void.shape
+    img_area = float(h * w)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(void, connectivity=8)
+    edge_mask = np.zeros_like(void)
+    hole_mask_arr = np.zeros_like(void)
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        touches_border = x == 0 or y == 0 or x + bw == w or y + bh == h
+        comp = labels == i
+        if touches_border or area > img_area * 0.003:
+            edge_mask[comp] = 255
+        else:
+            hole_mask_arr[comp] = 255
+
+    def _dist(feature_mask: np.ndarray) -> np.ndarray:
+        inv = np.where(feature_mask > 0, 0, 255).astype(np.uint8)
+        return cv2.distanceTransform(inv, cv2.DIST_L2, 5)
+
+    ys, xs = np.where(mask_u8 > 0)
+    if len(ys):
+        scale = float(np.hypot(ys.max() - ys.min(), xs.max() - xs.min())) or 1.0
+    else:
+        scale = float(np.hypot(h, w)) or 1.0
+    return _dist(edge_mask), _dist(hole_mask_arr), scale
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
@@ -1881,6 +1919,31 @@ def analyze_image(
             )
     except Exception as exc:
         errors["deviation"] = str(exc)
+
+    # 모델 기반 추천 보정량(프론트 토글)이 쓸 특징 3종 — 모서리/홀/제로라인
+    # 거리(부품 대각선으로 정규화). 실패해도 편차값 등 기존 결과에는
+    # 영향이 없도록 별도로 감싼다.
+    try:
+        part_mask_for_geo = zero_output.part_mask if zero_output is not None else None
+        zero_mask_for_geo = zero_datum_mask if zero_datum_mask is not None and zero_datum_mask.any() else None
+        if part_mask_for_geo is not None and points:
+            edge_dist_map, hole_dist_map, geo_scale = _panel_geometry_distance_maps(part_mask_for_geo)
+            if zero_mask_for_geo is not None:
+                zero_inv = np.where(zero_mask_for_geo > 0, 0, 255).astype(np.uint8)
+                zero_dist_map = cv2.distanceTransform(zero_inv, cv2.DIST_L2, 5)
+            else:
+                zero_dist_map = None
+            for point in points:
+                px = min(max(int(round(point["xPx"])), 0), width - 1)
+                py = min(max(int(round(point["yPx"])), 0), height - 1)
+                point["edgeDistNorm"] = round(float(edge_dist_map[py, px]) / geo_scale, 4)
+                point["holeDistNorm"] = round(float(hole_dist_map[py, px]) / geo_scale, 4)
+                point["zeroDistNorm"] = (
+                    round(float(zero_dist_map[py, px]) / geo_scale, 4)
+                    if zero_dist_map is not None else None
+                )
+    except Exception as exc:
+        print(f"[geo] 모델 특징 계산 실패: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     # 좌표만 옮긴다. 편차값을 보정치로 바꾸는 계산은 이 단계가 하지 않는다.
     # 검출 결과는 모두 보존하고, 표시 필터가 사용할 주요 포인트 ID만 덧붙인다.
