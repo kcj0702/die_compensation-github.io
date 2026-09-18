@@ -178,26 +178,16 @@ class HybridUiEditPointTests(unittest.TestCase):
             result=SimpleNamespace(regions=[]),
             warnings=[],
         )
-        common = {
-            "image": cv2.cvtColor(image, cv2.COLOR_BGR2RGB),
-            "part": np.ones(image.shape[:2], dtype=bool),
-            "part_px": image.shape[0] * image.shape[1],
-            "positive": np.zeros(image.shape[:2], dtype=bool),
-            "negative": np.zeros(image.shape[:2], dtype=bool),
-            "zero": np.ones(image.shape[:2], dtype=bool),
-            "zero_ratio": 0.2,
-            "zero_count": 2,
-        }
-        from zero_line_detection import generate_final_hybrid_zero_line as hybrid
+        # The colour reading is stubbed: a flat, all-zero deviation over the whole image, so the
+        # rules find no correction region and the run exercises only the wiring.
+        reading = (np.zeros(image.shape[:2], dtype=np.float32),
+                   np.ones(image.shape[:2], dtype=bool),
+                   {"rule": "stub"})
+        from zero_line_detection import final_zero_line
         with mock.patch.object(
             hybrid_ui, "detect_zero_line", side_effect=AssertionError("duplicate detection")
         ), mock.patch.object(
-            hybrid, "build_common_from_color_ramp", return_value=common
-        ), mock.patch.object(
-            hybrid, "run_case1", return_value=(mask.astype(bool), {})
-        ), mock.patch(
-            "zero_line_detection.adaptive_bundle.generate_adaptive_zero_line_preview.build_board",
-            return_value=(image, image),
+            final_zero_line, "build_deviation_from_color_ramp", return_value=reading
         ):
             result = hybrid_ui._detect_hybrid_zero_line_uncached(
                 image,

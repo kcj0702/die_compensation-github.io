@@ -7,6 +7,8 @@ import unittest
 import cv2
 import numpy as np
 
+import json
+
 from zero_line_detection.final_zero_line import (
     FinalZeroLineConfig,
     _candidate_pairs,
@@ -98,6 +100,30 @@ class LineTests(unittest.TestCase):
         xs = sorted([points[0][0], points[-1][0]])
         self.assertLess(xs[0], 100)
         self.assertGreater(xs[1], 150)
+
+    def test_lines_keep_the_shape_the_viewer_and_the_sheet_need(self) -> None:
+        """The 3D overlay and the correction sheet read id + points in scan pixels, nothing else.
+
+        server.analyze_image stores line["points"] as lab_zero_lines, cad_overlay_for unprojects
+        those pixels onto the mesh and page.tsx turns them into sheet percentages; the UI edit index
+        is positional, so ids must be unique and the order stable. The whole list is also written to
+        the .npz cache as JSON, so every value has to survive a JSON round trip.
+        """
+        image, part, values = plate()
+        values[20:70, 100:150] = 2.0
+        values[20:60, 30:60] = -2.5                  # a second region, so the order matters
+        result, _report = self._run(values, part, image, near_outline_ratio=0.05)
+        self.assertGreaterEqual(len(result.lines), 2, result.warnings)
+        restored = json.loads(json.dumps(result.lines))
+        self.assertEqual(restored, result.lines, "lines must survive the cache's JSON round trip")
+        self.assertEqual([line["id"] for line in result.lines], list(range(1, len(result.lines) + 1)))
+        height, width = part.shape
+        for line in result.lines:
+            points = np.asarray(line["points"])
+            self.assertGreaterEqual(len(points), 2)
+            self.assertEqual(points.shape[1], 2)
+            self.assertTrue((points[:, 0] >= 0).all() and (points[:, 0] < width).all())
+            self.assertTrue((points[:, 1] >= 0).all() and (points[:, 1] < height).all())
 
     def test_interior_region_gets_no_line(self) -> None:
         image, part, values = plate()

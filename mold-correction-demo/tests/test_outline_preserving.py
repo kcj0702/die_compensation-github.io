@@ -7,8 +7,10 @@ import unittest
 import cv2
 import numpy as np
 
+from label_removal.cad_outline import silhouette_for_scan, silhouette_from_pixels
 from label_removal.outline_preserving import (
     _bridge_annotations,
+    create_versions_preserving_outline,
     estimate_leader_width,
     leader_corridors,
     mesh_matches_points,
@@ -111,6 +113,91 @@ class CadProductTests(unittest.TestCase):
         self.assertTrue(product[20:100, 20:100].all())
         self.assertFalse(product[:, 104:].any())
         self.assertTrue(restored[40:70, 85:100].all())
+
+
+class VersionContractTests(unittest.TestCase):
+    """create_versions_preserving_outline must stay a drop-in for remove_labels.create_versions."""
+
+    def scan(self):
+        """A scan shaped like the export: red numeric box, exact-blue leader, marker at its end."""
+        image = np.full((240, 320, 3), 255, np.uint8)
+        image[40:200, 40:260] = (70, 190, 70)
+        image[95:125, 240:300] = (0, 0, 245)                   # red label box across the right edge
+        image[103:117, 250:292] = (255, 255, 255)              # its white digits
+        image[109:111, 205:245] = (255, 0, 0)                  # exact-blue leader onto the part
+        cv2.circle(image, (204, 110), 4, (60, 60, 60), -1)     # measurement marker at the leader end
+        return image
+
+    def test_four_versions_white_background_and_marker_difference(self) -> None:
+        image = self.scan()
+        context: dict = {}
+        versions = create_versions_preserving_outline(image, context=context)
+        self.assertEqual(sorted(versions), ["1_labels_white", "2_labels_inpainted",
+                                            "3_labels_points_white", "4_labels_points_inpainted"])
+        for name, version in versions.items():
+            self.assertEqual(version.shape, image.shape, name)
+            self.assertTrue((version[:20, :20] == 255).all(), f"{name}: background must stay pure white")
+            self.assertTrue((version[60:180, 60:200] < 235).any(), f"{name}: the part must survive")
+        self.assertIn("label_boxes", context)
+        # The marker is still there in version 2 and gone from version 4 - the server reads the
+        # deviation-point centres from exactly that difference.
+        marker = (slice(103, 118), slice(197, 212))          # grey dot; the part around it is green
+        self.assertTrue((versions["2_labels_inpainted"][marker].max(axis=2) < 100).any())
+        self.assertFalse((versions["4_labels_points_inpainted"][marker].max(axis=2) < 100).any())
+
+    def test_edge_under_the_label_box_is_kept(self) -> None:
+        image = self.scan()
+        versions = create_versions_preserving_outline(image)
+        for name in ("2_labels_inpainted", "4_labels_points_inpainted"):
+            version = versions[name]
+            self.assertTrue((version[100:120, 245:259].min(axis=2) < 235).all(), f"{name}: edge cut by the box")
+            self.assertTrue((version[100:120, 262:] == 255).all(), f"{name}: box kept outside the part")
+
+
+class CadOutlineTests(unittest.TestCase):
+    def plate(self):
+        vertices = np.array([(0.0, 0.0, 0.0), (120.0, 0.0, 0.0), (120.0, 80.0, 0.0), (0.0, 80.0, 0.0),
+                             (0.0, 0.0, -3.0), (120.0, 0.0, -3.0), (120.0, 80.0, -3.0), (0.0, 80.0, -3.0)])
+        faces = np.array([(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7),
+                          (0, 1, 5), (0, 5, 4), (2, 3, 7), (2, 7, 6)])
+        return vertices, faces
+
+    def test_overlapping_triangles_leave_no_holes(self) -> None:
+        points = np.array([(10, 10), (60, 10), (60, 40), (10, 40)], float)
+        faces = np.array([(0, 1, 2), (0, 2, 3), (0, 1, 2)])   # the repeated face would cancel under even-odd
+        mask = silhouette_from_pixels(points, faces, (60, 80))
+        self.assertTrue(mask[12:39, 12:59].all())
+
+    def test_fit_that_does_not_match_the_scan_is_refused(self) -> None:
+        vertices, faces = self.plate()
+        part = np.zeros((200, 300), bool)
+        part[40:120, 60:180] = True
+        part[40:80, 60:120] = False                 # an L, which no view of the plate can match
+        silhouette, report = silhouette_for_scan(vertices, faces, part, pose_search=False)
+        self.assertIsNone(silhouette)
+        self.assertFalse(report["accepted"])
+        self.assertIn("reason", report)
+
+    def test_a_fit_that_would_cut_the_product_is_refused(self) -> None:
+        vertices, faces = self.plate()
+        part = np.zeros((200, 300), bool)
+        part[40:120, 60:180] = True
+        part[121:141, 100:122] = True               # a real feature the CAD does not have
+        # min_iou is relaxed so that the cut rule alone decides: on average the fit looks fine.
+        silhouette, report = silhouette_for_scan(vertices, faces, part, min_iou=0.5, pose_search=False)
+        self.assertIsNone(silhouette)
+        self.assertGreater(report["cut_px"], 0)
+        self.assertIn("cut", report["reason"])
+
+    def test_matching_scan_is_accepted(self) -> None:
+        vertices, faces = self.plate()
+        part = np.zeros((200, 300), bool)
+        part[40:120, 60:180] = True                 # the plate at 1 mm/px
+        silhouette, report = silhouette_for_scan(vertices, faces, part, pose_search=False)
+        self.assertIsNotNone(silhouette)
+        self.assertTrue(report["accepted"])
+        self.assertGreaterEqual(report["iou"], 0.9)
+        self.assertAlmostEqual(report["mm_per_px"], 1.0, delta=0.1)
 
 
 if __name__ == "__main__":

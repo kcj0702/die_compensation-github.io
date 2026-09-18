@@ -110,22 +110,14 @@ def mesh_silhouette(
     image_shape: tuple[int, int],
 ) -> np.ndarray:
     """Pixels covered by the mesh seen along the registration's view: the exact part shadow."""
+    from label_removal.cad_outline import silhouette_from_pixels
+
     matrix = np.asarray(cad_xy_to_image_uv_matrix, dtype=np.float64)
     plane = list(plane_axes)
     flat = np.asarray(triangles_xyz, dtype=np.float64)[:, :, plane].reshape(-1, 2)
-    uv = (flat @ matrix[:, :2].T + matrix[:, 2]).reshape(-1, 3, 2)
-    height, width = image_shape[:2]
-    keep = ((uv[:, :, 0].max(axis=1) >= 0) & (uv[:, :, 0].min(axis=1) < width)
-            & (uv[:, :, 1].max(axis=1) >= 0) & (uv[:, :, 1].min(axis=1) < height))
-    shift = 4                                                  # sub-pixel vertex positions
-    polygons = np.round(uv[keep] * (1 << shift)).astype(np.int32)
-    mask = np.zeros((height, width), dtype=np.uint8)
-    # One triangle at a time. Passing many polygons to a single fillPoly call fills them with the
-    # even-odd rule, so where the top skin, bottom skin and walls overlap the triangles cancel and
-    # the silhouette is riddled with triangular holes.
-    for polygon in polygons:
-        cv2.fillConvexPoly(mask, polygon, 1, lineType=cv2.LINE_8, shift=shift)
-    return mask.astype(bool)
+    uv = flat @ matrix[:, :2].T + matrix[:, 2]
+    faces = np.arange(len(uv), dtype=np.int64).reshape(-1, 3)
+    return silhouette_from_pixels(uv, faces, image_shape[:2])
 
 
 def mesh_matches_points(triangles_xyz: np.ndarray, reference_points_xyz: np.ndarray, tolerance_mm: float = 5.0) -> dict:
@@ -237,13 +229,19 @@ def leader_corridors(strokes: np.ndarray, off_part: np.ndarray, stroke_width_px:
 
 
 def detect_annotations(
-    image: np.ndarray, off_part: np.ndarray | None = None, stroke_width_px: float | None = None
+    image: np.ndarray,
+    off_part: np.ndarray | None = None,
+    stroke_width_px: float | None = None,
+    *,
+    context: dict | None = None,
 ) -> tuple[np.ndarray, dict, dict]:
     """(annotation mask, report, layers): label boxes, leader lines and measurement markers.
 
     off_part: pixels surely outside the part. Blurred blue strokes there are leaders; on the part
     only their straight continuations are (leader_corridors) - a blue deviation rim is thin and blue
-    too. layers holds "boxes" (wide) and "thin" (leaders and markers) separately.
+    too. layers holds "boxes" (wide), "thin" (leaders and markers) and "points" (markers only)
+    separately - remove_labels keeps the markers in versions 1 and 2 and drops them in 3 and 4.
+    context: filled with "label_boxes" and "deviation_candidates" like remove_labels.create_versions.
     """
     height, width = image.shape[:2]
     scan_mask = base.build_scan_mask(image)
@@ -254,10 +252,20 @@ def detect_annotations(
         stroke = estimate_leader_width(image) if stroke_width_px is None else stroke_width_px
         off_part = off_part.astype(bool)
         soft_lines &= off_part | leader_corridors(soft_lines, off_part, stroke, reach_px=3 * stroke + 6)
+    candidates = None
     try:
-        points = base.build_measurement_point_mask(image, scan_mask, boxes) > 0
+        try:
+            from label_detector import detect_labels
+        except ImportError:
+            from deviation_extraction.label_detector import detect_labels
+        candidates = detect_labels(image)
+        points = base.build_measurement_point_mask(image, scan_mask, boxes, candidates) > 0
     except Exception:  # the optional label detector is unavailable or failed on this export
         points = np.zeros((height, width), dtype=bool)
+    if context is not None:
+        context["label_boxes"] = boxes
+        if candidates is not None:
+            context["deviation_candidates"] = candidates
     box_mask = np.zeros((height, width), dtype=bool)
     for x0, y0, x1, y1 in boxes:
         box_mask[y0:y1, x0:x1] = True
@@ -265,7 +273,7 @@ def detect_annotations(
     annotation = box_mask | thin
     report = {"label_boxes": len(boxes), "exact_leader_px": int((exact_lines > 0).sum()),
               "blurred_leader_px": int(soft_lines.sum()), "marker_px": int(points.sum())}
-    return annotation, report, {"boxes": box_mask, "thin": thin}
+    return annotation, report, {"boxes": box_mask, "thin": thin, "points": points & ~box_mask}
 
 
 # ---------------------------------------------------------------- product mask
@@ -456,6 +464,38 @@ def product_mask_with_cad(
 
 
 # ---------------------------------------------------------------- whole image
+def analyse_scan(
+    image: np.ndarray,
+    *,
+    cad_silhouette: np.ndarray | None = None,
+    tolerance_px: int = 3,
+    context: dict | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict, dict]:
+    """(product, annotation, restored, layers, report) for this scan."""
+    stroke = estimate_leader_width(image)
+    scan, core = scan_mask_and_core(image, stroke)
+    if cad_silhouette is not None:
+        off_part = ~cv2.dilate(cad_silhouette.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        annotation, report, layers = detect_annotations(image, off_part, stroke, context=context)
+        image_product, _ = product_mask_from_image(image, layers, scan, core)
+        product, restored = product_mask_with_cad(image, annotation, cad_silhouette,
+                                                  image_product=image_product, tolerance_px=tolerance_px)
+        report["mode"] = "cad_silhouette"
+    else:
+        annotation, report, layers = detect_annotations(image, ~scan, stroke, context=context)
+        product, restored = product_mask_from_image(image, layers, scan, core)
+        report["mode"] = "image_only"
+    report["leader_width_px"] = round(stroke, 2)
+    report["product_px"] = int(product.sum())
+    report["restored_px"] = int(restored.sum())
+    return product, annotation, restored, layers, report
+
+
+def _rim(mask: np.ndarray) -> np.ndarray:
+    """The anti-aliased fringe around an annotation, which must not be an inpainting colour source."""
+    return cv2.dilate(mask.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))).astype(bool)
+
+
 def remove_labels_preserving_outline(
     image: np.ndarray,
     *,
@@ -463,31 +503,57 @@ def remove_labels_preserving_outline(
     tolerance_px: int = 3,
 ) -> CleaningResult:
     """Cleaned image (labels, leaders and markers removed, outline kept)."""
-    stroke = estimate_leader_width(image)
-    scan, core = scan_mask_and_core(image, stroke)
-    if cad_silhouette is not None:
-        off_part = ~cv2.dilate(cad_silhouette.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
-        annotation, report, layers = detect_annotations(image, off_part, stroke)
-        image_product, _ = product_mask_from_image(image, layers, scan, core)
-        product, restored = product_mask_with_cad(image, annotation, cad_silhouette,
-                                                  image_product=image_product, tolerance_px=tolerance_px)
-        report["mode"] = "cad_silhouette"
-    else:
-        annotation, report, layers = detect_annotations(image, ~scan, stroke)
-        product, restored = product_mask_from_image(image, layers, scan, core)
-        report["mode"] = "image_only"
-    report["leader_width_px"] = round(stroke, 2)
-    # The anti-aliased rim of a marker or leader must not be the colour source, or the marker comes back.
-    rim = cv2.dilate(annotation.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))).astype(bool)
-    inpaint = (rim | restored) & product
+    product, annotation, restored, _, report = analyse_scan(
+        image, cad_silhouette=cad_silhouette, tolerance_px=tolerance_px)
+    inpaint = (_rim(annotation) | restored) & product
     cleaned = base.render_inpaint_version(image, product.astype(np.uint8) * 255, inpaint.astype(np.uint8) * 255)
-    report.update(product_px=int(product.sum()), restored_px=int(restored.sum()), inpainted_px=int(inpaint.sum()))
+    report["inpainted_px"] = int(inpaint.sum())
     return CleaningResult(cleaned, product, annotation, restored, report)
+
+
+def create_versions_preserving_outline(
+    image: np.ndarray,
+    *,
+    cad_silhouette: np.ndarray | None = None,
+    tolerance_px: int = 3,
+    context: dict | None = None,
+    report: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """remove_labels.create_versions with the product outline kept: same four keys, same meaning.
+
+    Versions 1 and 2 remove the labels and leaders but keep the measurement markers, versions 3 and
+    4 remove the markers too - the pixel difference between 2 and 4 is where the markers were, which
+    the caller reads deviation-point centres from. Outside the product every version is pure white,
+    which is what the zero-line part detection looks for.
+    """
+    product, annotation, restored, layers, made = analyse_scan(
+        image, cad_silhouette=cad_silhouette, tolerance_px=tolerance_px, context=context)
+    if report is not None:
+        report.update(made)
+    scan_mask = product.astype(np.uint8) * 255
+    points = layers["points"] & product
+    labels_only = annotation & ~layers["points"]
+    labels_white_mask = ((_rim(labels_only) & ~points) | restored) & product
+    labels_and_points_mask = (_rim(annotation) | restored) & product
+
+    labels_white = base.render_white_version(image, scan_mask, labels_white_mask.astype(np.uint8) * 255)
+    labels_inpainted = base.render_inpaint_version(image, scan_mask, labels_white_mask.astype(np.uint8) * 255)
+    labels_points_white = labels_white.copy()
+    labels_points_white[points] = 255
+    labels_points_inpainted = base.render_inpaint_version(image, scan_mask, labels_and_points_mask.astype(np.uint8) * 255)
+    return {
+        "1_labels_white": labels_white,
+        "2_labels_inpainted": labels_inpainted,
+        "3_labels_points_white": labels_points_white,
+        "4_labels_points_inpainted": labels_points_inpainted,
+    }
 
 
 __all__ = [
     "CleaningResult",
+    "analyse_scan",
     "blurred_leader_lines",
+    "create_versions_preserving_outline",
     "detect_annotations",
     "estimate_leader_width",
     "leader_corridors",

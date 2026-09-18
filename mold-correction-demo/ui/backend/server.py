@@ -77,6 +77,7 @@ from label_removal.remove_labels import (  # noqa: E402
     detect_exact_hsv_leader_lines,
     detect_label_boxes,
 )
+from label_removal.outline_preserving import create_versions_preserving_outline  # noqa: E402
 from product_alignment.alignment import (  # noqa: E402
     Alignment,
     estimate_alignment,
@@ -1664,6 +1665,32 @@ def _panel_geometry_distance_maps(
     return _dist(edge_mask), _dist(hole_mask_arr), scale
 
 
+def _label_removal_cad_silhouette(
+    part_number: str, product_mask: np.ndarray
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """이 품번의 CAD 가 스캔 위에 드리우는 제품 그림자. 라벨 제거에만 쓴다.
+
+    CAD 를 찾지 못하거나 정합이 스캔과 충분히 맞지 않으면 None 을 돌려주고,
+    호출부는 이미지만 보고 만든 결과를 그대로 쓴다. 정렬·오버레이 쪽 코드는
+    읽기만 하고 바꾸지 않는다.
+    """
+    from label_removal.cad_outline import silhouette_for_scan_from_file
+
+    if not part_number:
+        return None, {"accepted": False, "reason": "파일 이름에서 품번을 찾지 못했습니다."}
+    match = MESH_LIBRARY.find(part_number)
+    cad_path = match.path if match is not None else _find_cad_source_for_part(part_number)
+    if cad_path is None:
+        return None, {"accepted": False, "reason": f"{part_number} 에 맞는 CAD 파일이 없습니다."}
+    try:
+        silhouette, report = silhouette_for_scan_from_file(
+            cad_path, product_mask, cache_dir=_cad_cache_dir()
+        )
+    except Exception as exc:  # CAD 문제로 라벨 제거 전체가 실패하면 안 된다
+        return None, {"accepted": False, "reason": f"{type(exc).__name__}: {exc}"}
+    return silhouette, report
+
+
 def analyze_image(
     image: np.ndarray,
     filename: str,
@@ -1714,7 +1741,12 @@ def analyze_image(
     points_removed_image: np.ndarray | None = None
     label_count = 0
     image_analysis_context: dict[str, Any] = {}
+    label_report: dict[str, Any] = {}
+    zero_mm_per_px: float | None = None
     try:
+        # 라벨·지시선·측정점을 지우되 제품 외곽은 남긴다(label_removal.outline_preserving).
+        # 예전 방식은 외곽에 걸친 라벨 자리에서 외곽선을 같이 잘라 내(7개 스캔 합계
+        # 1,013 px) 제로라인의 외곽 제로점이 그 자리에서 끊겼다.
         label_versions = create_versions(image, context=image_analysis_context)
         if "label_boxes" in image_analysis_context:
             label_count = len(image_analysis_context["label_boxes"])
@@ -1724,6 +1756,35 @@ def analyze_image(
         points_removed_image = label_versions["4_labels_points_inpainted"]
     except Exception as exc:  # engine errors must be shown per engine
         errors["label"] = str(exc)
+
+    # CAD 가 있으면 제품 모양을 이미지에서 추측하지 않고 CAD 그림자로 정한다. 정합이
+    # 스캔과 충분히 맞고 실제로 제품을 잘라 내지 않을 때만 쓴다 — 어긋난 실루엣으로
+    # 자르면 이 작업이 막으려는 외곽 소실을 오히려 만든다. CAD 쪽에서 무슨 일이
+    # 생기든 위에서 만든 이미지-only 결과는 그대로 남는다.
+    if points_removed_image is not None:
+        try:
+            cad_silhouette, cad_report = _label_removal_cad_silhouette(
+                part_number, points_removed_image.min(axis=2) < 235
+            )
+            label_report["cad_outline"] = cad_report
+            if cad_silhouette is not None:
+                label_versions = create_versions_preserving_outline(
+                    image,
+                    cad_silhouette=cad_silhouette,
+                    context=image_analysis_context,
+                    report=label_report,
+                )
+                clean_image = label_versions["2_labels_inpainted"]
+                points_removed_image = label_versions["4_labels_points_inpainted"]
+                # 물리 배율을 알면 제로라인의 "외곽에서 20 mm 안" 규칙을 해상도와 무관하게 쓴다.
+                zero_mm_per_px = cad_report.get("mm_per_px")
+            print(f"[label] outline-preserving cad={cad_report.get('accepted')} "
+                  f"iou={cad_report.get('iou')} cut={cad_report.get('cut_px')} "
+                  f"mm_per_px={zero_mm_per_px} reason={cad_report.get('reason')}",
+                  file=sys.stderr, flush=True)
+        except Exception as exc:  # CAD 문제로 라벨 제거 결과를 잃지 않는다
+            print(f"[label] CAD outline step skipped: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
 
     zero_output = None
     zero_overlay: np.ndarray | None = None
@@ -1802,6 +1863,8 @@ def analyze_image(
                 else clean_image
             ),
             colorbar_range_mm=registered_range,
+            # 물리 배율을 알면 "외곽에서 20 mm 안" 규칙을 스캔 해상도와 무관하게 적용한다.
+            mm_per_px=zero_mm_per_px,
         )
         zero_datum_mask = hybrid_zero.mask
         zero_overlay = hybrid_zero.overlay_rgb

@@ -8,6 +8,7 @@ background. Input files are never modified.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
@@ -704,7 +705,32 @@ def create_versions(
     *,
     context: dict | None = None,
 ) -> dict[str, np.ndarray]:
-    """Create the four requested label-removal versions."""
+    """Create the four requested label-removal versions, keeping the product outline.
+
+    The four keys and their meaning are unchanged. What changed is how the product is found: a
+    label box overlapping the edge used to be cut out together with the edge behind it, so the
+    scan lost part of its outline (7 scans: 1,013 px) and the zero-line step lost the outer zero
+    points there. ``outline_preserving`` continues the edge through the box instead.
+    If that step fails for an export it has never seen, the earlier behaviour still runs.
+    """
+    try:
+        from label_removal.outline_preserving import create_versions_preserving_outline
+    except ImportError:  # standalone execution from inside label_removal/
+        from outline_preserving import create_versions_preserving_outline
+    try:
+        return create_versions_preserving_outline(image, context=context)
+    except Exception as exc:
+        print(f"[label] outline-preserving removal failed ({type(exc).__name__}: {exc}); "
+              f"falling back to the previous rule", file=sys.stderr, flush=True)
+        return create_versions_legacy(image, context=context)
+
+
+def create_versions_legacy(
+    image: np.ndarray,
+    *,
+    context: dict | None = None,
+) -> dict[str, np.ndarray]:
+    """The label removal used before outline preservation. Kept as the fallback and for comparison."""
     scan_mask = build_scan_mask(image)
     label_boxes = detect_label_boxes(image)
     labels_white_mask = build_labels_white_mask(image, scan_mask, label_boxes)

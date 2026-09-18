@@ -24,7 +24,7 @@ from zero_line_detection.zero_line import ZeroLineConfig, detect_zero_line
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 
-_CACHE_SCHEMA = "contour-route-zero-v2-cad-feature-snap"
+_CACHE_SCHEMA = "final-zero-line-v1-sigma-outline-rules"
 _CACHE_LIMIT = 32
 
 
@@ -39,6 +39,7 @@ def _engine_fingerprint() -> str:
         PACKAGE_DIR / "case2_route_adapter.py",
         PACKAGE_DIR / "case2_route_selector.py",
         PACKAGE_DIR / "contour_route_zero.py",
+        PACKAGE_DIR / "final_zero_line.py",
         PACKAGE_DIR / "cad_feature_snap.py",
         PACKAGE_DIR / "adaptive_bundle" / "generate_adaptive_zero_line_preview.py",
     ]
@@ -97,6 +98,7 @@ def _cache_key(
     filename: str,
     base: Any = None,
     colorbar_range_mm: tuple[float, float] | None = None,
+    mm_per_px: float | None = None,
 ) -> str:
     digest = hashlib.sha256()
     digest.update(_ENGINE_FINGERPRINT.encode("ascii"))
@@ -104,6 +106,8 @@ def _cache_key(
     _digest_array(digest, image_bgr)
     _digest_base(digest, base)
     digest.update(json.dumps(colorbar_range_mm).encode("ascii"))
+    # The physical scale decides how far from the outline a correction region still gets a line.
+    digest.update(json.dumps(None if mm_per_px is None else round(float(mm_per_px), 4)).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -112,8 +116,9 @@ def _cache_path(
     filename: str,
     base: Any = None,
     colorbar_range_mm: tuple[float, float] | None = None,
+    mm_per_px: float | None = None,
 ) -> Path:
-    return _cache_dir() / f"{_cache_key(image_bgr, filename, base, colorbar_range_mm)}.npz"
+    return _cache_dir() / f"{_cache_key(image_bgr, filename, base, colorbar_range_mm, mm_per_px)}.npz"
 
 
 def _load_cached(path: Path, shape: tuple[int, int]) -> "HybridZeroLineOutput | None":
@@ -253,8 +258,9 @@ def _detect_hybrid_zero_line_uncached(
     base=None,
     decision_bgr: np.ndarray | None = None,
     colorbar_range_mm: tuple[float, float] | None = None,
+    mm_per_px: float | None = None,
 ) -> HybridZeroLineOutput:
-    """Detect UI-ready lines from outer zero points and HSV correction areas."""
+    """Detect UI-ready lines from outer zero points and the sigma correction regions."""
     rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     decision_rgb = cv2.cvtColor(
         image_bgr if decision_bgr is None else decision_bgr, cv2.COLOR_BGR2RGB
@@ -268,36 +274,45 @@ def _detect_hybrid_zero_line_uncached(
         )
     try:
         from zero_line_detection.cad_feature_snap import discover_local_ai_features
-        from zero_line_detection.contour_route_zero import construct_zero_lines
+        from zero_line_detection.final_zero_line import (
+            build_deviation_from_color_ramp,
+            construct_final_zero_lines,
+        )
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
 
         # Use the colour ramp detected from this exact upload, but map it with
-        # the same hue interpolation and correction preparation as the
-        # reviewed experiment. ``Colorbar.colors_rgb`` is stored vmin->vmax;
-        # the reviewed mapper accepts vmax->vmin (top->bottom), hence reverse.
-        # This needs neither a product-specific range nor a saved legend.
-        common = hybrid.build_common_from_color_ramp(
-            decision_rgb, base.colorbar.colors_rgb[::-1], vmin, vmax
+        # the same hue interpolation as the reviewed experiment.
+        # ``Colorbar.colors_rgb`` is stored vmin->vmax; the mapper accepts
+        # vmax->vmin (top->bottom), hence reverse. Unlike the earlier reader,
+        # this one fills the grey CAD drawing lines from the nearest readable
+        # colour first, so doubled lines on hole rims and fillets no longer
+        # read as the red end of the bar.
+        values, part, reading = build_deviation_from_color_ramp(
+            decision_rgb, np.asarray(base.colorbar.colors_rgb[::-1], dtype=np.uint8), vmin, vmax
         )
         cad_features = discover_local_ai_features(filename, PACKAGE_DIR.parents[2])
-        result = construct_zero_lines(
+        result, report = construct_final_zero_lines(
             decision_rgb,
-            common.get("values", base.values),
-            common["part"],
+            values,
+            part,
             cad_feature_lines=cad_features,
+            mm_per_px=mm_per_px,
+            colorbar_range=(vmin, vmax),
         )
-        correction_regions = cv2.connectedComponents(
-            result.correction_mask.astype(np.uint8)
-        )[0] - 1
+        kinds = [row["kind"] for row in report["regions"]]
         print(
-            f"[zero] contour-route zero_points={len(result.zero_points)} "
-            f"correction_regions={correction_regions} lines={len(result.lines)} "
-            f"proximity={result.proximity_px}px cad_features={len(cad_features)} "
-            f"cad_snaps={len(result.snap_records)}",
+            f"[zero] final-rules sigma={report['sigma_mm']:.2f}mm "
+            f"zero_points={len(result.zero_points)} regions={len(kinds)} "
+            f"(outline {kinds.count('touching_outline')}, near {kinds.count('near_outline')}, "
+            f"interior {kinds.count('interior_no_line')}, unresolved {kinds.count('unresolved')}) "
+            f"noise_removed={report['noise_regions_removed']} lines={len(result.lines)} "
+            f"near_outline={report['near_outline_px']}px mm_per_px={mm_per_px} "
+            f"cad_features={len(cad_features)} cad_snaps={len(result.snap_records)} "
+            f"grey_filled={reading.get('filled_px')}",
             flush=True,
         )
         overlay = hybrid.draw_final_selected_overlay(decision_rgb, result.mask)
-        ratio = float(result.mask.sum()) / max(1, int(common["part"].sum()))
+        ratio = float(result.mask.sum()) / max(1, int(part.sum()))
         return HybridZeroLineOutput(
             mask=result.mask,
             overlay_rgb=overlay,
@@ -319,12 +334,13 @@ def detect_hybrid_zero_line(
     base=None,
     decision_bgr: np.ndarray | None = None,
     colorbar_range_mm: tuple[float, float] | None = None,
+    mm_per_px: float | None = None,
 ) -> HybridZeroLineOutput:
     """Return a content-cached result and optionally reuse basic detection."""
     cache_image = image_bgr if decision_bgr is None else np.concatenate(
         (image_bgr.reshape(-1, 3), decision_bgr.reshape(-1, 3)), axis=0
     )
-    path = _cache_path(cache_image, filename, base, colorbar_range_mm)
+    path = _cache_path(cache_image, filename, base, colorbar_range_mm, mm_per_px)
     cached = _load_cached(path, image_bgr.shape[:2]) if path.is_file() else None
     if cached is not None:
         return cached
@@ -335,6 +351,7 @@ def detect_hybrid_zero_line(
         base=base,
         decision_bgr=decision_bgr,
         colorbar_range_mm=colorbar_range_mm,
+        mm_per_px=mm_per_px,
     )
     _save_cached(path, output)
     return output
