@@ -284,6 +284,35 @@ def build_sigma_correction_mask(
     }
 
 
+def _merge_identical_lines(lines: list[dict], region_rows: list[dict]) -> tuple[list[dict], int]:
+    """Keep one line per distinct path and renumber. Returns (lines, how many were dropped).
+
+    Correction regions get a line each, but neighbouring regions on a stretch of outline with only
+    one pair of zero points reach for the same two points, and the detour avoids every correction
+    region, so their routes come out identical - scan 1 drew the same 9-point path three times
+    (M10, M11, M14). The viewer and the sheet would then show three lines where there is one.
+    The region rows keep pointing at the surviving line, so nothing loses track of its region.
+    """
+    kept: dict[tuple, dict] = {}
+    renumbered: dict[int, int] = {}
+    for line in lines:
+        key = tuple(map(tuple, line["points"]))
+        first = kept.get(key)
+        old_id = int(line["id"])
+        if first is None:
+            kept[key] = line
+            line["id"] = len(kept)
+            renumbered[old_id] = line["id"]
+        else:
+            renumbered[old_id] = int(first["id"])
+    merged = len(lines) - len(kept)
+    survivors = list(kept.values())
+    for row in region_rows:
+        if "line_id" in row:
+            row["line_id"] = renumbered.get(int(row["line_id"]), row["line_id"])
+    return survivors, merged
+
+
 def construct_final_zero_lines(
     image_rgb: np.ndarray,
     values_mm: np.ndarray,
@@ -403,10 +432,14 @@ def construct_final_zero_lines(
             row["skip_reason"] = failures[0] if failures else "first pair not connected"
         region_rows.append(row)
 
+    lines, merged = _merge_identical_lines(lines, region_rows)
+
     snap_records: list[dict] = []
     if cad_feature_lines and config.snap_to_cad:
         from zero_line_detection.cad_feature_snap import snap_boundary_lines_to_cad
         lines, snap_records = snap_boundary_lines_to_cad(lines, cad_feature_lines, part.shape, obstacle_mask=strict)
+        lines, after_snap = _merge_identical_lines(lines, region_rows)   # snapping can make two lines meet
+        merged += after_snap
 
     result = ContourRouteResult(
         correction_mask=correction,
@@ -427,6 +460,7 @@ def construct_final_zero_lines(
         "mm_per_px": mm_per_px,
         **mask_report,
         "gap_filled_px": int(bridges.sum()),
+        "duplicate_lines_merged": merged,
         "regions": region_rows,
     }
     return result, report

@@ -125,6 +125,25 @@ class LineTests(unittest.TestCase):
             self.assertTrue((points[:, 0] >= 0).all() and (points[:, 0] < width).all())
             self.assertTrue((points[:, 1] >= 0).all() and (points[:, 1] < height).all())
 
+    def test_regions_sharing_a_route_produce_one_line(self) -> None:
+        """Two regions between the same pair of zero points route the same way - draw it once."""
+        image, part, values = plate()
+        values[part] = 1.0                           # the whole edge is off zero ...
+        values[20:26, 55:65] = 0.0                   # ... except these two spots, the only zero points
+        values[20:26, 195:205] = 0.0
+        values[20:50, 90:120] = 2.5                  # two regions between them, no zero point in between
+        values[20:50, 140:170] = 2.5
+        result, report = self._run(values, part, image, near_outline_ratio=0.05)
+        paths = [tuple(map(tuple, line["points"])) for line in result.lines]
+        self.assertEqual(len(paths), len(set(paths)), "identical routes must be merged")
+        self.assertEqual([line["id"] for line in result.lines], list(range(1, len(result.lines) + 1)))
+        self.assertGreaterEqual(report["duplicate_lines_merged"], 1)
+        # Every region that got a line still points at a line that exists.
+        line_ids = {line["id"] for line in result.lines}
+        for row in report["regions"]:
+            if "line_id" in row:
+                self.assertIn(row["line_id"], line_ids)
+
     def test_interior_region_gets_no_line(self) -> None:
         image, part, values = plate()
         values[70:100, 110:150] = 2.0                # 50 px from every edge
