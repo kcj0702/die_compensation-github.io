@@ -730,6 +730,16 @@ button { cursor: pointer; }
 .annotation-toolbar button.annotation-toolbar__key-points.active { color:#116d5e; border-color:#9ccfc5; background:#f2fbf8; box-shadow:0 2px 5px rgba(17,109,94,.1); }
 .annotation-toolbar button.annotation-toolbar__key-points.active i { background:#168a74; }
 .annotation-toolbar button.annotation-toolbar__key-points.active i:after { transform:translateX(10px); }
+
+/* 보정시트 "추천 보정량" 토글 — 주요포인트만 표시 스위치와 같은 알약형 스위치 모양. */
+.model-recommend-toggle { width:auto; height:38px; padding:0 13px; display:flex; align-items:center; justify-content:center; gap:7px; border:1px solid #d7dde4; border-radius:7px; color:#718095; background:#fff; font-size:11px; font-weight:750; white-space:nowrap; cursor:pointer; transition:color .15s ease,border-color .15s ease,background .15s ease; }
+.model-recommend-toggle i { position:relative; width:24px; height:14px; border-radius:999px; background:#cbd3dc; transition:background .15s ease; flex:0 0 auto; }
+.model-recommend-toggle i:after { content:""; position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(20,37,61,.25); transition:transform .15s ease; }
+.model-recommend-toggle:hover:not(:disabled) { border-color:#c7cdd4; background:#fafbfc; }
+.model-recommend-toggle.active { color:#b8620f; border-color:#f0cfa4; background:#fff6e9; box-shadow:0 2px 5px rgba(184,98,15,.1); }
+.model-recommend-toggle.active i { background:#e8802f; }
+.model-recommend-toggle.active i:after { transform:translateX(10px); }
+.model-recommend-toggle:disabled { opacity:.4; cursor:not-allowed; }
 .sheet-image-toolbar { display:flex; align-items:center; gap:5px; padding:6px 10px; border-bottom:1px solid var(--line); background:#f7f9fb; }
 .sheet-image-toolbar b { margin-right:4px; color:#536275; font-size:8px; }
 .sheet-image-toolbar button { height:27px; padding:0 9px; border:1px solid #d8dee5; border-radius:6px; color:#667487; background:#fff; font-size:8px; font-weight:700; cursor:pointer; }
@@ -2167,3 +2177,11 @@ button { cursor: pointer; }
 .coefficient-card .card-title>.coefficient-value--editing{display:inline-flex;align-items:center;gap:2px;cursor:default}
 .coefficient-value--editing input{width:84px;height:34px;padding:0 6px;border:1px solid #e8c46d;border-radius:6px;color:#3d4c60;background:#fffbf1;font:inherit;font-size:20px;font-weight:800;text-align:right}
 .coefficient-range-labels{justify-content:space-between}
+.image-layout{position:absolute;inset:0;overflow:hidden;background:#fff}
+.image-layout img{width:100%;height:100%;object-fit:fill;display:block;pointer-events:none}
+.image-layout img{position:absolute;left:0;top:0;max-width:none}
+.crop-selector{position:absolute;inset:0;z-index:20;cursor:crosshair;background:rgba(20,30,40,.18);touch-action:none}
+.crop-selector__box{position:absolute;border:1.5px dashed #ffb51b;background:rgba(255,181,27,.18);pointer-events:none}
+.crop-selector__hint{position:absolute;left:50%;bottom:6px;transform:translateX(-50%);padding:3px 8px;border-radius:4px;color:#fff;background:rgba(35,43,54,.86);font-size:8.5px;font-weight:650;white-space:nowrap;pointer-events:none}
+.layout-size-control button{height:24px;padding:0 8px;border:1px solid #c8d2dc;border-radius:5px;background:#fff;color:#3d4e5f;font-size:9.5px;font-weight:700;cursor:pointer}
+.layout-size-control button.active{border-color:#ffb51b;background:#fff8e6;color:#8a5a00}
