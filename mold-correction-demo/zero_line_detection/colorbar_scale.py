@@ -52,15 +52,53 @@ def read_colorbar_range_mm(
     ]
     values = reader.read_values(crops, batch_size=2)
     focused = getattr(reader, "read_value_focused", None)
+
+    def implausible(index: int, value: Any) -> bool:
+        """The minimum end must be negative and the maximum end positive."""
+        if value is None:
+            return True
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return True
+        return (index == 0 and number >= 0.0) or (index == 1 and number <= 0.0)
+
     if callable(focused):
         values = [
-            focused(crop)
-            if value is None
-            or (index == 0 and float(value) >= 0.0)
-            or (index == 1 and float(value) <= 0.0)
-            else value
+            focused(crop) if implausible(index, value) else value
             for index, (crop, value) in enumerate(zip(crops, values))
         ]
+    # Two things make an endpoint unreadable at first: the export can be saved upside down (scan,
+    # colour bar and numbers together), and a small export prints the number only a few pixels tall
+    # (a 578 x 338 export gives 6 px digits). Both are recoverable, so an endpoint that still makes
+    # no sense is read again from the crop turned round, enlarged, and both at once - the same
+    # picture, never a guessed number.
+    if len(values) == 2 and any(implausible(index, value) for index, value in enumerate(values)):
+        values = list(values)
+        readers = [lambda picture: reader.read_values([picture], batch_size=1)[0]]
+        if callable(focused):
+            readers.append(focused)
+        for index, value in enumerate(values):
+            if not implausible(index, value):
+                continue
+            crop = crops[index]
+            enlarged = crop.resize((crop.width * 4, crop.height * 4), Image.LANCZOS)
+            seen: list[float] = []
+            for variant in (crop.rotate(180), enlarged, enlarged.rotate(180)):
+                for read in readers:
+                    try:
+                        again = read(variant)
+                    except Exception:               # a reader that cannot take one crop at a time
+                        continue
+                    if not implausible(index, again):
+                        seen.append(round(float(again), 4))
+            # Two looks must agree. A number that is genuinely there only turned or too small reads
+            # the same every time; one that is clipped by the image edge reads differently each
+            # time, and a wrong range would silently rescale every deviation value.
+            for candidate in seen:
+                if seen.count(candidate) >= 2:
+                    values[index] = candidate
+                    break
     if len(values) != 2 or values[0] is None or values[1] is None:
         raise RuntimeError(
             "편차 컬러바의 최소·최대 숫자를 읽지 못했습니다. "

@@ -243,6 +243,8 @@ def detect_colorbar(
     n_samples: int = 256,
     vmin: float | None = None,
     vmax: float | None = None,
+    max_row_std: float = 18.0,
+    max_row_spread: float = 6.0,
 ) -> Colorbar:
     """이미지 좌우 여백에서 컬러바를 찾는다.
 
@@ -294,11 +296,18 @@ def detect_colorbar(
             continue
         y0, y1 = int(ys.min()), int(ys.max())
 
-        band = strip[y0:y1 + 1]
-        # 3) 행 내부 색 균일도 — 표준편차가 작아야 컬러바
-        row_std = band.reshape(band.shape[0], -1, 3).std(axis=1).mean()
-        if row_std > 18:
-            continue
+        band = strip[y0:y1 + 1].astype(np.float32)
+        # 3) 행 내부 색 균일도 — 표준편차가 작아야 컬러바.
+        #    좁은 컬러바에는 눈금선과 숫자가 띠 위에 겹쳐 그려진다. 글자 픽셀은 몇 개
+        #    안 되지만 색이 멀어서 평균 표준편차를 크게 올린다(실측: 578 px 내보내기의
+        #    6 px 컬러바 23.6, 2141 px 내보내기의 20 px 컬러바 23.7 — 둘 다 진짜
+        #    컬러바인데 걸러졌다). 그래서 표준편차가 크면, 행 중앙색에서 떨어진 정도의
+        #    중앙값으로 한 번 더 본다. 소수의 글자 픽셀에는 흔들리지 않는 값이라
+        #    진짜 컬러바는 1.0~2.8, 부품 가장자리는 4.4 이상으로 갈린다.
+        if band.std(axis=1).mean() > max_row_std:
+            spread = float(np.median(np.abs(band - np.median(band, axis=1, keepdims=True)), axis=1).mean())
+            if spread > max_row_spread:
+                continue
 
         row_color = np.median(band, axis=1).astype(np.uint8)   # (L,3)
         hue = _unwrapped_hue(row_color)
