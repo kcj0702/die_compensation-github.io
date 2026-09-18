@@ -1758,7 +1758,11 @@ def analyze_image(
             image,
             filename,
             base=zero_output,
-            decision_bgr=clean_image,
+            decision_bgr=(
+                points_removed_image
+                if points_removed_image is not None
+                else clean_image
+            ),
             colorbar_range_mm=registered_range,
         )
         zero_datum_mask = hybrid_zero.mask

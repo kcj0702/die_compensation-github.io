@@ -25,6 +25,20 @@ __pycache__/
 AJ_ENV/
 .pytest_cache/
 
+# CAD sources are company data: never commit STP/STEP/CATPart anywhere in the tree, whatever folder
+# they are copied into for local checks (the logic that reads them is committed, the files are not).
+*.stp
+*.STP
+*.step
+*.STEP
+*.stpZ
+*.CATPart
+*.catpart
+*.CATPRODUCT
+*.CATProduct
+*.stl
+*.STL
+
 # Local backups created while separating review work from commit-ready code
 .local_archive/
 

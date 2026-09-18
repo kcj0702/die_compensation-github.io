@@ -20,7 +20,7 @@ _mask_contours_as_lines = hybrid_ui._mask_contours_as_lines
 
 class HybridUiEditPointTests(unittest.TestCase):
 
-    def test_case2_failure_is_not_returned_or_cached_as_case1(self) -> None:
+    def test_contour_route_failure_is_not_returned_or_cached_as_old_case(self) -> None:
         image = np.zeros((8, 12, 3), dtype=np.uint8)
         base = SimpleNamespace(
             values=np.zeros((8, 12), dtype=np.float32),
@@ -40,13 +40,13 @@ class HybridUiEditPointTests(unittest.TestCase):
             "zero_ratio": 0.8,
             "zero_count": 1,
         }
-        from zero_line_detection import case2_route_adapter as case2
+        from zero_line_detection import contour_route_zero
         from zero_line_detection import generate_final_hybrid_zero_line as hybrid
 
         with mock.patch.object(
             hybrid, "build_common_from_color_ramp", return_value=common
         ), mock.patch.object(
-            case2, "run_original_case2_pipeline", side_effect=ValueError("route unavailable")
+            contour_route_zero, "construct_zero_lines", side_effect=ValueError("route unavailable")
         ):
             with self.assertRaisesRegex(RuntimeError, "Case 2 경로 계산 실패"):
                 hybrid_ui._detect_hybrid_zero_line_uncached(
